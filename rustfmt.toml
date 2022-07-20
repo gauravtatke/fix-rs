@@ -1,0 +1,5 @@
+edition = "2018"
+attr_fn_like_width=90
+fn_args_layout="Compressed"
+fn_call_width=90
+chain_width=90

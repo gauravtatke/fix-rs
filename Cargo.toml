@@ -1,0 +1,26 @@
+[package]
+name = "fix-rs"
+version = "0.1.0"
+edition = "2021"
+build="build/main.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+roxmltree = "0.14.1"
+chrono = "0.4.19"
+indexmap = "1.9.1"
+thiserror = "1.0.31"
+
+[build-dependencies]
+roxmltree = "0.14.1"
+yaserde = "0.8.0"
+yaserde_derive = "0.8.0"
+xml-rs = "0.8.4"
+handlebars = "4.3.1"
+serde = { version = "1.0", features = ["derive"] }
+heck = "0.4.0"
+
+[dev-dependencies]
+lazy_static = "1.4.0"
+assert_matches = "1.5.0"
