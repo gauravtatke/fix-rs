@@ -143,10 +143,6 @@ impl DataDictionary {
         self.field_values.get(&tag)
     }
 
-    pub fn get_msg_group(&self, msg_type: &str, group_tag: u32) -> Option<&GroupInfo> {
-        self.groups.get(msg_type).and_then(|hmap| hmap.get(&group_tag))
-    }
-
     pub fn get_msg_required_field(&self, msg_type: &str) -> Option<&HashSet<u32>> {
         self.msg_required_fields.get(msg_type)
     }
@@ -155,11 +151,11 @@ impl DataDictionary {
         self.msg_fields.get(msg_type)
     }
 
-    pub fn is_group(&self, msg_type: &str, tag: u32) -> bool {
+    pub fn is_msg_group(&self, msg_type: &str, tag: u32) -> bool {
         self.groups.get(msg_type).and_then(|val_map| val_map.get(&tag)).is_some()
     }
 
-    pub fn get_group(&self, msg_type: &str, tag: u32) -> Option<&GroupInfo> {
+    pub fn get_msg_group(&self, msg_type: &str, tag: u32) -> Option<&GroupInfo> {
         self.groups.get(msg_type).and_then(|gi| gi.get(&tag))
     }
 
@@ -182,7 +178,9 @@ impl DataDictionary {
     pub fn is_header_field(&self, tag: u32) -> bool {
         self.is_msg_field(HEADER_ID, tag)
     }
+    /***************************************************************************************/
     /*********************** ALL PRIVATE METHODS BELOW *************************************/
+    /***************************************************************************************/
     fn set_field_name_number_type(&mut self, name: &str, number: u32, ty: &str) -> DResult<()> {
         if self.fields_by_name.contains_key(name) || self.fields_by_tag.contains_key(&number) {
             // return error
@@ -234,13 +232,11 @@ impl DataDictionary {
     fn set_group_info(&mut self, msg_type: &str, grp_num: u32, info: GroupInfo) {
         // msg_type is value of 35 tag i.e. "D" or "AE" etc
         // for headers, its literal `header`
-        self.groups.entry(msg_type.to_string()).and_modify(|hm| {
-            hm.entry(grp_num).or_insert(info);
-        });
+        self.groups.entry(msg_type.to_string()).or_default().insert(grp_num, info);
     }
 
     fn get_field_num(&self, fname: &str) -> Option<u32> {
-        self.fields_by_name.get(fname).map(|n| *n)
+        self.fields_by_name.get(fname).copied()
     }
 
     fn add_fields_and_values(&mut self, fields: Node) -> DResult<()> {
@@ -356,7 +352,7 @@ impl DataDictionary {
                     let comp_name = get_name_attr(&child)?;
                     let comp_node = components
                         .get(comp_name)
-                        .expect(format!("msgtype {}, component {}", msg_type, comp_name).as_str());
+                        .unwrap_or_else(|| panic!("msgtype {}, component {}", msg_type, comp_name));
                     // component inside component is only required if outer comp and this are req
                     // otherwise not required
                     let is_comp_required = comp_required && is_required;
@@ -394,7 +390,7 @@ impl DataDictionary {
             let message_category = get_attribute("msgcat", &m_node)?;
             let message_type = get_attribute("msgtype", &m_node)?;
             self.set_msg_name_type_cat(message_name, message_type, message_category)?;
-            self.add_xml_message(message_type, &m_node, &components, doc)?;
+            self.add_xml_message(message_type, &m_node, components, doc)?;
         }
         Ok(())
     }
@@ -419,7 +415,7 @@ impl DataDictionary {
                     let comp_name = get_name_attr(&child)?;
                     let comp_node = components
                         .get(comp_name)
-                        .expect(format!("msgtype {}, component {}", msg_type, comp_name).as_str());
+                        .unwrap_or_else(|| panic!("msgtype {}, component {}", msg_type, comp_name));
                     self.add_xml_component(msg_type, comp_node, comp_required, components, doc)?;
                 }
                 "group" => {
@@ -519,14 +515,12 @@ fn get_required_attr(node: &Node) -> DResult<bool> {
 fn get_number_attr(node: &Node) -> DResult<u32> {
     let number = get_attribute("number", node)?;
     match number.parse::<u32>() {
-        Ok(n) => return Ok(n),
-        Err(e) => {
-            return Err(XmlError::FieldNotParsed {
-                source: e,
-                field: number.to_string(),
-            })
-        }
-    };
+        Ok(n) => Ok(n),
+        Err(e) => Err(XmlError::FieldNotParsed {
+            source: e,
+            field: number.to_string(),
+        }),
+    }
 }
 
 fn get_begin_str_from_doc(root_node: Node) -> DResult<String> {
@@ -589,7 +583,7 @@ fn get_field_values(node: &Node) -> DResult<HashSet<String>> {
             return Err(XmlError::DuplicateField(format!(
                 "value {} for field {}",
                 value,
-                get_name_attr(&node)?
+                get_name_attr(node)?
             )));
         }
         field_values.insert(value.to_string());
@@ -640,21 +634,9 @@ mod tests {
     use std::fs;
 
     const XML_PATH: &str = "resources/FIX43.xml";
-
     const FIX_START: &str = r#"<fix type="FIX" major="4" minor="3" servicepack="0">"#;
-    const HEADER_STR: &str = r#"
-        <header>
-            <field name="BeginString" required="Y"/>
-            <field name="BodyLength" required="Y"/>
-            <field name="MsgType" required="Y"/>
-            <field name="SenderCompID" required="Y"/> 
-            <group name="NoHops" required="N">
-                <field name="HopCompID" required="N"/>
-                <field name="HopSendingTime" required="N"/>
-                <field name="HopRefID" required="N"/>
-            </group>
-        </header>
-    "#;
+    const FIX_END: &str = "</fix>";
+    const EMPTY_COMPS: &str = "<components></components>";
 
     lazy_static! {
         static ref XML: String = fs::read_to_string(XML_PATH).expect("test file read error");
@@ -679,15 +661,21 @@ mod tests {
         field_value_map
     }
 
-    fn add_fields_and_messages(fields: &str, msgs: &str, dd: &mut DataDictionary) -> DResult<()> {
+    fn get_dd_with_fields_and_messages(
+        fields: &str, msgs: &str, comps: &str,
+    ) -> DResult<DataDictionary> {
         // adds given fields and messages and forms the mini fix xml
         // uses this xml to create Document and parse the Document to create a datadictionary
-        let buff = format!("{}{}{}{}", FIX_START, msgs, fields, "</fix>");
+        let mut dd = DataDictionary::default();
+        let buff = format!("{}{}{}{}{}", FIX_START, msgs, comps, fields, FIX_END);
         let doc: Document = Document::parse(&buff)?;
         let field_node = lookup_node("fields", &doc)?;
         dd.add_fields_and_values(field_node)?;
+        let comps_node = lookup_node("components", &doc)?;
+        let comp_map = get_component_nodes_by_name(comps_node)?;
         let mesg_node = lookup_node("messages", &doc)?;
-        dd.add_all_xml_messages(&mesg_node, &NodeMap::new(), &doc)
+        dd.add_all_xml_messages(&mesg_node, &comp_map, &doc)?;
+        Ok(dd)
     }
 
     fn get_messages_and_types(doc: &Document) -> HashMap<String, String> {
@@ -940,8 +928,7 @@ mod tests {
             </fields> 
         "#;
 
-        let mut dd = DataDictionary::default();
-        let result = add_fields_and_messages(fields, message, &mut dd);
+        let result = get_dd_with_fields_and_messages(fields, message, EMPTY_COMPS);
         assert!(result.is_err());
         assert_matches!(result.unwrap_err(), XmlError::XmlNodeNotFound(_));
     }
@@ -975,13 +962,11 @@ mod tests {
             </fields> 
         "#;
 
-        let mut dd = DataDictionary::default();
-        let result = add_fields_and_messages(fields, msg_no_name, &mut dd);
+        let result = get_dd_with_fields_and_messages(fields, msg_no_name, EMPTY_COMPS);
         assert!(result.is_err(), "no error on msg name missing");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
 
-        dd = DataDictionary::default();
-        let result = add_fields_and_messages(fields, msg_empty_name, &mut dd);
+        let result = get_dd_with_fields_and_messages(fields, msg_empty_name, EMPTY_COMPS);
         assert!(result.is_err(), "no error on empty string in msgname");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
     }
@@ -1015,13 +1000,11 @@ mod tests {
             </fields> 
         "#;
 
-        let mut dd = DataDictionary::default();
-        let result = add_fields_and_messages(fields, msg_no_type, &mut dd);
+        let result = get_dd_with_fields_and_messages(fields, msg_no_type, EMPTY_COMPS);
         assert!(result.is_err(), "no error on msg type missing");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
 
-        dd = DataDictionary::default();
-        let result = add_fields_and_messages(fields, msg_empty_type, &mut dd);
+        let result = get_dd_with_fields_and_messages(fields, msg_empty_type, EMPTY_COMPS);
         assert!(result.is_err(), "no error on empty string in msgtype");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
     }
@@ -1079,5 +1062,122 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_msg_with_component() {
+        // message having one required component & one non-required
+        let msg = r#"
+        <messages>
+            <message name="MsgWithReqCompHavingFields" msgtype="6" msgcat="app">
+                <field name="IOIid" required="Y"/>
+                <field name="IOIRefID" required="N"/>
+                <component name="CompWithOnlyFields" required="Y"/>
+                <component name="Comp2WithFields" required="N"/>
+            </message>
+        </messages>
+        "#;
+        let component = r#"
+        <components>
+            <component name="CompWithOnlyFields">
+                <field name="Commission" required="Y"/>
+                <field name="CommType" required="N"/>
+            </component>
+            <component name="Comp2WithFields">
+                <field name="Commission123" required="Y"/>
+                <field name="CommType123" required="N"/>
+            </component>
+        </components>
+        "#;
+        let fields = r#"
+        <fields>
+            <field number="23" name="IOIid" type="STRING"/>
+            <field number="26" name="IOIRefID" type="STRING"/>
+            <field number="12" name="Commission" type="AMT"/>
+            <field number="13" name="CommType" type="CHAR"/>
+            <field number="123" name="Commission123" type="AMT"/>
+            <field number="133" name="CommType123" type="CHAR"/>
+        </fields>
+        "#;
+        let result = get_dd_with_fields_and_messages(fields, msg, component);
+        assert!(result.is_ok());
+        let dd = result.unwrap();
+        let msg_fields = dd.get_msg_fields("6");
+        let req_fields = dd.get_msg_required_field("6");
+        assert!(msg_fields.is_some());
+        assert!(req_fields.is_some());
+        let msg_fields = msg_fields.unwrap();
+        let req_fields = req_fields.unwrap();
+        let expected_fields: HashSet<u32> = HashSet::from([23, 26, 12, 13, 123, 133]);
+        // required comps req field is required, else all are non-required for msg
+        let expected_req_fields: HashSet<u32> = HashSet::from([23, 12]);
+        assert!(expected_fields.eq(msg_fields));
+        assert!(expected_req_fields.eq(req_fields));
+    }
+
+    #[test]
+    fn test_msg_with_groups() {
+        // 2 groups, one is required, one is not
+        let msgs = r#"
+        <messages>
+        <message name="MessageWithReqAndNonReqGroups" msgtype="8" msgcat="app">
+            <field name="OrderID" required="Y"/>
+            <field name="ClOrdID" required="N"/>
+            <group name="NoContraBrokers" required="Y"> <!-- required group -->
+                <field name="ContraBroker" required="Y"/>
+                <field name="ContraTradeQty" required="N"/>
+            </group>
+            <field name="OrigClOrdID" required="N"/>
+            <group name="NoContAmts" required="N">
+                <field name="ContAmtType" required="Y"/>
+                <field name="ContAmtValue" required="N"/>
+            </group>
+        </message>
+        </messages>
+        "#;
+
+        let fields = r#"
+        <fields>
+            <field number="37" name="OrderID" type="STRING"/>
+            <field number="11" name="ClOrdID" type="STRING"/>
+            <field number="382" name="NoContraBrokers" type="NUMINGROUP"/>
+            <field number="375" name="ContraBroker" type="STRING"/>
+            <field number="437" name="ContraTradeQty" type="QTY"/>
+            <field number="41" name="OrigClOrdID" type="STRING"/>
+            <field number="518" name="NoContAmts" type="NUMINGROUP"/>
+            <field number="519" name="ContAmtType" type="INT"/>
+            <field number="520" name="ContAmtValue" type="FLOAT"/>
+        </fields>
+        "#;
+
+        let dd = get_dd_with_fields_and_messages(fields, msgs, EMPTY_COMPS);
+        assert!(dd.is_ok());
+        let dd = dd.unwrap();
+        let expected_fields: HashSet<u32> = HashSet::from([37, 11, 382, 41, 518]);
+        let expected_req_fields: HashSet<u32> = HashSet::from([37, 382]);
+        let msg_fields = dd.get_msg_fields("8").unwrap().to_owned();
+        let msg_req_fields = dd.get_msg_required_field("8").unwrap().to_owned();
+        assert_eq!(expected_fields, msg_fields);
+        assert_eq!(expected_req_fields, msg_req_fields);
+
+        // verify that groups dd and field order are correct
+        assert!(dd.is_msg_group("8", 382), "dd groups - {:#?}", &dd.groups);
+        let no_contra_info = dd.get_msg_group("8", 382).unwrap();
+        let no_contra_dd = no_contra_info.get_data_dictionary();
+        let no_contra_delim = no_contra_info.get_delimiter();
+        let exp_msg_grp_fields = HashSet::from([375u32, 437u32]);
+        let msg_grp_flds = no_contra_dd.get_msg_fields("8").unwrap().to_owned();
+        assert_eq!(exp_msg_grp_fields, msg_grp_flds);
+        let exp_grp_req_flds = HashSet::from([375u32]);
+        let msg_grp_req_flds = no_contra_dd.get_msg_required_field("8").unwrap().to_owned();
+        assert_eq!(exp_grp_req_flds, msg_grp_req_flds);
+
+        // verify that group delimiter is the first field in xml
+        assert_eq!(375u32, no_contra_delim);
+
+        // verify the field order
+        let no_contra_fo = no_contra_dd.get_ordered_fields();
+        let expected_order = vec![375u32, 437u32];
+        assert_eq!(expected_order, no_contra_fo);
     }
 }

@@ -257,8 +257,8 @@ fn parse_group(
     dd: &DataDictionary,
 ) -> SessResult<()> {
     let rg = dd
-        .get_group(HEADER_ID, fld.tag())
-        .ok_or_else(|| SessionRejectError::tag_not_defined_for_msg())?;
+        .get_msg_group(HEADER_ID, fld.tag())
+        .ok_or_else(SessionRejectError::tag_not_defined_for_msg)?;
     let rg_dd = rg.get_data_dictionary();
     let field_order = rg_dd.get_ordered_fields();
     let group_count_tag = fld.tag();
@@ -281,12 +281,12 @@ fn parse_group(
             previous_offset = -1;
             let group_instance = &mut group[actual_count as usize];
             group_instance.set_field_order(&field_order);
-            if rg_dd.is_group(msg_type, next_field.tag()) {
+            if rg_dd.is_msg_group(msg_type, next_field.tag()) {
                 parse_group(v, msg_type, &next_field, group_instance, dd)?;
             } else {
                 group_instance.set_field(next_field);
             }
-        } else if rg_dd.is_group(msg_type, next_field.tag()) {
+        } else if rg_dd.is_msg_group(msg_type, next_field.tag()) {
             if actual_count < 0 {
                 return Err(SessionRejectError::required_tag_missing_err());
             }
@@ -333,7 +333,7 @@ fn parse_header(
             // start of body
             v.push_front(fld);
             return Ok(());
-        } else if dd.is_group(HEADER_ID, fld.tag()) {
+        } else if dd.is_msg_group(HEADER_ID, fld.tag()) {
             parse_group(v, HEADER_ID, &fld, header, dd)?;
         } else {
             header.set_field(fld);
@@ -357,7 +357,7 @@ fn parse_body(
             v.push_front(fld);
             return Ok(());
         }
-        if dd.is_group(msg_type.as_str(), fld.tag()) {
+        if dd.is_msg_group(msg_type.as_str(), fld.tag()) {
             parse_group(v, &msg_type, &fld, &mut msg.body, dd)?;
         } else {
             msg.set_field(fld);
