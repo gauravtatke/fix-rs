@@ -266,12 +266,12 @@ impl DataDictionary {
     }
 
     fn add_xml_group(
-        &mut self, msg_type: &str, group_node: &Node, components: &NodeMap, doc: &Document,
+        &mut self, msg_type: &str, group_node: &Node, is_required: bool, components: &NodeMap,
+        doc: &Document,
     ) -> DResult<()> {
         // process the group node and add fields, components, subgroup
         // for the message name and message type
         let mut group_dd = DataDictionary::default();
-        let group_required = get_required_attr(group_node)?;
         let mut delimiter = 0u32;
         for grp_child in group_node.children().filter(|&n| n.is_element()) {
             let child_name = grp_child.tag_name().name();
@@ -281,16 +281,20 @@ impl DataDictionary {
                     let required = get_required_attr(&grp_child)?;
                     // add this field to group_dd for the msg_name
                     // this field is required if group is required and field is required
-                    let required = required && group_required;
+                    let required = required && is_required;
                     group_dd.add_fields_to(msg_type, fname, required, doc)?
                 }
                 "component" => {
                     // this component fields are also added in group_dd for msg_name
                     let comp_name = get_name_attr(&grp_child)?;
-                    let comp_required = group_required && get_required_attr(&grp_child)?;
+                    let comp_required = get_required_attr(&grp_child)?;
+                    // required attrib for processing componend does not depend on outer node
+                    let comp_node = components
+                        .get(comp_name)
+                        .unwrap_or_else(|| panic!("msg: {}, comp: {}", msg_type, comp_name));
                     group_dd.add_xml_component(
                         msg_type,
-                        &grp_child,
+                        &comp_node,
                         comp_required,
                         components,
                         doc,
@@ -299,17 +303,16 @@ impl DataDictionary {
                 "group" => {
                     // this is subgroup inside group
                     let sub_group_name = get_name_attr(&grp_child)?;
-                    let sub_group_required = get_required_attr(&grp_child)? && group_required;
+                    let sub_group_req = get_required_attr(&grp_child)?;
+                    // this subgroup tag is req if parent is required otherwise not
+                    let is_grp_req = sub_group_req && is_required;
                     // this subgroup fields should be added to group's dd but under msg_type
-                    let field = group_dd.add_fields_to(
-                        msg_type,
-                        sub_group_name,
-                        sub_group_required,
-                        doc,
-                    )?;
+                    let field =
+                        group_dd.add_fields_to(msg_type, sub_group_name, is_grp_req, doc)?;
                     // process group node separately to create GroupInfo
                     // and add it to group dd. Mapping should be with msg_type
-                    group_dd.add_xml_group(msg_type, &grp_child, components, doc)?;
+                    // "required" for subgroup is processed independently of parent
+                    group_dd.add_xml_group(msg_type, &grp_child, sub_group_req, components, doc)?;
                     field
                 }
                 _ => return Err(XmlError::UnknownXmlTag(child_name.to_string())),
@@ -348,26 +351,27 @@ impl DataDictionary {
                 "component" => {
                     // most likely components do not contain components but
                     // adding this for completeness.
-                    let comp_required = get_required_attr(&child)?;
+                    let is_comp_required = get_required_attr(&child)?;
                     let comp_name = get_name_attr(&child)?;
                     let comp_node = components
                         .get(comp_name)
                         .unwrap_or_else(|| panic!("msgtype {}, component {}", msg_type, comp_name));
-                    // component inside component is only required if outer comp and this are req
-                    // otherwise not required
-                    let is_comp_required = comp_required && is_required;
+                    // "required" attribute of each comp inside comp is treated independently
+                    // it does no depend on outer component.
                     self.add_xml_component(msg_type, comp_node, is_comp_required, components, doc)?
                 }
                 "group" => {
                     // this group field is added to message fields
                     let group_name = get_name_attr(&child)?;
-                    // if component is required && group inside component is required then
-                    // group is required for message
-                    let group_required = get_required_attr(&child)? && is_required;
-                    let field = self.add_fields_to(msg_type, group_name, group_required, doc)?;
+                    // "required" for group tag inside component is required if component is
+                    // required otherwise group tag is added as not required.
+                    let group_required = get_required_attr(&child)?;
+                    let is_grp_req = group_required && is_required;
+                    let field = self.add_fields_to(msg_type, group_name, is_grp_req, doc)?;
                     // process group node separately to create GroupInfo
-                    // and add it to dd for the message
-                    self.add_xml_group(msg_type, &child, components, doc)?;
+                    // and add it to dd for the message. NOTE: while processing group, only group's
+                    // "required" attrib is considered. it does not depend on outer node's required
+                    self.add_xml_group(msg_type, &child, group_required, components, doc)?;
                     field
                 }
                 _ => return Err(XmlError::UnknownXmlTag(child_name.to_string())),
@@ -425,7 +429,7 @@ impl DataDictionary {
                     self.add_fields_to(msg_type, group_name, group_required, doc)?;
                     // process group node separately to create GroupInfo
                     // and add it to dd for the message type
-                    self.add_xml_group(msg_type, &child, components, doc)?;
+                    self.add_xml_group(msg_type, &child, group_required, components, doc)?;
                 }
                 _ => return Err(XmlError::UnknownXmlTag(child_tag_name.to_string())),
             };
@@ -637,6 +641,31 @@ mod tests {
     const FIX_START: &str = r#"<fix type="FIX" major="4" minor="3" servicepack="0">"#;
     const FIX_END: &str = "</fix>";
     const EMPTY_COMPS: &str = "<components></components>";
+    const FIELDS: &str = r#"
+    <fields>
+        <field number="1" name="cfield1" type="STRING"/>
+        <field number="2" name="cfield2" type="STRING"/>
+        <field number="3" name="cfield3" type="STRING"/>
+        <field number="4" name="cfield4" type="STRING"/>
+        <field number="11" name="gfield11" type="CHAR"/>
+        <field number="12" name="gfield12" type="STRING"/>
+        <field number="21" name="gfield21" type="STRING"/>
+        <field number="22" name="gfield22" type="STRING"/>
+        <field number="31" name="gfield31" type="STRING"/>
+        <field number="32" name="gfield32" type="NUMINGROUP"/>
+        <field number="41" name="gfield41" type="NUMINGROUP"/>
+        <field number="42" name="gfield42" type="STRING"/>
+        <field number="91" name="group1" type="QTY"/>
+        <field number="92" name="group2" type="NUMINGROUP"/>
+        <field number="93" name="group3" type="STRING"/>
+        <field number="94" name="group4" type="STRING"/>
+        <field number="95" name="group5" type="STRING"/>
+        <field number="96" name="group6" type="STRING"/>
+        <field number="97" name="group7" type="STRING"/>
+        <field number="101" name="mfield1" type="STRING"/>
+        <field number="102" name="mfield2" type="NUMINGROUP"/>
+    </fields>
+    "#;
 
     lazy_static! {
         static ref XML: String = fs::read_to_string(XML_PATH).expect("test file read error");
@@ -920,15 +949,7 @@ mod tests {
             </messages> 
         "#;
 
-        let fields: &str = r#"
-            <fields>
-                <field number="639" name="PriceImprovement" type="PRICEOFFSET"/>
-                <field number="640" name="Price2" type="PRICE"/>
-                <field number="641" name="PriceOffset" type="PRICEOFFSET"/>
-            </fields> 
-        "#;
-
-        let result = get_dd_with_fields_and_messages(fields, message, EMPTY_COMPS);
+        let result = get_dd_with_fields_and_messages(FIELDS, message, EMPTY_COMPS);
         assert!(result.is_err());
         assert_matches!(result.unwrap_err(), XmlError::XmlNodeNotFound(_));
     }
@@ -939,8 +960,8 @@ mod tests {
         let msg_no_name = r#"
             <messages>
                 <message msgtype="8" msgcat="app">
-                    <field name="OrderID" required="Y"/>
-                    <field name="SecondaryOrderID" required="N"/>
+                    <field name="mfield1" required="Y"/>
+                    <field name="mfield2" required="N"/>
                 </message>
             </messages> 
         "#;
@@ -948,25 +969,17 @@ mod tests {
         let msg_empty_name = r#"
             <messages>
                 <message name="" msgtype="8" msgcat="app">
-                    <field name="OrderID" required="Y"/>
-                    <field name="SecondaryOrderID" required="N"/>
+                    <field name="mfield1" required="Y"/>
+                    <field name="mfield2" required="N"/>
                 </message>
             </messages> 
         "#;
 
-        let fields: &str = r#"
-            <fields>
-                <field number="639" name="PriceImprovement" type="PRICEOFFSET"/>
-                <field number="640" name="Price2" type="PRICE"/>
-                <field number="641" name="PriceOffset" type="PRICEOFFSET"/>
-            </fields> 
-        "#;
-
-        let result = get_dd_with_fields_and_messages(fields, msg_no_name, EMPTY_COMPS);
+        let result = get_dd_with_fields_and_messages(FIELDS, msg_no_name, EMPTY_COMPS);
         assert!(result.is_err(), "no error on msg name missing");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
 
-        let result = get_dd_with_fields_and_messages(fields, msg_empty_name, EMPTY_COMPS);
+        let result = get_dd_with_fields_and_messages(FIELDS, msg_empty_name, EMPTY_COMPS);
         assert!(result.is_err(), "no error on empty string in msgname");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
     }
@@ -977,8 +990,8 @@ mod tests {
         let msg_no_type = r#"
             <messages>
                 <message name="ExecutionReport" msgcat="app">
-                    <field name="OrderID" required="Y"/>
-                    <field name="SecondaryOrderID" required="N"/>
+                    <field name="mfield1" required="Y"/>
+                    <field name="mfield2" required="N"/>
                 </message>
             </messages> 
         "#;
@@ -986,25 +999,17 @@ mod tests {
         let msg_empty_type = r#"
             <messages>
                 <message name="ExecutionReport" msgtype="" msgcat="app">
-                    <field name="OrderID" required="Y"/>
-                    <field name="SecondaryOrderID" required="N"/>
+                    <field name="mfield1" required="Y"/>
+                    <field name="mfield2" required="N"/>
                 </message>
             </messages> 
         "#;
 
-        let fields: &str = r#"
-            <fields>
-                <field number="639" name="PriceImprovement" type="PRICEOFFSET"/>
-                <field number="640" name="Price2" type="PRICE"/>
-                <field number="641" name="PriceOffset" type="PRICEOFFSET"/>
-            </fields> 
-        "#;
-
-        let result = get_dd_with_fields_and_messages(fields, msg_no_type, EMPTY_COMPS);
+        let result = get_dd_with_fields_and_messages(FIELDS, msg_no_type, EMPTY_COMPS);
         assert!(result.is_err(), "no error on msg type missing");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
 
-        let result = get_dd_with_fields_and_messages(fields, msg_empty_type, EMPTY_COMPS);
+        let result = get_dd_with_fields_and_messages(FIELDS, msg_empty_type, EMPTY_COMPS);
         assert!(result.is_err(), "no error on empty string in msgtype");
         assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
     }
@@ -1070,8 +1075,8 @@ mod tests {
         let msg = r#"
         <messages>
             <message name="MsgWithReqCompHavingFields" msgtype="6" msgcat="app">
-                <field name="IOIid" required="Y"/>
-                <field name="IOIRefID" required="N"/>
+                <field name="mfield1" required="Y"/>
+                <field name="mfield2" required="N"/>
                 <component name="CompWithOnlyFields" required="Y"/>
                 <component name="Comp2WithFields" required="N"/>
             </message>
@@ -1080,26 +1085,16 @@ mod tests {
         let component = r#"
         <components>
             <component name="CompWithOnlyFields">
-                <field name="Commission" required="Y"/>
-                <field name="CommType" required="N"/>
+                <field name="cfield1" required="Y"/>
+                <field name="cfield2" required="N"/>
             </component>
             <component name="Comp2WithFields">
-                <field name="Commission123" required="Y"/>
-                <field name="CommType123" required="N"/>
+                <field name="gfield11" required="Y"/>
+                <field name="gfield12" required="N"/>
             </component>
         </components>
         "#;
-        let fields = r#"
-        <fields>
-            <field number="23" name="IOIid" type="STRING"/>
-            <field number="26" name="IOIRefID" type="STRING"/>
-            <field number="12" name="Commission" type="AMT"/>
-            <field number="13" name="CommType" type="CHAR"/>
-            <field number="123" name="Commission123" type="AMT"/>
-            <field number="133" name="CommType123" type="CHAR"/>
-        </fields>
-        "#;
-        let result = get_dd_with_fields_and_messages(fields, msg, component);
+        let result = get_dd_with_fields_and_messages(FIELDS, msg, component);
         assert!(result.is_ok());
         let dd = result.unwrap();
         let msg_fields = dd.get_msg_fields("6");
@@ -1108,9 +1103,9 @@ mod tests {
         assert!(req_fields.is_some());
         let msg_fields = msg_fields.unwrap();
         let req_fields = req_fields.unwrap();
-        let expected_fields: HashSet<u32> = HashSet::from([23, 26, 12, 13, 123, 133]);
+        let expected_fields: HashSet<u32> = HashSet::from([101, 102, 1, 2, 11, 12]);
         // required comps req field is required, else all are non-required for msg
-        let expected_req_fields: HashSet<u32> = HashSet::from([23, 12]);
+        let expected_req_fields: HashSet<u32> = HashSet::from([101, 1]);
         assert!(expected_fields.eq(msg_fields));
         assert!(expected_req_fields.eq(req_fields));
     }
@@ -1121,63 +1116,290 @@ mod tests {
         let msgs = r#"
         <messages>
         <message name="MessageWithReqAndNonReqGroups" msgtype="8" msgcat="app">
-            <field name="OrderID" required="Y"/>
-            <field name="ClOrdID" required="N"/>
-            <group name="NoContraBrokers" required="Y"> <!-- required group -->
-                <field name="ContraBroker" required="Y"/>
-                <field name="ContraTradeQty" required="N"/>
+            <field name="mfield1" required="Y"/>
+            <group name="group1" required="Y">
+                <field name="gfield11" required="Y"/>
+                <field name="gfield12" required="N"/>
             </group>
-            <field name="OrigClOrdID" required="N"/>
-            <group name="NoContAmts" required="N">
-                <field name="ContAmtType" required="Y"/>
-                <field name="ContAmtValue" required="N"/>
+            <field name="mfield2" required="N"/>
+            <group name="group2" required="N">
+                <field name="gfield21" required="Y"/>
+                <field name="gfield22" required="N"/>
             </group>
         </message>
         </messages>
         "#;
 
-        let fields = r#"
-        <fields>
-            <field number="37" name="OrderID" type="STRING"/>
-            <field number="11" name="ClOrdID" type="STRING"/>
-            <field number="382" name="NoContraBrokers" type="NUMINGROUP"/>
-            <field number="375" name="ContraBroker" type="STRING"/>
-            <field number="437" name="ContraTradeQty" type="QTY"/>
-            <field number="41" name="OrigClOrdID" type="STRING"/>
-            <field number="518" name="NoContAmts" type="NUMINGROUP"/>
-            <field number="519" name="ContAmtType" type="INT"/>
-            <field number="520" name="ContAmtValue" type="FLOAT"/>
-        </fields>
-        "#;
-
-        let dd = get_dd_with_fields_and_messages(fields, msgs, EMPTY_COMPS);
+        let dd = get_dd_with_fields_and_messages(FIELDS, msgs, EMPTY_COMPS);
         assert!(dd.is_ok());
         let dd = dd.unwrap();
-        let expected_fields: HashSet<u32> = HashSet::from([37, 11, 382, 41, 518]);
-        let expected_req_fields: HashSet<u32> = HashSet::from([37, 382]);
+        let expected_fields: HashSet<u32> = HashSet::from([101, 102, 91, 92]);
+        let expected_req_fields: HashSet<u32> = HashSet::from([101, 91]);
         let msg_fields = dd.get_msg_fields("8").unwrap().to_owned();
         let msg_req_fields = dd.get_msg_required_field("8").unwrap().to_owned();
         assert_eq!(expected_fields, msg_fields);
         assert_eq!(expected_req_fields, msg_req_fields);
 
         // verify that groups dd and field order are correct
-        assert!(dd.is_msg_group("8", 382), "dd groups - {:#?}", &dd.groups);
-        let no_contra_info = dd.get_msg_group("8", 382).unwrap();
-        let no_contra_dd = no_contra_info.get_data_dictionary();
-        let no_contra_delim = no_contra_info.get_delimiter();
-        let exp_msg_grp_fields = HashSet::from([375u32, 437u32]);
-        let msg_grp_flds = no_contra_dd.get_msg_fields("8").unwrap().to_owned();
+        // for req group
+        assert!(dd.is_msg_group("8", 91), "dd groups - {:#?}", &dd.groups);
+        let group1_info = dd.get_msg_group("8", 91).unwrap();
+        let group1_dd = group1_info.get_data_dictionary();
+        let group1_delim = group1_info.get_delimiter();
+        let exp_msg_grp_fields = HashSet::from([11u32, 12u32]);
+        let msg_grp_flds = group1_dd.get_msg_fields("8").unwrap().to_owned();
         assert_eq!(exp_msg_grp_fields, msg_grp_flds);
-        let exp_grp_req_flds = HashSet::from([375u32]);
-        let msg_grp_req_flds = no_contra_dd.get_msg_required_field("8").unwrap().to_owned();
+        let exp_grp_req_flds = HashSet::from([11u32]);
+        let msg_grp_req_flds = group1_dd.get_msg_required_field("8").unwrap().to_owned();
         assert_eq!(exp_grp_req_flds, msg_grp_req_flds);
 
         // verify that group delimiter is the first field in xml
-        assert_eq!(375u32, no_contra_delim);
+        assert_eq!(11u32, group1_delim);
 
         // verify the field order
-        let no_contra_fo = no_contra_dd.get_ordered_fields();
-        let expected_order = vec![375u32, 437u32];
-        assert_eq!(expected_order, no_contra_fo);
+        let group1_fo = group1_dd.get_ordered_fields();
+        let expected_order = vec![11u32, 12u32];
+        assert_eq!(expected_order, group1_fo);
+
+        // for non-req group
+        assert!(dd.is_msg_group("8", 92), "dd groups - {:#?}", &dd.groups);
+        let group2_info = dd.get_msg_group("8", 92).unwrap();
+        let group2_dd = group2_info.get_data_dictionary();
+        let group2_delim = group2_info.get_delimiter();
+        let exp_msg_grp_fields = HashSet::from([21u32, 22u32]);
+        let msg_grp_flds = group2_dd.get_msg_fields("8").unwrap().to_owned();
+        assert_eq!(exp_msg_grp_fields, msg_grp_flds);
+        let msg_grp_req_flds = group2_dd.get_msg_required_field("8");
+        assert!(msg_grp_req_flds.is_none()); // because grp is not req, all its fields are not-req
+
+        // verify that group delimiter is the first field in xml
+        assert_eq!(21u32, group2_delim);
+
+        // verify the field order
+        let group2_fo = group2_dd.get_ordered_fields();
+        let expected_order = vec![21u32, 22u32];
+        assert_eq!(expected_order, group2_fo);
+    }
+
+    fn test_all() {
+        let buff = fs::read_to_string("/Users/gauravtatke/Desktop/fixtest.xml").unwrap();
+        let doc = Document::parse(&buff).unwrap();
+        let messages = lookup_node("messages", &doc).unwrap();
+        let mut field_names: Vec<&str> = Vec::new();
+        // let fields: HashMap<String, u32> =
+        //     get_field_num_to_name(&doc).into_iter().map(|(key, val)| (val, key)).collect();
+        for fld_node in messages
+            .descendants()
+            .filter(|n| n.is_element() && (n.has_tag_name("field") || n.has_tag_name("group")))
+        {
+            let field_name = get_name_attr(&fld_node).unwrap();
+            field_names.push(field_name);
+        }
+
+        let components = lookup_node("components", &doc).unwrap();
+        for fld_node in components
+            .descendants()
+            .filter(|n| n.is_element() && (n.has_tag_name("field") || n.has_tag_name("group")))
+        {
+            let field_name = get_name_attr(&fld_node).unwrap();
+            field_names.push(field_name);
+        }
+
+        field_names.sort();
+        field_names.dedup();
+        println!("fields: {:?}, size: {}", &field_names, field_names.len());
+    }
+
+    #[test]
+    fn test_req_comp_having_group() {
+        // both components are required
+        // one component has req group, one component has non-req group
+        let msg = r#"
+        <messages>
+        <message name="MsgWithReqCompHavingReqGroups" msgtype="6" msgcat="app">
+            <field name="mfield1" required="Y"/>
+            <component name="CompWithFieldAndNonReqGroup" required="Y"/>
+            <field name="mfield2" required="N"/>
+            <component name="CompWithFieldsAndReqGroup" required="Y"/>
+        </message>
+        </messages>
+        "#;
+        let comps = r#"
+        <components>
+        <component name="CompWithFieldAndNonReqGroup">
+            <field name="cfield1" required="Y"/>
+            <field name="cfield2" required="N"/>
+            <group name="group1" required="N">
+                <field name="gfield11" required="Y"/>
+                <field name="gfield12" required="N"/>
+            </group>
+        </component>
+        <component name="CompWithFieldsAndReqGroup">
+            <field name="cfield3" required="Y"/>
+            <field name="cfield4" required="N"/>
+            <group name="group2" required="Y">
+                <field name="gfield21" required="Y"/>
+                <field name="gfield22" required="N"/>
+            </group>
+        </component>
+        </components>
+        "#;
+        let dd = get_dd_with_fields_and_messages(FIELDS, msg, comps).unwrap();
+        let exp_fields = HashSet::from([101, 102, 1, 2, 3, 4, 91, 92]);
+        let msg_field = dd.get_msg_fields("6").cloned().unwrap();
+        assert_eq!(exp_fields, msg_field);
+        let exp_req_fields = HashSet::from([101, 1, 3, 92]);
+        let msg_req_fields = dd.get_msg_required_field("6").cloned().unwrap();
+        assert_eq!(exp_req_fields, msg_req_fields);
+
+        // verify group 1
+        assert!(dd.is_msg_group("6", 91));
+        let group1_info = dd.get_msg_group("6", 91).unwrap();
+        let group1_dd = group1_info.get_data_dictionary();
+        let grp1_field = group1_dd.get_msg_fields("6").unwrap();
+        let exp_grp1_fields: HashSet<u32> = HashSet::from([11, 12]);
+
+        // group1 is non-req in component, so its fields are non-req
+        let grp1_req_fields = group1_dd.get_msg_required_field("6");
+        assert!(grp1_req_fields.is_none());
+        assert_eq!(vec![11, 12], group1_dd.get_ordered_fields());
+        assert_eq!(11, group1_info.get_delimiter());
+
+        // verify group 2
+        assert!(dd.is_msg_group("6", 92));
+        let group2_info = dd.get_msg_group("6", 92).unwrap();
+        let group2_dd = group2_info.get_data_dictionary();
+        let grp2_field = group2_dd.get_msg_fields("6").cloned().unwrap();
+        assert_eq!(HashSet::from([21, 22]), grp2_field);
+
+        // group2 is req in component, so its fields are req
+        let grp2_req_fields = group2_dd.get_msg_required_field("6");
+        assert!(grp2_req_fields.is_some());
+        assert_eq!(HashSet::from([21]), grp2_req_fields.cloned().unwrap());
+        assert_eq!(vec![21, 22], group2_dd.get_ordered_fields());
+        assert_eq!(21, group2_info.get_delimiter());
+    }
+
+    #[test]
+    fn test_non_req_comp_having_group() {
+        // both components are not required
+        let msg = r#"
+        <messages>
+        <message name="MsgWithReqCompHavingReqGroups" msgtype="6" msgcat="app">
+            <field name="mfield1" required="Y"/>
+            <component name="CompWithFieldAndNonReqGroup" required="N"/>
+            <field name="mfield2" required="N"/>
+            <component name="CompWithFieldsAndReqGroup" required="N"/>
+        </message>
+        </messages>
+        "#;
+        let comps = r#"
+        <components>
+        <component name="CompWithFieldAndNonReqGroup">
+            <field name="cfield1" required="Y"/>
+            <field name="cfield2" required="N"/>
+            <group name="group1" required="N">
+                <field name="gfield11" required="Y"/>
+                <field name="gfield12" required="N"/>
+            </group>
+        </component>
+        <component name="CompWithFieldsAndReqGroup">
+            <field name="cfield3" required="Y"/>
+            <field name="cfield4" required="N"/>
+            <group name="group2" required="Y">
+                <field name="gfield21" required="Y"/>
+                <field name="gfield22" required="N"/>
+            </group>
+        </component>
+        </components>
+        "#;
+        let dd = get_dd_with_fields_and_messages(FIELDS, msg, comps).unwrap();
+        let exp_fields = HashSet::from([101, 102, 1, 2, 3, 4, 91, 92]);
+        let msg_field = dd.get_msg_fields("6").cloned().unwrap();
+        assert_eq!(exp_fields, msg_field);
+        let exp_req_fields = HashSet::from([101]);
+        let msg_req_fields = dd.get_msg_required_field("6").cloned().unwrap();
+        assert_eq!(exp_req_fields, msg_req_fields);
+
+        // verify group 1
+        assert!(dd.is_msg_group("6", 91));
+        let group1_info = dd.get_msg_group("6", 91).unwrap();
+        let group1_dd = group1_info.get_data_dictionary();
+        let grp1_field = group1_dd.get_msg_fields("6").unwrap();
+        let exp_grp1_fields: HashSet<u32> = HashSet::from([11, 12]);
+
+        // every field is not required in this case
+        let grp1_req_fields = group1_dd.get_msg_required_field("6");
+        assert!(grp1_req_fields.is_none());
+        assert_eq!(vec![11, 12], group1_dd.get_ordered_fields());
+        assert_eq!(11, group1_info.get_delimiter());
+
+        // verify group 2, group 2 is required
+        assert!(dd.is_msg_group("6", 92));
+        let group2_info = dd.get_msg_group("6", 92).unwrap();
+        let group2_dd = group2_info.get_data_dictionary();
+        let grp2_field = group2_dd.get_msg_fields("6").cloned().unwrap();
+        assert_eq!(HashSet::from([21, 22]), grp2_field);
+        let grp2_req_fields = group2_dd.get_msg_required_field("6");
+        assert!(grp2_req_fields.is_some(), "group2 req fields {:?}", grp2_req_fields);
+        assert_eq!(HashSet::from([21]), grp2_req_fields.cloned().unwrap());
+        assert_eq!(vec![21, 22], group2_dd.get_ordered_fields());
+        assert_eq!(21, group2_info.get_delimiter());
+    }
+
+    #[test]
+    fn test_group_having_only_component() {
+        // group has only a component and no field. this tests the first field delimiter case
+        // and tests field order in such case
+        let messages = r#"
+        <messages>
+        <message name="MsgWithReqGroupHavingReqComp" msgtype="B" msgcat="app">
+            <field name="mfield1" required="Y"/>
+            <group name="group5" required="Y">
+                <component name="CompWithOnlyFields" required="Y"/>
+            </group>
+            <field name="mfield2" required="N"/>
+        </message>
+        </messages>
+        "#;
+        let components = r#"
+        <components> 
+        <component name="CompWithOnlyFields">
+            <field name="cfield1" required="Y"/>
+            <field name="cfield2" required="N"/>
+        </component>
+        </components>
+        "#;
+        let dd = get_dd_with_fields_and_messages(FIELDS, messages, components).unwrap();
+        let grp5_info = dd.get_msg_group("B", 95);
+        assert!(grp5_info.is_some());
+        let grp5_info = grp5_info.unwrap();
+        let grp5_delim = grp5_info.get_delimiter();
+        assert_eq!(1, grp5_delim);
+        let group5_dd = grp5_info.get_data_dictionary();
+        assert_eq!(HashSet::from([1, 2]), group5_dd.get_msg_fields("B").cloned().unwrap());
+        assert_eq!(HashSet::from([1]), group5_dd.get_msg_required_field("B").cloned().unwrap());
+        assert_eq!(vec![1, 2], group5_dd.get_ordered_fields());
+    }
+
+    #[test]
+    fn test_req_group_with_comps() {
+        // group is required, 2 components inside group one comp is req, other is not
+        let messages = r#"
+        <messages>
+        <message name="MsgWithReqGroupHavingReqComp" msgtype="B" msgcat="app">
+            <field name="mfield1" required="Y"/>
+            <group name="group5" required="Y">
+                <component name="CompWithOnlyFields" required="Y"/>
+            </group>
+            <field name="mfield2" required="N"/>
+        </message>
+        </messages>
+        "#;
+    }
+
+    #[test]
+    fn test_non_req_group_with_comps() {
+        // group is not required. 2 components, one is req, other is not
     }
 }
