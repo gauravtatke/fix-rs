@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+use crate::message::*;
 use getset::Getters;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::io::prelude::*;
 use std::iter::{IntoIterator, Iterator};
 use std::str::FromStr;
+use std::sync::atomic::AtomicPtr;
 use std::{fmt, fmt::Formatter, fs};
-
-use crate::message::*;
-// use crate::network::*;
+use toml::{de, value, Value};
 
 use serde::Deserialize;
 
@@ -21,190 +21,61 @@ const FIX44_BEGIN_STR: &str = "FIX.4.4";
 const ACCEPTOR_CONN_TYPE: &str = "acceptor";
 const INITIATOR_CONN_TYPE: &str = "initiator";
 
-#[derive(Debug, Deserialize, Clone, Getters)]
-#[getset(get = "with_prefix")]
-struct Setting {
-    connection_type: Option<String>,
-    begin_string: Option<String>,
-    sender_compid: Option<String>,
-    sender_subid: Option<String>,
-    sender_locationid: Option<String>,
-    target_compid: Option<String>,
-    target_subid: Option<String>,
-    target_locationid: Option<String>,
-    on_behalf_of_compid: Option<String>,
-    on_behalf_of_subid: Option<String>,
-    on_behalf_of_locationid: Option<String>,
-    deliver_to_compid: Option<String>,
-    deliver_to_subid: Option<String>,
-    deliver_to_locationid: Option<String>,
-    socket_accept_port: Option<u16>,
-    socket_connect_host: Option<String>,
-    socket_connect_port: Option<u16>,
-    hearbeat_interval: Option<u16>,
-    reset_on_logon: Option<char>,
-    reset_on_logout: Option<char>,
-    reset_on_disconnect: Option<char>,
-    session_qualifier: Option<String>,
+const DEFAULT_SECTION_NAME: &str = "Default";
+const SESSION_SECTION_NAME: &str = "Session";
+const BEGIN_STRING_SETTING: &str = "begin_string";
+const SENDER_COMPID_SETTING: &str = "sender_comp_id";
+const SENDER_SUBID_SETTING: &str = "sender_sub_id";
+const SENDER_LOCATIONID_SETTING: &str = "sender_location_id";
+const TARGET_COMPID_SETTING: &str = "target_comp_id";
+const TARGET_SUBID_SETTING: &str = "target_sub_id";
+const TARGET_LOCATIONID_SETTING: &str = "target_location_id";
+const SESSION_QUALIFIER_SETTING: &str = "session_qualifier";
+
+#[derive(Debug, Default)]
+pub struct SessionSetting {
+    settings: HashMap<SessionId, toml::value::Table>,
 }
 
-impl FromStr for Setting {
+impl SessionSetting {
+    pub fn new(toml_path: &std::path::Path) -> Self {
+        let toml_str = fs::read_to_string(toml_path).expect("could not read config toml");
+        SessionSetting::from_str(&toml_str).expect("could not parse toml to Value")
+    }
+}
+
+impl FromStr for SessionSetting {
     type Err = toml::de::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        toml::from_str(s)
-    }
-}
-
-impl Setting {
-    fn is_empty(&self) -> bool {
-        self.connection_type.is_none()
-            && self.begin_string.is_none()
-            && self.sender_compid.is_none()
-            && self.sender_subid.is_none()
-            && self.sender_locationid.is_none()
-            && self.target_compid.is_none()
-            && self.target_locationid.is_none()
-            && self.target_subid.is_none()
-            && self.on_behalf_of_compid.is_none()
-            && self.on_behalf_of_subid.is_none()
-            && self.on_behalf_of_locationid.is_none()
-            && self.deliver_to_compid.is_none()
-            && self.deliver_to_subid.is_none()
-            && self.deliver_to_locationid.is_none()
-            && self.socket_accept_port.is_none()
-            && self.socket_connect_host.is_none()
-            && self.socket_connect_port.is_none()
-            && self.hearbeat_interval.is_none()
-            && self.reset_on_logon.is_none()
-            && self.reset_on_disconnect.is_none()
-            && self.reset_on_logout.is_none()
-            && self.session_qualifier.is_none()
-    }
-
-    fn merge_with(&mut self, other: &Self) {
-        // if value in self is not set but set in other, then other's value is updated in self
-        // otherwise self values are retained
-        if self.connection_type.is_none() {
-            self.connection_type = other.connection_type.clone();
-        }
-        if self.begin_string.is_none() {
-            self.begin_string = other.begin_string.clone();
-        }
-        if self.sender_compid.is_none() {
-            self.sender_compid = other.sender_compid.clone();
-        }
-        if self.sender_locationid.is_none() {
-            self.sender_locationid = other.sender_locationid.clone();
-        }
-        if self.sender_subid.is_none() {
-            self.sender_subid = other.sender_subid.clone();
-        }
-        if self.target_compid.is_none() {
-            self.target_compid = other.target_compid.clone();
-        }
-        if self.target_locationid.is_none() {
-            self.target_locationid = other.target_locationid.clone();
-        }
-        if self.target_subid.is_none() {
-            self.target_subid = other.target_subid.clone();
-        }
-        if self.on_behalf_of_compid.is_none() {
-            self.on_behalf_of_compid = other.on_behalf_of_compid.clone();
-        }
-        if self.on_behalf_of_locationid.is_none() {
-            self.on_behalf_of_locationid = other.on_behalf_of_locationid.clone();
-        }
-        if self.on_behalf_of_subid.is_none() {
-            self.on_behalf_of_subid = other.on_behalf_of_subid.clone();
-        }
-        self.deliver_to_compid =
-            self.deliver_to_compid.clone().or_else(|| other.deliver_to_compid.clone());
-        self.deliver_to_locationid =
-            self.deliver_to_locationid.clone().or_else(|| other.deliver_to_locationid.clone());
-        self.deliver_to_subid =
-            self.deliver_to_subid.clone().or_else(|| other.deliver_to_subid.clone());
-        self.socket_accept_port = self.socket_accept_port.or(other.socket_accept_port);
-        self.socket_connect_host =
-            self.socket_connect_host.clone().or_else(|| other.socket_connect_host.clone());
-        self.socket_connect_port = self.socket_connect_port.or(other.socket_connect_port);
-        self.hearbeat_interval = self.hearbeat_interval.or(other.hearbeat_interval);
-        self.reset_on_disconnect = self.reset_on_disconnect.or(other.reset_on_disconnect);
-        self.reset_on_logon = self.reset_on_logon.or(other.reset_on_logon);
-        self.reset_on_logout = self.reset_on_logout.or(other.reset_on_logout);
-        self.session_qualifier =
-            self.session_qualifier.clone().or_else(|| other.session_qualifier.clone());
-    }
-}
-
-fn validate(setting: &Setting) {
-    // validate the configuration
-    if setting.connection_type.is_none()
-        || setting.sender_compid.is_none()
-        || setting.target_compid.is_none()
-        || setting.begin_string.is_none()
-    {
-        panic!("ConnectionType, BeginString, SenderCompId or TargetCompId cannot be empty");
-    }
-
-    if let Some(ct) = setting.connection_type.as_ref() {
-        if ct.eq_ignore_ascii_case(ACCEPTOR_CONN_TYPE) {
-            if setting.socket_accept_port.is_none() {
-                panic!("SocketAcceptPort is not specified for ConnectionType ACCEPTOR");
-            }
-        } else if ct.eq_ignore_ascii_case(INITIATOR_CONN_TYPE) {
-            if setting.socket_connect_host.is_none() || setting.socket_connect_port.is_none() {
-                panic!("Either SocketConnectHost or SocketConnectPost is not specified for connection type INITIATOR");
-            }
+        let toml = s.parse::<Value>()?;
+        let mut settings: HashMap<SessionId, toml::value::Table> = HashMap::new();
+        let default_values = toml.get(DEFAULT_SECTION_NAME).and_then(|v| v.as_table());
+        let default_session_id = SessionId::new("DEFAULT", "", "", "", "", "", "", "");
+        if let Some(table) = default_values {
+            settings.insert(default_session_id.clone(), table.clone());
         } else {
-            panic!("Invalid connection type");
+            settings.insert(default_session_id.clone(), toml::value::Table::new());
         }
-    }
 
-    if let Some(bs) = setting.begin_string.as_ref() {
-        if !(bs.eq_ignore_ascii_case(FIX42_BEGIN_STR)
-            || bs.eq_ignore_ascii_case(FIX43_BEGIN_STR)
-            || bs.eq_ignore_ascii_case(FIX44_BEGIN_STR))
-        {
-            panic!("Invalid BeginString. Only FIX.4.2, FIX.4.3, FIX.4.4 are supported");
+        if let Some(val) = toml.get(SESSION_SECTION_NAME) {
+            if let Some(val_arr) = val.as_array() {
+                for each_table in val_arr.iter() {
+                    let table = each_table.as_table().cloned().unwrap();
+                    let mut merged_table = settings.get(&default_session_id).cloned().unwrap();
+                    for (table_key, table_val) in table.into_iter() {
+                        merged_table.insert(table_key, table_val);
+                    }
+                    let session_id = SessionId::from_setting(&merged_table);
+                    settings.insert(session_id, merged_table);
+                }
+            }
         }
+        Ok(SessionSetting { settings })
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct SessionConfig {
-    default: Setting,
-    sessions: Option<Vec<Setting>>,
-}
-
-impl SessionConfig {
-    pub fn from_toml(config_path: &str) -> Self {
-        let contents = fs::read_to_string(config_path).expect("could not read from toml file");
-        let mut config = SessionConfig::from_str(&contents).unwrap();
-        let default_setting = config.default.clone();
-        for cf in config.iter_mut() {
-            cf.merge_with(&default_setting);
-            validate(cf);
-        }
-        config
-    }
-
-    fn iter(&self) -> std::slice::Iter<Setting> {
-        self.sessions.as_ref().unwrap().iter()
-    }
-
-    fn iter_mut(&mut self) -> std::slice::IterMut<Setting> {
-        self.sessions.as_mut().unwrap().iter_mut()
-    }
-}
-
-impl FromStr for SessionConfig {
-    type Err = toml::de::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        toml::from_str(s)
-    }
-}
-
-#[derive(Debug, PartialEq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Getters, Clone)]
+#[getset(get = "with_prefix")]
 pub struct SessionId {
     begin_string: String,
     sender_compid: String,
@@ -218,48 +89,79 @@ pub struct SessionId {
 }
 
 impl SessionId {
-    fn new(setting: &Setting) -> Self {
-        let session_id = Self::session_id_from_setting(setting);
+    fn new(
+        begin_str: &str, sender_comp: &str, sender_sub: &str, sender_loc: &str, target_comp: &str,
+        target_sub: &str, target_loc: &str, session_qual: &str,
+    ) -> Self {
+        let get_optional_str = |s: &str| match s {
+            "" => None,
+            s => Some(s.to_string()),
+        };
+
+        let create_id = || {
+            let mut session_id = String::new();
+            session_id.push_str(begin_str);
+            session_id.push(':');
+            session_id.push_str(sender_comp);
+            if !sender_sub.is_empty() {
+                session_id.push('/');
+                session_id.push_str(sender_sub);
+            }
+            if !sender_loc.is_empty() {
+                session_id.push('/');
+                session_id.push_str(sender_loc);
+            }
+            session_id.push_str("->");
+            session_id.push_str(target_comp);
+            if !target_sub.is_empty() {
+                session_id.push('/');
+                session_id.push_str(target_sub);
+            }
+            if !target_loc.is_empty() {
+                session_id.push('/');
+                session_id.push_str(target_loc);
+            }
+            session_id
+        };
+
         Self {
-            begin_string: setting.get_begin_string().clone().unwrap(),
-            sender_compid: setting.get_sender_compid().clone().unwrap(),
-            sender_subid: setting.get_sender_subid().clone(),
-            sender_locationid: setting.get_sender_locationid().clone(),
-            target_compid: setting.get_target_compid().clone().unwrap(),
-            target_subid: setting.get_target_subid().clone(),
-            target_locationid: setting.get_target_locationid().clone(),
-            session_qualifier: setting.get_session_qualifier().clone(),
-            id: session_id,
+            begin_string: begin_str.to_string(),
+            sender_compid: sender_comp.to_string(),
+            sender_subid: get_optional_str(sender_sub),
+            sender_locationid: get_optional_str(sender_loc),
+            target_compid: target_comp.to_string(),
+            target_subid: get_optional_str(target_sub),
+            target_locationid: get_optional_str(target_loc),
+            session_qualifier: get_optional_str(session_qual),
+            id: create_id(),
         }
     }
 
-    fn session_id_from_setting(setting: &Setting) -> String {
-        let begin_str = setting.get_begin_string().clone().unwrap();
-        let sender_comp = setting.get_sender_compid().clone().unwrap();
-        let mut session_id = format!("{}:{}", &begin_str, &sender_comp);
-        if setting.get_sender_subid().is_some() {
-            session_id.push('/');
-            session_id.push_str(setting.get_sender_subid().as_ref().unwrap().as_str());
-        }
-        if setting.get_sender_locationid().is_some() {
-            session_id.push('/');
-            session_id.push_str(setting.get_sender_locationid().as_ref().unwrap());
-        }
-        session_id.push_str("->");
-        session_id.push_str(setting.get_target_compid().clone().unwrap().as_str());
-        if setting.get_target_subid().is_some() {
-            session_id.push('/');
-            session_id.push_str(setting.get_target_subid().as_ref().unwrap());
-        }
-        if setting.get_target_locationid().is_some() {
-            session_id.push('/');
-            session_id.push_str(setting.get_target_locationid().as_ref().unwrap());
-        }
-        if setting.get_session_qualifier().is_some() {
-            session_id.push(':');
-            session_id.push_str(setting.get_session_qualifier().as_ref().unwrap());
-        }
-        session_id
+    fn from_setting(setting: &toml::value::Table) -> Self {
+        let begin_string = setting.get(BEGIN_STRING_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let sender_compid =
+            setting.get(SENDER_COMPID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let sender_subid = setting.get(SENDER_SUBID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let sender_locid =
+            setting.get(SENDER_LOCATIONID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let target_compid =
+            setting.get(TARGET_COMPID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let target_subid = setting.get(TARGET_SUBID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let target_locid =
+            setting.get(TARGET_LOCATIONID_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+        let session_qual =
+            setting.get(SESSION_QUALIFIER_SETTING).and_then(|v| v.as_str()).unwrap_or("");
+
+        Self::new(
+            begin_string,
+            sender_compid,
+            sender_subid,
+            sender_locid,
+            target_compid,
+            target_subid,
+            target_locid,
+            session_qual,
+        )
     }
 }
 
@@ -353,29 +255,28 @@ mod session_tests {
 
     #[test]
     fn session_config_test() {
-        let session_config = SessionConfig::from_toml("src/FixConfig.toml");
         // println!("{:#?}", &session_config.sessions);
 
-        let cargo_toml = toml::toml! {
-            conn_type = "acceptor"
-            [default]
-            sender = "sender"
-            target = "target"
+        let cargo_toml = r#" 
+            [Default]
+            connection_type = "acceptor"
+            sender_comp_id = "sender"
+            target_comp_id= "target"
 
-            [[session]]
-            sender = "sender_1"
-            target = "target_1"
+            [[Session]]
+            sender_comp_id = "sender_1"
+            target_comp_id = "target_1"
 
-            [[session]]
-            sender = "sender_order"
-            target = "target_order"
+            [[Session]]
+            sender_comp_id = "sender_order"
+            target_comp_id = "target_order"
             session_qualifier = "order"
+"#;
 
-        };
-
-        println!("{:?}", cargo_toml);
-        for (key, val) in cargo_toml.as_table().unwrap().iter() {
-            println!("key: {:?}, val: {:?}", key, val);
-        }
+        let cargo_value = cargo_toml.parse::<SessionSetting>().unwrap();
+        println!("{:#?}", cargo_value);
+        // for (key, val) in cargo_value.as_table().unwrap().iter() {
+        //     println!("key: {:?}, val: {:#?}", key, val);
+        // }
     }
 }

@@ -5,6 +5,7 @@ include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 mod data_dictionary;
 mod message;
 mod quickfix_errors;
+mod session;
 
 use data_dictionary::*;
 use fields::*;
