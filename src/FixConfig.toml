@@ -1,16 +1,16 @@
-[default]
+[Default]
 connection_type = "acceptor"
-begin_string = "FIX.4.2"
-sender_compid = "sender"
-target_compid = "target"
+begin_string = "FIX.4.3"
+sender_comp_id = "default_sender"
+target_comp_id = "default_target"
 socket_accept_port = 10113
 
-[[sessions]]
-sender_compid = "sender1"
-target_compid = "target1"
+[[Session]]
+sender_comp_id = "sender1"
+target_comp_id = "target1"
 socket_accept_port = 10114
 
-[[sessions]]
-sender_compid = "sender2"
-target_compid = "target2"
+[[Session]]
+sender_comp_id = "sender2"
+target_comp_id = "target2"
 socket_accept_port = 10115

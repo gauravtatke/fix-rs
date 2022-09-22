@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 use std::iter::{FromIterator, IntoIterator, Iterator};
 use std::{fmt, fs, path::Path, str::FromStr};
 
-use crate::message::{self, Group, StringField};
 use crate::{quickfix_errors::*, FILE_PATH};
 use indexmap::IndexSet;
 use roxmltree::{Document, Node, NodeType};
@@ -781,6 +780,7 @@ mod tests {
         assert_eq!(field_order, group_dd.get_ordered_fields().as_slice(), "field order error");
     }
 
+    /****************************** TESTS START ***********************/
     #[test]
     fn test_major_minor_type() {
         let fstr_type_missing = r#"<fix major="4" minor="3" servicepack="0">/"#;
