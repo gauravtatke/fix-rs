@@ -2,8 +2,11 @@
 #![allow(unused_imports)]
 
 use crate::message::*;
+use crate::session::session_constants::*;
+use core::panic;
 use getset::Getters;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map, HashMap, VecDeque};
+use std::default;
 use std::hash::Hash;
 use std::io::prelude::*;
 use std::iter::{IntoIterator, Iterator};
@@ -14,33 +17,91 @@ use toml::{de, value, Value};
 
 use serde::Deserialize;
 
-const FIX42_BEGIN_STR: &str = "FIX.4.2";
-const FIX43_BEGIN_STR: &str = "FIX.4.3";
-const FIX44_BEGIN_STR: &str = "FIX.4.4";
+pub mod session_constants {
+    // Begin Strings
+    pub const FIX42_BEGIN_STR: &str = "FIX.4.2";
+    pub const FIX43_BEGIN_STR: &str = "FIX.4.3";
+    pub const FIX44_BEGIN_STR: &str = "FIX.4.4";
 
-const ACCEPTOR_CONN_TYPE: &str = "acceptor";
-const INITIATOR_CONN_TYPE: &str = "initiator";
+    // Connection types
+    pub const ACCEPTOR_CONN_TYPE: &str = "acceptor";
+    pub const INITIATOR_CONN_TYPE: &str = "initiator";
 
-const DEFAULT_SECTION_NAME: &str = "Default";
-const SESSION_SECTION_NAME: &str = "Session";
-const BEGIN_STRING_SETTING: &str = "begin_string";
-const SENDER_COMPID_SETTING: &str = "sender_comp_id";
-const SENDER_SUBID_SETTING: &str = "sender_sub_id";
-const SENDER_LOCATIONID_SETTING: &str = "sender_location_id";
-const TARGET_COMPID_SETTING: &str = "target_comp_id";
-const TARGET_SUBID_SETTING: &str = "target_sub_id";
-const TARGET_LOCATIONID_SETTING: &str = "target_location_id";
-const SESSION_QUALIFIER_SETTING: &str = "session_qualifier";
+    // config toml's section name
+    pub const DEFAULT_SECTION_NAME: &str = "Default";
+    pub const SESSION_SECTION_NAME: &str = "Session";
+
+    // settings name
+    pub const BEGIN_STRING_SETTING: &str = "begin_string";
+    pub const SENDER_COMPID_SETTING: &str = "sender_comp_id";
+    pub const SENDER_SUBID_SETTING: &str = "sender_sub_id";
+    pub const SENDER_LOCATIONID_SETTING: &str = "sender_location_id";
+    pub const TARGET_COMPID_SETTING: &str = "target_comp_id";
+    pub const TARGET_SUBID_SETTING: &str = "target_sub_id";
+    pub const TARGET_LOCATIONID_SETTING: &str = "target_location_id";
+    pub const SESSION_QUALIFIER_SETTING: &str = "session_qualifier";
+    pub const CONNECTION_TYPE_SETTING: &str = "connection_type";
+    pub const SOCKET_ACCEPT_PORT: &str = "socket_accept_port";
+    pub const SOCKET_CONNECT_PORT: &str = "socket_connect_port";
+    pub const SOCKET_CONNECT_HOST: &str = "socket_connect_host";
+}
 
 #[derive(Debug, Default)]
 pub struct SessionSetting {
+    default_session_id: SessionId,
     settings: HashMap<SessionId, toml::value::Table>,
 }
 
 impl SessionSetting {
-    pub fn new(toml_path: &std::path::Path) -> Self {
+    pub fn new<S: AsRef<std::path::Path>>(toml_path: S) -> Self {
         let toml_str = fs::read_to_string(toml_path).expect("could not read config toml");
-        SessionSetting::from_str(&toml_str).expect("could not parse toml to Value")
+        let settings = SessionSetting::from_str(&toml_str).expect("could not parse toml to Value");
+        settings.validate();
+        settings
+    }
+
+    fn validate(&self) {
+        // panics if there is an error
+        let default_values = self.get_default_settings();
+        let conn_type = default_values
+            .get(CONNECTION_TYPE_SETTING)
+            .unwrap_or_else(|| panic!("`connection_type` not found"))
+            .as_str()
+            .unwrap();
+        if conn_type != ACCEPTOR_CONN_TYPE && conn_type != INITIATOR_CONN_TYPE {
+            panic!("invalid connection type. only `acceptor` or `initiator` supported");
+        }
+    }
+
+    pub fn get_default_session_id(&self) -> &SessionId {
+        &self.default_session_id
+    }
+
+    pub fn is_default_session_id(&self, session_id: &SessionId) -> bool {
+        &self.default_session_id == session_id
+    }
+
+    pub fn get_default_settings(&self) -> &value::Table {
+        self.get_session_settings(&self.default_session_id)
+    }
+
+    pub fn get_session_settings(&self, session_id: &SessionId) -> &value::Table {
+        self.settings.get(session_id).unwrap()
+    }
+
+    fn get_setting(&self, session_id: &SessionId, setting_name: &str) -> Option<&Value> {
+        self.settings
+            .get(session_id)
+            .and_then(|table| table.get(setting_name))
+            .or_else(|| self.get_default_settings().get(setting_name))
+    }
+
+    pub fn get_setting_as_integer(&self, session_id: &SessionId, s_name: &str) -> Option<i64> {
+        self.get_setting(session_id, s_name).and_then(|val| val.as_integer())
+    }
+
+    pub fn session_iter(&self) -> hash_map::Iter<SessionId, value::Table> {
+        self.settings.iter()
     }
 }
 
@@ -49,13 +110,12 @@ impl FromStr for SessionSetting {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let toml = s.parse::<Value>()?;
         let mut settings: HashMap<SessionId, toml::value::Table> = HashMap::new();
-        let default_values = toml.get(DEFAULT_SECTION_NAME).and_then(|v| v.as_table());
-        let default_session_id = SessionId::new("DEFAULT", "", "", "", "", "", "", "");
-        if let Some(table) = default_values {
-            settings.insert(default_session_id.clone(), table.clone());
-        } else {
-            settings.insert(default_session_id.clone(), toml::value::Table::new());
-        }
+        let default_values = toml
+            .get(DEFAULT_SECTION_NAME)
+            .and_then(|v| v.as_table())
+            .unwrap_or_else(|| panic!("default section not found"));
+        let default_session_id = SessionId::from_setting(default_values);
+        settings.insert(default_session_id.clone(), default_values.clone());
 
         if let Some(val) = toml.get(SESSION_SECTION_NAME) {
             if let Some(val_arr) = val.as_array() {
@@ -70,11 +130,14 @@ impl FromStr for SessionSetting {
                 }
             }
         }
-        Ok(SessionSetting { settings })
+        Ok(SessionSetting {
+            default_session_id,
+            settings,
+        })
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Getters, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Hash, Getters, Clone)]
 #[getset(get = "with_prefix")]
 pub struct SessionId {
     begin_string: String,
@@ -171,7 +234,7 @@ impl fmt::Display for SessionId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SessionState;
 
 impl SessionState {
@@ -180,81 +243,78 @@ impl SessionState {
     }
 }
 
-// #[derive(Debug)]
-// pub struct Session {
-//     pub session_id: SessionId,
-//     heartbeat_intrvl: u32,
-//     is_active: bool,
-//     reset_on_logon: bool,
-//     reset_on_disconnect: bool,
-//     msg_q: VecDeque<Message>,
-//     state: SessionState,
-//     io_conn: Option<SocketConnector>,
-// }
+#[derive(Debug, Default)]
+pub struct Session {
+    pub session_id: SessionId,
+    heartbeat_intrvl: u32,
+    is_active: bool,
+    reset_on_logon: bool,
+    reset_on_logout: bool,
+    reset_on_disconnect: bool,
+    msg_q: VecDeque<Message>,
+    state: SessionState,
+    // io_conn: Option<SocketConnector>,
+}
 
-// impl Default for Session {
-//     fn default() -> Self {
-//         Self {
-//             session_id: SessionId::new("DEFAULT", "sender", None, None, "target", None, None, None),
-//             heartbeat_intrvl: 30,
-//             is_active: false,
-//             reset_on_disconnect: false,
-//             reset_on_logon: true,
-//             msg_q: VecDeque::with_capacity(16),
-//             state: SessionState::new(),
-//             io_conn: None,
-//         }
-//     }
-// }
+impl Session {
+    fn set_session_id(&mut self, sid: SessionId) {
+        self.session_id = sid;
+    }
 
-// impl Session {
-//     pub fn new() -> Self {
-//         Default::default()
-//     }
+    pub fn with_settings(session_id: &SessionId, session_setting: &value::Table) -> Self {
+        // setting should have begin_string, sender_compid and target_compid
+        // it should also have either accept port or (connect_host, connect_port)
+        let heartbeat_interval = session_setting
+            .get("heartbeat_interval")
+            .and_then(|val| val.as_integer())
+            .unwrap_or(30i64);
+        let reset_on_logon =
+            session_setting.get("reset_on_logon").and_then(|val| val.as_bool()).unwrap_or(true);
+        let reset_on_logout =
+            session_setting.get("reset_on_logout").and_then(|val| val.as_bool()).unwrap_or(true);
+        let reset_on_disconnect = session_setting
+            .get("reset_on_disconnect")
+            .and_then(|val| val.as_bool())
+            .unwrap_or(true);
+        Self {
+            session_id: session_id.clone(),
+            heartbeat_intrvl: heartbeat_interval as u32,
+            reset_on_disconnect,
+            reset_on_logon,
+            reset_on_logout,
+            msg_q: VecDeque::new(),
+            is_active: false,
+            state: SessionState::default(),
+        }
+    }
 
-//     fn set_session_id(&mut self, sid: SessionId) {
-//         self.session_id = sid;
-//     }
+    // fn set_socket_connector(&mut self, conn: SocketConnector) {
+    //     self.io_conn = Some(conn);
+    // }
 
-//     pub fn with_settings(setting: &SessionSetting) -> Self {
-//         // setting should have begin_string, sender_compid and target_compid
-//         // it should also have either accept port or (connect_host, connect_port)
-//         let mut a_session = Session::new();
-//         let b_str = setting.begin_string.as_ref().unwrap();
-//         let sender = setting.sender_compid.as_ref().unwrap();
-//         let target = setting.target_compid.as_ref().unwrap();
-//         a_session
-//             .set_session_id(SessionId::new(b_str, sender, None, None, target, None, None, None));
-//         a_session
-//     }
+    // fn send_msg(&mut self, msg: Message) {
+    //     if let Some(con) = self.io_conn.as_ref() {
+    //         con.send(msg);
+    //     } else {
+    //         self.msg_q.push_back(msg);
+    //     }
+    // }
 
-//     fn set_socket_connector(&mut self, conn: SocketConnector) {
-//         self.io_conn = Some(conn);
-//     }
-
-//     fn send_msg(&mut self, msg: Message) {
-//         if let Some(con) = self.io_conn.as_ref() {
-//             con.send(msg);
-//         } else {
-//             self.msg_q.push_back(msg);
-//         }
-//     }
-
-//     fn recv_msg(&self) -> Message {
-//         if let Some(con) = self.io_conn.as_ref() {
-//             con.recv()
-//         } else {
-//             Message::new()
-//         }
-//     }
-// }
+    // fn recv_msg(&self) -> Message {
+    //     if let Some(con) = self.io_conn.as_ref() {
+    //         con.recv()
+    //     } else {
+    //         Message::new()
+    //     }
+    // }
+}
 
 #[cfg(test)]
-mod session_tests {
+mod session_setting_tests {
     use super::*;
 
     #[test]
-    fn session_config_test() {
+    fn session_sample_config_test() {
         // println!("{:#?}", &session_config.sessions);
 
         let cargo_toml = r#" 
@@ -279,4 +339,43 @@ mod session_tests {
         //     println!("key: {:?}, val: {:#?}", key, val);
         // }
     }
+
+    #[test]
+    #[should_panic(expected = "default section not found")]
+    fn test_no_default_section() {
+        let cfg_toml = r#"
+            [[Session]]
+            sender_comp_id = "sender"
+            target_comp_id = "target"
+        "#;
+        let settings = cfg_toml.parse::<SessionSetting>().unwrap();
+        settings.validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "`connection_type` not found")]
+    fn test_default_no_connection_type() {
+        let cfg_toml = r#"
+            [Default]
+            sender_comp_id = "sender"
+            target_comp_id = "target"
+
+            [[Session]]
+            sender_comp_id = "sender"
+            target_comp_id = "target"
+        "#;
+        let settings = cfg_toml.parse::<SessionSetting>().unwrap();
+        settings.validate();
+    }
+
+    #[test]
+    fn test_no_mandatory_fields() {
+        // no begin_string, no sender_compid, no target_compid
+    }
+
+    #[test]
+    fn test_only_default_settings() {}
+
+    #[test]
+    fn test_default_and_session_overrides() {}
 }

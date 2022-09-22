@@ -2,35 +2,26 @@
 
 include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 
+mod application;
 mod data_dictionary;
 mod message;
+mod network;
 mod quickfix_errors;
 mod session;
 
 use data_dictionary::*;
 use fields::*;
 use message::*;
+use network::SocketAcceptor;
+use session::SessionSetting;
+use tokio;
 
 pub(crate) const FILE_PATH: &str = "resources/FIX43.xml";
+pub(crate) const CONFIG_TOML_PATH: &str = "src/FixConfig.toml";
 
-fn main() {
-    // let mut message = Message::new();
-    // message.set_field(44, 45.678);
-    // message.set_field(35, 'A');
-
-    // let header = message.header_mut();
-    // header.set_field(76, "gaurav");
-    // println!("{:#?}", &message);
-    // let price: Result<u32, String> = message.get_field(44);
-    // let found_price: f32 = message.get_field(44).unwrap();
-    // println!("price = {:?}", found_price);
-
-    // println!("not parsing {:?}", message.get_field::<f32>(35));
-    // println!("not found {:?}", message.get_field::<u32>(56));
-    // message.set_field(34, 1);
-    // println!("out dir - {:?}", env!("OUT_DIR"));
-    // let price = Price::new(55.5f32);
-    // let msg_typ = MsgType::new("asdf".to_string());
-    // println!("{:?}", price);
-    // println!("{:?}", msg_typ);
+#[tokio::main]
+async fn main() {
+    let session_settings = SessionSetting::new(CONFIG_TOML_PATH);
+    let acceptor = SocketAcceptor::new(&session_settings);
+    acceptor.initialize(&session_settings).await;
 }
