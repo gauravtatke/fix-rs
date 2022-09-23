@@ -13,7 +13,7 @@ use data_dictionary::*;
 use fields::*;
 use message::*;
 use network::SocketAcceptor;
-use session::SessionSetting;
+use session::Properties;
 use tokio;
 
 pub(crate) const FILE_PATH: &str = "resources/FIX43.xml";
@@ -21,7 +21,7 @@ pub(crate) const CONFIG_TOML_PATH: &str = "src/FixConfig.toml";
 
 #[tokio::main]
 async fn main() {
-    let session_settings = SessionSetting::new(CONFIG_TOML_PATH);
+    let session_settings = Properties::new(CONFIG_TOML_PATH);
     let acceptor = SocketAcceptor::new(&session_settings);
     acceptor.initialize(&session_settings).await;
 }
