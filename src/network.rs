@@ -27,6 +27,19 @@ pub enum ConnectionType {
     INITIATOR,
 }
 
+impl FromStr for ConnectionType {
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case(ACCEPTOR_CONN_TYPE) {
+            Ok(ConnectionType::ACCEPTOR)
+        } else if s.eq_ignore_ascii_case(INITIATOR_CONN_TYPE) {
+            Ok(ConnectionType::INITIATOR)
+        } else {
+            Err("invalid connection type")
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SocketAcceptor {
     connection_type: ConnectionType,
@@ -45,7 +58,7 @@ impl Default for SocketAcceptor {
 }
 
 impl SocketAcceptor {
-    pub fn new(settings: &SessionSetting) -> Self {
+    pub fn new(settings: &Properties) -> Self {
         let mut socket_connector = SocketAcceptor::default();
         socket_connector.create_sessions(settings);
         socket_connector
@@ -59,12 +72,8 @@ impl SocketAcceptor {
         Message::new()
     }
 
-    pub fn set_connection_type(&mut self, con_ty: &str) {
-        match con_ty {
-            ACCEPTOR_CONN_TYPE => self.connection_type = ConnectionType::ACCEPTOR,
-            INITIATOR_CONN_TYPE => self.connection_type = ConnectionType::INITIATOR,
-            &_ => panic!("invalid connection type"),
-        }
+    pub fn set_connection_type(&mut self, con_ty: ConnectionType) {
+        self.connection_type = con_ty;
     }
 
     pub fn get_connection_type(&self) -> ConnectionType {
@@ -75,31 +84,22 @@ impl SocketAcceptor {
         self.session_map.insert(sid, session);
     }
 
-    fn create_sessions(&mut self, settings: &SessionSetting) {
-        let connection_type = settings
-            .get_default_settings()
-            .get("connection_type")
-            .and_then(|val| val.as_str())
-            .unwrap();
+    fn create_sessions(&mut self, settings: &Properties) {
+        let connection_type: ConnectionType =
+            settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
         self.set_connection_type(connection_type);
-        for (session_id, session_setting) in
-            settings.session_iter().filter(|(sid, _)| !settings.is_default_session_id(*sid))
-        {
-            let session = Session::with_settings(session_id, session_setting);
+        for session_id in settings.session_ids() {
+            let session = Session::with_settings(session_id, settings);
             self.set_session(session_id.clone(), session);
         }
     }
 
-    pub async fn initialize(&self, settings: &SessionSetting) {
+    pub async fn initialize(&self, settings: &Properties) {
         let mut join_handles: Vec<JoinHandle<()>> = Vec::new();
         for (sid, _) in self.session_map.iter() {
             // get the socket accept port
-            // println!("{:#?}", sid);
             let session_accept_port: u16 =
-                match settings.get_setting_as_integer(sid, SOCKET_ACCEPT_PORT) {
-                    Some(p) => p as u16,
-                    None => panic!("port number is not present in settings"),
-                };
+                settings.get_or_default(sid, SOCKET_ACCEPT_PORT_SETTING).unwrap();
             println!("Got the port: {}", session_accept_port);
 
             let handle = tokio::spawn(async move {

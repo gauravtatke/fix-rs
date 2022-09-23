@@ -198,3 +198,15 @@ pub enum InvalidMessage {
     FieldDoesNotHaveDelimiter,
     MessageDoesNotHaveSOH,
 }
+
+// #[derive(Debug, thiserror::Error)]
+// #[error("Toml config error")]
+// pub enum ConfigTomlErr {
+//     AcceptPortNotFound,
+//     ConnectPortNotFound,
+//     SenderCompIdNotFound,
+//     TargetCompIdNotFound,
+//     BeginStringNotFound,
+//     DefaultSectionNotFound,
+//     ParseError(String),
+// }
