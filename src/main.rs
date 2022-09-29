@@ -1,4 +1,4 @@
-#![allow(dead_code, unused_imports, unused_variables, non_camel_case_types)]
+#![allow(dead_code, unused_variables)]
 
 include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 
@@ -9,11 +9,11 @@ mod network;
 mod quickfix_errors;
 mod session;
 
-use data_dictionary::*;
-use fields::*;
-use message::*;
+use std::{thread, time::Duration};
+
+use application::DefaultApplication;
 use network::SocketAcceptor;
-use session::Properties;
+use session::*;
 use tokio;
 
 pub(crate) const FILE_PATH: &str = "resources/FIX43.xml";
@@ -22,6 +22,10 @@ pub(crate) const CONFIG_TOML_PATH: &str = "src/FixConfig.toml";
 #[tokio::main]
 async fn main() {
     let session_settings = Properties::new(CONFIG_TOML_PATH);
-    let acceptor = SocketAcceptor::new(&session_settings);
-    acceptor.initialize(&session_settings).await;
+    let application = DefaultApplication::new();
+    let mut acceptor = SocketAcceptor::new(session_settings, application);
+    acceptor.initialize();
+    loop {
+        thread::sleep(Duration::from_millis(5000));
+    }
 }

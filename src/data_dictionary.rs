@@ -1,13 +1,11 @@
-use std::cmp::{Eq, PartialEq};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::convert::{Infallible, Into};
-use std::io::{Read, Write};
-use std::iter::{FromIterator, IntoIterator, Iterator};
+use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
+use std::iter::Iterator;
 use std::{fmt, fs, path::Path, str::FromStr};
 
-use crate::{quickfix_errors::*, FILE_PATH};
+use crate::quickfix_errors::*;
 use indexmap::IndexSet;
-use roxmltree::{Document, Node, NodeType};
+use roxmltree::{Document, Node};
 
 type NodeMap<'a, 'i> = HashMap<String, Node<'a, 'i>>;
 type DResult<T> = Result<T, XmlError>;

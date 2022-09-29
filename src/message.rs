@@ -1,14 +1,11 @@
-use std::collections::binary_heap::Iter;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::convert::TryFrom;
-use std::hash::Hash;
-use std::iter::Peekable;
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 
-use crate::data_dictionary::{DataDictionary, HEADER_ID, TRAILER_ID};
+use crate::data_dictionary::{DataDictionary, HEADER_ID};
 use crate::fields::*;
 use crate::quickfix_errors::SessionRejectError;
+use crate::session::{SessionId, SessionIdBuilder};
 
 type SessResult<T> = Result<T, SessionRejectError>;
 
@@ -223,7 +220,7 @@ impl Message {
 
     pub fn from_str(s: &str, dd: &DataDictionary) -> SessResult<Self> {
         let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
-        for field in s.split_terminator('|') {
+        for field in s.split_terminator(SOH) {
             let (tag, value) = match field.split_once('=') {
                 Some((t, v)) => {
                     let parse_result = t.parse::<u32>();
@@ -242,6 +239,43 @@ impl Message {
 
         from_vec(vdeq, dd)
     }
+
+    pub fn get_session_id(s: &str) -> SessionId {
+        SessionIdBuilder::default()
+            .begin_string(extract_field_value("8", s))
+            .sender_compid(extract_field_value("49", s))
+            .sender_subid(extract_field_value("50", s))
+            .sender_locationid(extract_field_value("142", s))
+            .target_compid(extract_field_value("50", s))
+            .target_subid(extract_field_value("57", s))
+            .target_locationid(extract_field_value("143", s))
+            .build()
+            .unwrap()
+    }
+
+    pub fn get_reverse_session_id(s: &str) -> SessionId {
+        // sender values from message is put into target & vice-versa
+        SessionIdBuilder::default()
+            .begin_string(extract_field_value("8", s))
+            .sender_compid(extract_field_value("50", s))
+            .sender_subid(extract_field_value("57", s))
+            .sender_locationid(extract_field_value("143", s))
+            .target_compid(extract_field_value("49", s))
+            .target_subid(extract_field_value("50", s))
+            .target_locationid(extract_field_value("142", s))
+            .build()
+            .unwrap()
+    }
+}
+
+fn extract_field_value<'a>(tag: &str, s: &'a str) -> &'a str {
+    let pat = format!("{}{}=", SOH, tag);
+    if let Some(indx) = s.find(pat.as_str()) {
+        let end_pos = s[indx + 1..].find(SOH).unwrap();
+        let start_pos = indx + pat.len();
+        return &s[start_pos..end_pos];
+    }
+    ""
 }
 
 fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Message> {

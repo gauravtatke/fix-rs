@@ -11,15 +11,16 @@ roxmltree = "0.14.1"
 chrono = "0.4.19"
 indexmap = "1.9.1"
 thiserror = "1.0.31"
-toml = "0.5.9"
+# toml = "0.5.9"
 serde = { version = "1.0", features = ["derive"] }
 getset = "0.1.2"
 tokio = { version = "1.21.1", features = ["full"] }
+derive_builder = "0.11.2"
 
 [build-dependencies]
 roxmltree = "0.14.1"
-yaserde = "0.8.0"
-yaserde_derive = "0.8.0"
+# yaserde = "0.8.0"
+# yaserde_derive = "0.8.0"
 xml-rs = "0.8.4"
 handlebars = "4.3.1"
 serde = { version = "1.0", features = ["derive"] }
