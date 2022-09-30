@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{self, Hash};
 
+const NOT_SET: &str = "";
 #[derive(Debug, Default, PartialEq, Eq, Getters, Clone, Builder)]
 #[builder(setter(into, strip_option), default, build_fn(skip))]
 #[getset(get = "pub")]
@@ -103,9 +104,7 @@ impl SessionIdBuilder {
 
     pub fn build(&self) -> Result<SessionId, SessionIdBuilderError> {
         let mut session_id = SessionId {
-            begin_string: Clone::clone(self.begin_string.as_ref().ok_or(
-                SessionIdBuilderError::from(UninitializedFieldError::new("begin_string")),
-            )?),
+            begin_string: self.begin_string.as_ref().unwrap_or(NOT_SET).to_string(),
             sender_compid: Clone::clone(self.sender_compid.as_ref().ok_or(
                 SessionIdBuilderError::from(UninitializedFieldError::new("sender_compid")),
             )?),
