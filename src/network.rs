@@ -125,6 +125,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
                 let session = sessions.get(&session_id).unwrap();
                 let dd: &DataDictionary = session.data_dictionary();
                 if let Ok(message) = Message::from_str(&s, dd) {
+                    println!("received: {:?}", &message);
                     if let Ok(_) = session.verify(&message) {
                         app.from_app(session_id, message);
                     } else {
@@ -152,19 +153,6 @@ fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
     session_map
 }
 
-async fn handle_connection(mut tcp_stream: TcpStream, tx: &mpsc::Sender<String>) {
-    println!("handling connection");
-    let mut buf = [0; 512];
-    loop {
-        match tcp_stream.read(&mut buf).await {
-            Ok(bytes_read) => {
-                tx.send(String::from_utf8_lossy(&buf[..bytes_read]).to_string()).await.unwrap()
-            }
-            Err(_) => break,
-        };
-    }
-}
-
 async fn incoming_messages(tcp_stream: TcpStream, tx: &mpsc::Sender<String>) {
     println!("handling connection");
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
@@ -179,6 +167,7 @@ async fn incoming_messages(tcp_stream: TcpStream, tx: &mpsc::Sender<String>) {
 async fn read_message(reader: &mut BufReader<TcpStream>, buf: &mut Vec<u8>) {
     loop {
         let bytes_read = reader.read_until(SOH as u8, buf).await.unwrap();
+        println!("bytes received: {:?}", &buf);
         let slice_start = buf.len() - bytes_read;
         let slice_end = buf.len();
         // last read data

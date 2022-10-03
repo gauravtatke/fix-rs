@@ -42,8 +42,8 @@ pub enum Type {
 }
 
 type Tag = u32;
-// pub const SOH: char = '\u{01}';
-pub const SOH: char = '|';
+pub const SOH: char = '\u{01}';
+// pub const SOH: char = '|';
 
 #[derive(Debug, Default)]
 pub struct StringField {

@@ -44,13 +44,16 @@ impl Properties {
                 }
                 let default_section = parse_table(&mut lines);
                 default_found = true;
-                default_session_id =
-                    Some(SessionIdBuilder::new("DEFAULT", "", "").build().unwrap());
+                default_session_id = Some(SessionId::default());
                 setting_map.insert(default_session_id.clone().unwrap(), default_section);
             } else if line.starts_with('[') && line.ends_with(']') && default_found {
                 // some other section in config file
+                if !default_found {
+                    panic!("default section should be first section. not found");
+                }
                 let section = parse_table(&mut lines);
-                let session_id = SessionId::from_map(&section);
+                let defaults = setting_map.get(default_session_id.as_ref().unwrap()).unwrap();
+                let session_id = SessionId::from_map(&section, defaults);
                 setting_map.insert(session_id, section);
             }
         }

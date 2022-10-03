@@ -1,12 +1,11 @@
 use crate::session::*;
-use derive_builder::{Builder, UninitializedFieldError};
+use derive_builder::Builder;
 use getset::Getters;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::{self, Hash};
 
-const NOT_SET: &str = "";
-#[derive(Debug, Default, PartialEq, Eq, Getters, Clone, Builder)]
+#[derive(Debug, PartialEq, Eq, Getters, Clone, Builder)]
 #[builder(setter(into, strip_option), default, build_fn(skip))]
 #[getset(get = "pub")]
 pub struct SessionId {
@@ -20,6 +19,12 @@ pub struct SessionId {
     session_qualifier: Option<String>,
     #[builder(setter(skip))]
     id: String,
+}
+
+impl std::default::Default for SessionId {
+    fn default() -> Self {
+        SessionIdBuilder::new("DEFAULT", "", "").build().unwrap()
+    }
 }
 
 impl Hash for SessionId {
@@ -56,30 +61,52 @@ impl SessionId {
         }
     }
 
-    pub fn from_map(prop_map: &HashMap<String, String>) -> Self {
+    pub fn from_map(
+        prop_map: &HashMap<String, String>, defaults: &HashMap<String, String>,
+    ) -> Self {
         let mut builder = SessionIdBuilder::default();
-        if let Some(begin_string) = prop_map.get(BEGIN_STRING_SETTING) {
-            builder.begin_string(begin_string);
-        }
+        builder
+            .begin_string(
+                prop_map
+                    .get(BEGIN_STRING_SETTING)
+                    .or_else(|| defaults.get(BEGIN_STRING_SETTING))
+                    .unwrap(),
+            )
+            .sender_compid(
+                prop_map
+                    .get(SENDER_COMPID_SETTING)
+                    .or_else(|| defaults.get(SENDER_COMPID_SETTING))
+                    .unwrap(),
+            )
+            .target_compid(
+                prop_map
+                    .get(TARGET_COMPID_SETTING)
+                    .or_else(|| defaults.get(TARGET_COMPID_SETTING))
+                    .unwrap(),
+            );
 
-        if let Some(sender_comp) = prop_map.get(SENDER_COMPID_SETTING) {
-            builder.sender_compid(sender_comp);
-        }
-
-        if let Some(sender_sub) = prop_map.get(SENDER_SUBID_SETTING) {
+        if let Some(sender_sub) =
+            prop_map.get(SENDER_SUBID_SETTING).or_else(|| defaults.get(SENDER_SUBID_SETTING))
+        {
             builder.sender_subid(sender_sub);
         }
 
-        if let Some(sender_loc) = prop_map.get(SENDER_LOCATIONID_SETTING) {
+        if let Some(sender_loc) = prop_map
+            .get(SENDER_LOCATIONID_SETTING)
+            .or_else(|| defaults.get(SENDER_LOCATIONID_SETTING))
+        {
             builder.sender_locationid(sender_loc);
         }
-        if let Some(target_comp) = prop_map.get(TARGET_COMPID_SETTING) {
-            builder.target_compid(target_comp);
-        }
-        if let Some(target_sub) = prop_map.get(TARGET_SUBID_SETTING) {
+
+        if let Some(target_sub) =
+            prop_map.get(TARGET_SUBID_SETTING).or_else(|| defaults.get(TARGET_SUBID_SETTING))
+        {
             builder.target_subid(target_sub);
         }
-        if let Some(target_loc) = prop_map.get(TARGET_LOCATIONID_SETTING) {
+        if let Some(target_loc) = prop_map
+            .get(TARGET_LOCATIONID_SETTING)
+            .or_else(|| defaults.get(TARGET_LOCATIONID_SETTING))
+        {
             builder.target_locationid(target_loc);
         }
 
@@ -104,15 +131,11 @@ impl SessionIdBuilder {
 
     pub fn build(&self) -> Result<SessionId, SessionIdBuilderError> {
         let mut session_id = SessionId {
-            begin_string: self.begin_string.as_ref().unwrap_or(NOT_SET).to_string(),
-            sender_compid: Clone::clone(self.sender_compid.as_ref().ok_or(
-                SessionIdBuilderError::from(UninitializedFieldError::new("sender_compid")),
-            )?),
+            begin_string: self.begin_string.as_ref().unwrap().to_string(),
+            sender_compid: self.sender_compid.as_ref().unwrap().to_string(),
             sender_subid: self.sender_subid.as_ref().and_then(|opt| opt.clone()),
             sender_locationid: self.sender_locationid.as_ref().and_then(|opt| opt.clone()),
-            target_compid: Clone::clone(self.target_compid.as_ref().ok_or(
-                SessionIdBuilderError::from(UninitializedFieldError::new("target_compid")),
-            )?),
+            target_compid: self.target_compid.as_ref().unwrap().to_string(),
             target_subid: self.target_subid.as_ref().and_then(|opt| opt.clone()),
             target_locationid: self.target_locationid.as_ref().and_then(|opt| opt.clone()),
             session_qualifier: self.session_qualifier.as_ref().and_then(|opt| opt.clone()),
