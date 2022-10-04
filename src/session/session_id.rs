@@ -133,11 +133,36 @@ impl SessionIdBuilder {
         let mut session_id = SessionId {
             begin_string: self.begin_string.as_ref().unwrap().to_string(),
             sender_compid: self.sender_compid.as_ref().unwrap().to_string(),
-            sender_subid: self.sender_subid.as_ref().and_then(|opt| opt.clone()),
-            sender_locationid: self.sender_locationid.as_ref().and_then(|opt| opt.clone()),
+            sender_subid: self.sender_subid.clone().flatten().and_then(|s| {
+                if !s.is_empty() && s != "" {
+                    Some(s.to_owned())
+                } else {
+                    None
+                }
+            }),
+            sender_locationid: self.sender_locationid.clone().flatten().and_then(|s| {
+                if s.is_empty() || s == "" {
+                    None
+                } else {
+                    Some(s.to_owned())
+                }
+            }),
             target_compid: self.target_compid.as_ref().unwrap().to_string(),
-            target_subid: self.target_subid.as_ref().and_then(|opt| opt.clone()),
-            target_locationid: self.target_locationid.as_ref().and_then(|opt| opt.clone()),
+            target_subid: self.target_subid.clone().flatten().and_then(|s| {
+                if s.is_empty() || s == "" {
+                    None
+                } else {
+                    Some(s.to_owned())
+                }
+            }),
+            target_locationid: self.target_locationid.clone().flatten().and_then(|s| {
+                if s.is_empty() || s == "" {
+                    None
+                } else {
+                    Some(s.to_owned())
+                }
+            }),
+
             session_qualifier: self.session_qualifier.as_ref().and_then(|opt| opt.clone()),
             id: String::new(),
         };

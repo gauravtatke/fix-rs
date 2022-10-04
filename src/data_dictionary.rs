@@ -109,7 +109,7 @@ impl std::fmt::Display for FixType {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DataDictionary {
     begin_string: String,
     fields_by_tag: HashMap<u32, String>,
@@ -463,7 +463,7 @@ impl FromStr for DataDictionary {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct GroupInfo {
     delimiter: u32,
     group_dd: DataDictionary,

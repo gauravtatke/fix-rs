@@ -45,7 +45,7 @@ type Tag = u32;
 pub const SOH: char = '\u{01}';
 // pub const SOH: char = '|';
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringField {
     tag: Tag,
     value: String,
@@ -68,7 +68,7 @@ impl StringField {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FieldMap {
     fields: HashMap<Tag, StringField>,
     group: HashMap<Tag, Group>,
@@ -117,7 +117,7 @@ impl FieldMap {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Group {
     delim: u32,
     tag: Tag,
@@ -161,7 +161,7 @@ impl IndexMut<usize> for Group {
 
 type Header = FieldMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Message {
     // fields: FieldMap,
     // groups: GroupMap,
@@ -246,7 +246,7 @@ impl Message {
             .sender_compid(extract_field_value("49", s))
             .sender_subid(extract_field_value("50", s))
             .sender_locationid(extract_field_value("142", s))
-            .target_compid(extract_field_value("50", s))
+            .target_compid(extract_field_value("56", s))
             .target_subid(extract_field_value("57", s))
             .target_locationid(extract_field_value("143", s))
             .build()
@@ -257,7 +257,7 @@ impl Message {
         // sender values from message is put into target & vice-versa
         SessionIdBuilder::default()
             .begin_string(extract_field_value("8", s))
-            .sender_compid(extract_field_value("50", s))
+            .sender_compid(extract_field_value("56", s))
             .sender_subid(extract_field_value("57", s))
             .sender_locationid(extract_field_value("143", s))
             .target_compid(extract_field_value("49", s))
@@ -269,11 +269,17 @@ impl Message {
 }
 
 fn extract_field_value<'a>(tag: &str, s: &'a str) -> &'a str {
-    let pat = format!("{}{}=", SOH, tag);
+    let pat_prefix = match tag {
+        "8" => "",
+        _ => std::str::from_utf8(&[SOH as u8]).unwrap(),
+    };
+    let pat = format!("{}{}=", pat_prefix, tag);
     if let Some(indx) = s.find(pat.as_str()) {
-        let end_pos = s[indx + 1..].find(SOH).unwrap();
-        let start_pos = indx + pat.len();
-        return &s[start_pos..end_pos];
+        let field_start_pos = indx + pat_prefix.len();
+        // ignore the first SOH prefix, if any, and start from tag
+        let end_pos = s[field_start_pos..].find(SOH).unwrap();
+        let start_pos = s[field_start_pos..].find('=').unwrap();
+        return &s[field_start_pos + start_pos + 1..field_start_pos + end_pos];
     }
     ""
 }

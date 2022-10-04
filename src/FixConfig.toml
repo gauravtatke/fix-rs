@@ -3,6 +3,6 @@ connection_type = "acceptor"
 begin_string = "FIX.4.3"
 
 [Session]
-sender_comp_id = "FIXIMULLATOR"
+sender_comp_id = "FIXIMULATOR"
 target_comp_id = "BANZAI"
 socket_accept_port = 10114

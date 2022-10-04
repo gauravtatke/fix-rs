@@ -4,9 +4,11 @@ use crate::session::*;
 use getset::Getters;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct SessionState;
 
 impl SessionState {
@@ -15,7 +17,7 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Default, Getters)]
+#[derive(Debug, Default, Getters, Clone)]
 pub struct Session {
     pub session_id: SessionId,
     heartbeat_intrvl: u32,
@@ -25,7 +27,8 @@ pub struct Session {
     reset_on_disconnect: bool,
     msg_q: VecDeque<Message>,
     state: SessionState,
-    responder: Option<Arc<Mutex<TcpStream>>>,
+    // session_map: Option<Arc<Mutex<HashMap<se>>>>,
+    responder: Option<Arc<Mutex<OwnedWriteHalf>>>,
     #[getset(get = "pub")]
     data_dictionary: DataDictionary,
 }
@@ -65,11 +68,24 @@ impl Session {
         }
     }
 
-    pub fn verify(&self, msg: &Message) -> Result<(), &'static str> {
-        todo!()
+    pub fn set_responder(&mut self, resp: Arc<Mutex<OwnedWriteHalf>>) {
+        self.responder = Some(resp);
     }
 
-    pub fn send_to_target(&self, msg: &str) {
-        todo!()
+    pub fn verify(&self, msg: &Message) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    pub async fn send_to_target(&self, msg: &str) {
+        match &self.responder {
+            Some(r) => {
+                {
+                    let mut write_guard = r.lock().unwrap();
+                    write_guard.write_all(msg.as_bytes()).await.unwrap();
+                }
+                println!("just put here so that above extra scope is removed while autoformatting");
+            }
+            None => panic!("no responder found"),
+        };
     }
 }
