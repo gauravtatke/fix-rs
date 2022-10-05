@@ -9,9 +9,9 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::{self, FromStr};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::{
     self, io::AsyncBufReadExt, io::BufReader, net::TcpListener, net::TcpStream, task::JoinHandle,
 };
@@ -87,14 +87,17 @@ impl PartialEq<SocketAddr> for SocketDescriptor {
 
 impl Eq for SocketDescriptor {}
 
-#[derive(Debug)]
+#[derive(Debug, Getters, Setters)]
+#[getset(get)]
 pub struct SocketAcceptor<A: Application + Send + Sync> {
     settings: Properties,
     connection_type: ConnectionType,
     session_map: Arc<Mutex<HashMap<SessionId, Session>>>,
     sock_descriptors: Arc<Mutex<HashMap<SocketAddr, bool>>>,
-    receiver: Option<mpsc::Receiver<String>>,
-    sender: mpsc::Sender<String>,
+    #[getset(set)]
+    receiver: Option<mpsc::Receiver<String>>, // receive raw string msg from socket handling task
+    #[getset(set)]
+    // sender: Option<mpsc::Sender<Message>>, // send message to socket handling task
     // connection: Arc<Mutex<HashMap<SessionId, OwnedWriteHalf>>>,
     app: Arc<A>,
 }
@@ -105,14 +108,13 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         let socket_desc = create_socket_descriptors(&settings);
         let connection_type: ConnectionType =
             settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
-        let (tx, rx) = mpsc::channel(64);
         Self {
             settings,
             connection_type,
             session_map: Arc::new(Mutex::new(session_map)),
             sock_descriptors: Arc::new(Mutex::new(socket_desc)),
-            receiver: Some(rx),
-            sender: tx,
+            receiver: None,
+            // sender: None,
             // connection: Arc::new(Mutex::new(HashMap::new())),
             app: Arc::new(app),
         }
@@ -126,108 +128,88 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         Message::new()
     }
 
-    pub fn set_connection_type(&mut self, con_ty: ConnectionType) {
-        self.connection_type = con_ty;
-    }
-
-    pub fn get_connection_type(&self) -> &ConnectionType {
-        &self.connection_type
-    }
-
     // pub fn get_session(&self, sid: &SessionId) -> Option<&Session> {
     //     self.session_map.lock().unwrap().get(sid)
     // }
+    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: Sender<Message>) {
+        let mut sguard = self.session_map().lock().unwrap();
+        sguard.get_mut(session_id).map(|session| session.set_responder(Some(msg_sender)));
+    }
 
-    pub fn initialize(&mut self) {
-        let smap = self
-            .session_map
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(sid, s)| (sid.clone(), s.clone()))
-            .collect::<HashMap<SessionId, Session>>();
-        for (sid, _) in smap.iter() {
-            // get the socket accept port
-            let session_accept_port: u16 =
-                self.settings.get_or_default(sid, SOCKET_ACCEPT_PORT_SETTING).unwrap();
-            println!("Got the port: {}", session_accept_port);
-            let tx = self.sender.clone();
-            let socket_desc = Arc::clone(&self.sock_descriptors);
-            let sessions = Arc::clone(&self.session_map);
-            let sid_clone = sid.clone();
-            tokio::spawn(async move {
-                let mut connections: HashMap<SocketAddr, Arc<Mutex<OwnedWriteHalf>>> =
-                    HashMap::new();
-                let sock_addrs = ("127.0.0.1", session_accept_port);
-                let existing_sock_addr = sock_addrs
-                    .clone()
-                    .to_socket_addrs()
-                    .unwrap()
-                    .find(|addr| socket_desc.lock().unwrap().contains_key(addr))
-                    .unwrap();
-                let already_connected =
-                    socket_desc.lock().unwrap().get(&existing_sock_addr).cloned().unwrap();
-
-                if already_connected {
-                    // for the session_id, add this socket_addr
-                    let responder = Arc::clone(connections.get(&existing_sock_addr).unwrap());
-                    {
-                        // extra scope because mutex guard is not Send
-                        let mut session_guard = sessions.lock().unwrap();
-                        let session = session_guard.get_mut(&sid_clone).unwrap();
-                        session.set_responder(responder);
-                    }
-                } else {
-                    let listener = TcpListener::bind(sock_addrs).await.unwrap();
-                    let local_addr = listener.local_addr().unwrap();
-                    socket_desc.lock().unwrap().insert(local_addr, true);
-                    println!("Port binding done");
-                    loop {
-                        let (stream, _) = listener.accept().await.unwrap();
-                        println!("Accepted connection");
-                        let local_addr = stream.local_addr().unwrap();
-                        let (owned_read_half, owned_write_half) = stream.into_split();
-                        let responder = Arc::new(Mutex::new(owned_write_half));
-                        connections.insert(local_addr, Arc::clone(&responder));
-                        {
-                            let mut session_guard = sessions.lock().unwrap();
-                            let sessn = session_guard.get_mut(&sid_clone).unwrap();
-                            sessn.set_responder(responder);
-                        }
-                        incoming_messages(owned_read_half, &tx).await;
-                    }
-                }
-            });
+    pub fn initialize_new(&mut self) {
+        let session_socket = create_socket_session(self.settings());
+        let (raw_tx, raw_rx) = mpsc::channel::<String>(64);
+        for (sock_addr, id_set) in session_socket {
+            let (msg_tx, msg_rx) = mpsc::channel::<Message>(8);
+            for sid in id_set {
+                self.set_session_responder(&sid, msg_tx.clone())
+            }
+            let tx = raw_tx.clone();
+            let socket_descriptor = Arc::clone(self.sock_descriptors());
+            start_acceptor_task(sock_addr, socket_descriptor, tx, msg_rx);
         }
 
-        // start a receiver task
-        let receiver = self.receiver.take();
-        let app = Arc::clone(&self.app);
-        let sessions = Arc::clone(&self.session_map);
-        tokio::spawn(async move {
-            let mut receiver = receiver.unwrap();
-            while let Some(s) = receiver.recv().await {
-                println!("received: {}", s);
-                let session_id: SessionId = Message::get_reverse_session_id(&s);
-                {
+        start_receiver_task(raw_rx, Arc::clone(self.app()), Arc::clone(self.session_map()));
+    }
+}
+
+fn start_acceptor_task(
+    sock_addr: SocketAddr, socket_descriptor: Arc<Mutex<HashMap<SocketAddr, bool>>>,
+    tx: mpsc::Sender<String>, msg_rx: Receiver<Message>,
+) {
+    tokio::spawn(async move {
+        let listener = TcpListener::bind(sock_addr).await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        socket_descriptor.lock().unwrap().insert(local_addr, true);
+        println!("Port binding done");
+        // let mut msg_rx = Arc::new(msg_rx);
+        let (stream, _) = listener.accept().await.unwrap();
+        println!("Accepted connection");
+        let local_addr = stream.local_addr().unwrap();
+        // let (owned_read_half, owned_write_half) = stream.into_split();
+        // let responder = Arc::new(Mutex::new(owned_write_half));
+        // connections.insert(local_addr, Arc::clone(&responder));
+        handle_message_io(stream, &tx, msg_rx).await;
+    });
+}
+
+fn start_receiver_task<A: Application + Send + Sync + 'static>(
+    mut rx: Receiver<String>, app: Arc<A>, sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
+) {
+    tokio::spawn(async move {
+        while let Some(s) = rx.recv().await {
+            println!("received: {}", s);
+            let session_id: SessionId = Message::get_reverse_session_id(&s);
+            {
+                let dd = {
                     let session_guard = sessions.lock().unwrap();
                     let session = session_guard.get(&session_id).unwrap();
-                    let dd: &DataDictionary = session.data_dictionary();
-                    if let Ok(message) = Message::from_str(&s, dd) {
-                        println!("msg parsed: {:?}", &message);
-                        if let Ok(_) = session.verify(&message) {
-                            app.from_app(session_id, message);
-                        } else {
-                            session.send_to_target("session_verification failed").await;
-                        }
+                    Arc::clone(session.data_dictionary())
+                };
+                if let Ok(message) = Message::from_str(&s, &dd) {
+                    println!("msg parsed: {:?}", &message);
+                    if let Ok(_) = Session::verify(&message, &sessions) {
+                        app.from_app(session_id, message);
                     } else {
-                        session.send_to_target("invalid message").await;
+                        let mut test_message = Message::new();
+                        test_message.header_mut().set_field(StringField::new(8, "FIX.4.3"));
+                        test_message.header_mut().set_field(StringField::new(9, "102"));
+                        test_message.header_mut().set_field(StringField::new(35, "A"));
+                        test_message.set_checksum();
+                        Session::send(test_message, session_id.clone(), Arc::clone(&sessions));
                     }
+                } else {
+                    let mut test_message = Message::new();
+                    test_message.header_mut().set_field(StringField::new(8, "FIX.4.3"));
+                    test_message.header_mut().set_field(StringField::new(9, "102"));
+                    test_message.header_mut().set_field(StringField::new(35, "A"));
+                    test_message.set_checksum();
+                    Session::send(test_message, session_id.clone(), Arc::clone(&sessions));
                 }
-                // app.from_app(s);
             }
-        });
-    }
+            // app.from_app(s);
+        }
+    });
 }
 
 fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
@@ -239,6 +221,37 @@ fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
         session_map.insert(session_id.clone(), session);
     }
     session_map
+}
+
+fn create_socket_session(settings: &Properties) -> HashMap<SocketAddr, HashSet<SessionId>> {
+    let mut result_map = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let (host, port): (String, u16) = match connection_type {
+            ConnectionType::ACCEPTOR => (
+                SOCKET_ACCEPT_HOST_IP.to_string(),
+                settings.get_or_default(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
+            ),
+            ConnectionType::INITIATOR => (
+                settings.get_or_default(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
+                settings.get_or_default(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
+            ),
+        };
+        let addr_str = format!("{}:{}", host, port);
+        let sock_address = addr_str.parse::<SocketAddr>().unwrap();
+        result_map
+            .entry(sock_address)
+            .and_modify(|set: &mut HashSet<SessionId>| {
+                set.insert(session_id.clone());
+            })
+            .or_insert_with(|| {
+                let mut s = HashSet::new();
+                s.insert(session_id.clone());
+                s
+            });
+    }
+    result_map
 }
 
 fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool> {
@@ -263,14 +276,38 @@ fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool>
     descriptor
 }
 
-async fn incoming_messages<R: AsyncReadExt + Unpin>(tcp_stream: R, tx: &mpsc::Sender<String>) {
+fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: Receiver<Message>) {
+    tokio::spawn(async move {
+        println!("starting internal msg receiv");
+        // if there is message to be sent out to remote socket then read and send
+        while let Some(msg) = rx.recv().await {
+            let msg_repr = format!("{:?}", msg);
+            println!("sending {}", &msg_repr);
+            let _res = write_stream.write_all(format!("{:?}", msg).as_bytes()).await.unwrap();
+            println!("sent {}", &msg_repr);
+        }
+    });
+}
+
+async fn handle_message_io(
+    stream: TcpStream, tx: &mpsc::Sender<String>, rx: mpsc::Receiver<Message>,
+) {
     println!("handling connection");
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
-    let mut buf_reader = BufReader::new(tcp_stream);
+    let (read_half, write_half) = stream.into_split();
+    let mut buf_reader = BufReader::new(read_half);
+    start_internal_msg_receiver_task(write_half, rx);
+
     loop {
+        println!("reading msg");
         read_message(&mut buf_reader, &mut buf).await;
+        // send message back to application
         tx.send(String::from_utf8_lossy(&buf[..buf.len()]).to_string()).await.unwrap();
         buf.clear();
+        // match rx.recv().await {
+        //     Some(m) => println!("msg to send {:?}", m),
+        //     None => println!("error receiving"),
+        // };
     }
 }
 
@@ -288,6 +325,11 @@ async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut Vec<
             break;
         }
     }
+}
+
+fn test_heartbeat() -> Message {
+    let mut heartbeat = Message::new();
+    heartbeat
 }
 
 #[cfg(test)]

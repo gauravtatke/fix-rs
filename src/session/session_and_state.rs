@@ -1,12 +1,15 @@
 use crate::data_dictionary::DataDictionary;
+use crate::fields::MaxMessageSize;
 use crate::message::*;
 use crate::session::*;
 use getset::Getters;
-use std::collections::VecDeque;
+use getset::Setters;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Default, Clone)]
 struct SessionState;
@@ -17,7 +20,7 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Default, Getters, Clone)]
+#[derive(Debug, Default, Getters, Setters, Clone)]
 pub struct Session {
     pub session_id: SessionId,
     heartbeat_intrvl: u32,
@@ -28,9 +31,10 @@ pub struct Session {
     msg_q: VecDeque<Message>,
     state: SessionState,
     // session_map: Option<Arc<Mutex<HashMap<se>>>>,
-    responder: Option<Arc<Mutex<OwnedWriteHalf>>>,
+    #[getset(set = "pub")]
+    responder: Option<mpsc::Sender<Message>>,
     #[getset(get = "pub")]
-    data_dictionary: DataDictionary,
+    data_dictionary: Arc<DataDictionary>,
 }
 
 impl Session {
@@ -64,28 +68,31 @@ impl Session {
             is_active: false,
             state: SessionState::default(),
             responder: None,
-            data_dictionary,
+            data_dictionary: Arc::new(data_dictionary),
         }
     }
 
-    pub fn set_responder(&mut self, resp: Arc<Mutex<OwnedWriteHalf>>) {
-        self.responder = Some(resp);
-    }
-
-    pub fn verify(&self, msg: &Message) -> Result<(), &'static str> {
+    pub fn verify(
+        msg: &Message, sessions: &Arc<Mutex<HashMap<SessionId, Session>>>,
+    ) -> Result<(), &'static str> {
         Ok(())
     }
 
-    pub async fn send_to_target(&self, msg: &str) {
-        match &self.responder {
-            Some(r) => {
-                {
-                    let mut write_guard = r.lock().unwrap();
-                    write_guard.write_all(msg.as_bytes()).await.unwrap();
-                }
-                println!("just put here so that above extra scope is removed while autoformatting");
-            }
-            None => panic!("no responder found"),
-        };
+    pub fn send(
+        msg: Message, session_id: SessionId, sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
+    ) {
+        use std::thread;
+        let handle = thread::spawn(move || {
+            println!("synchrnous spawned thread");
+            let guard = sessions.lock().unwrap();
+            let session = guard.get(&session_id).unwrap();
+            session.send_to_target(msg);
+        });
+        handle.join().unwrap();
+    }
+
+    pub fn send_to_target(&self, msg: Message) {
+        let responder = self.responder.as_ref().unwrap();
+        responder.blocking_send(msg).unwrap();
     }
 }

@@ -211,7 +211,7 @@ impl Message {
     }
 
     pub fn set_checksum(&mut self) {
-        todo!()
+        self.trailer_mut().set_field(StringField::new(10, "098"));
     }
 
     fn get_msg_type(&self) -> Result<String, String> {
