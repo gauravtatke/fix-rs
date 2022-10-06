@@ -191,20 +191,10 @@ fn start_receiver_task<A: Application + Send + Sync + 'static>(
                     if let Ok(_) = Session::verify(&message, &sessions) {
                         app.from_app(session_id, message);
                     } else {
-                        let mut test_message = Message::new();
-                        test_message.header_mut().set_field(StringField::new(8, "FIX.4.3"));
-                        test_message.header_mut().set_field(StringField::new(9, "102"));
-                        test_message.header_mut().set_field(StringField::new(35, "A"));
-                        test_message.set_checksum();
-                        Session::send(test_message, session_id.clone(), Arc::clone(&sessions));
+                        Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
                     }
                 } else {
-                    let mut test_message = Message::new();
-                    test_message.header_mut().set_field(StringField::new(8, "FIX.4.3"));
-                    test_message.header_mut().set_field(StringField::new(9, "102"));
-                    test_message.header_mut().set_field(StringField::new(35, "A"));
-                    test_message.set_checksum();
-                    Session::send(test_message, session_id.clone(), Arc::clone(&sessions));
+                    Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
                 }
             }
             // app.from_app(s);
@@ -281,10 +271,9 @@ fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: Re
         println!("starting internal msg receiv");
         // if there is message to be sent out to remote socket then read and send
         while let Some(msg) = rx.recv().await {
-            let msg_repr = format!("{:?}", msg);
-            println!("sending {}", &msg_repr);
-            let _res = write_stream.write_all(format!("{:?}", msg).as_bytes()).await.unwrap();
-            println!("sent {}", &msg_repr);
+            println!("sending {}", &msg);
+            let _res = write_stream.write_all(format!("{}", &msg).as_bytes()).await.unwrap();
+            println!("sent {}", &msg);
         }
     });
 }
@@ -327,8 +316,19 @@ async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut Vec<
     }
 }
 
-fn test_heartbeat() -> Message {
+fn test_logon() -> Message {
     let mut heartbeat = Message::new();
+    heartbeat.header_mut().set_field(StringField::new(8, "FIX.4.3"));
+    heartbeat.header_mut().set_field(StringField::new(35, "A"));
+    heartbeat.header_mut().set_field(StringField::new(34, "1"));
+    heartbeat.header_mut().set_field(StringField::new(49, "FIXIMULATOR"));
+    heartbeat.header_mut().set_field(StringField::new(56, "BANZAI"));
+    heartbeat.set_field(StringField::new(98, "0"));
+    heartbeat.set_field(StringField::new(108, "30"));
+    heartbeat.set_sending_time();
+    heartbeat.set_body_len();
+    heartbeat.set_checksum();
+    // heartbeat.trailer_mut().set_field(StringField::new(10, "110"));
     heartbeat
 }
 
