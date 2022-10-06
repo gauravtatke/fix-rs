@@ -1,28 +1,38 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+use getset::{Getters, Setters};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Error, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::hash::Hash;
+use std::io::{Error, Read, Write};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::{self, FromStr};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::{self, net::TcpListener, net::TcpStream, task::JoinHandle};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::{
+    self, io::AsyncBufReadExt, io::BufReader, net::TcpListener, net::TcpStream, task::JoinHandle,
+};
 
 use crate::application::Application;
 use crate::{data_dictionary::*, session};
 // use crate::message::store::*;
 
 use crate::message::*;
-use crate::session::session_constants::*;
+use crate::session::*;
 use crate::session::*;
 
+pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
 // pub trait Connecter {
 //     fn start(&self) -> Vec<thread::JoinHandle<()>>;
 //     fn stop();
 // }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, Default, PartialEq)]
 pub enum ConnectionType {
+    #[default]
     ACCEPTOR,
     INITIATOR,
 }
@@ -40,28 +50,74 @@ impl FromStr for ConnectionType {
     }
 }
 
-#[derive(Debug)]
-pub struct SocketAcceptor {
-    connection_type: ConnectionType,
-    session_map: HashMap<SessionId, Session>,
-    sockets: HashSet<SocketAddrV4>,
+#[derive(Debug, Getters, Setters)]
+struct SocketDescriptor {
+    #[getset(get)]
+    addr: SocketAddr,
+    #[getset(get, set)]
+    is_connected: bool,
 }
 
-impl Default for SocketAcceptor {
-    fn default() -> Self {
+impl SocketDescriptor {
+    fn new(sock: SocketAddr) -> Self {
         Self {
-            connection_type: ConnectionType::ACCEPTOR,
-            session_map: HashMap::new(),
-            sockets: HashSet::new(),
+            addr: sock,
+            is_connected: false,
         }
     }
 }
 
-impl SocketAcceptor {
-    pub fn new(settings: &Properties) -> Self {
-        let mut socket_connector = SocketAcceptor::default();
-        socket_connector.create_sessions(settings);
-        socket_connector
+impl Hash for SocketDescriptor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.addr.hash(state);
+    }
+}
+
+impl PartialEq for SocketDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr
+    }
+}
+
+impl PartialEq<SocketAddr> for SocketDescriptor {
+    fn eq(&self, other: &SocketAddr) -> bool {
+        self.addr == *other
+    }
+}
+
+impl Eq for SocketDescriptor {}
+
+#[derive(Debug, Getters, Setters)]
+#[getset(get)]
+pub struct SocketAcceptor<A: Application + Send + Sync> {
+    settings: Properties,
+    connection_type: ConnectionType,
+    session_map: Arc<Mutex<HashMap<SessionId, Session>>>,
+    sock_descriptors: Arc<Mutex<HashMap<SocketAddr, bool>>>,
+    #[getset(set)]
+    receiver: Option<mpsc::Receiver<String>>, // receive raw string msg from socket handling task
+    #[getset(set)]
+    // sender: Option<mpsc::Sender<Message>>, // send message to socket handling task
+    // connection: Arc<Mutex<HashMap<SessionId, OwnedWriteHalf>>>,
+    app: Arc<A>,
+}
+
+impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
+    pub fn new(settings: Properties, app: A) -> Self {
+        let session_map = create_sessions(&settings);
+        let socket_desc = create_socket_descriptors(&settings);
+        let connection_type: ConnectionType =
+            settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+        Self {
+            settings,
+            connection_type,
+            session_map: Arc::new(Mutex::new(session_map)),
+            sock_descriptors: Arc::new(Mutex::new(socket_desc)),
+            receiver: None,
+            // sender: None,
+            // connection: Arc::new(Mutex::new(HashMap::new())),
+            app: Arc::new(app),
+        }
     }
 
     pub fn send(&self, msg: Message) {
@@ -72,62 +128,208 @@ impl SocketAcceptor {
         Message::new()
     }
 
-    pub fn set_connection_type(&mut self, con_ty: ConnectionType) {
-        self.connection_type = con_ty;
+    // pub fn get_session(&self, sid: &SessionId) -> Option<&Session> {
+    //     self.session_map.lock().unwrap().get(sid)
+    // }
+    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: Sender<Message>) {
+        let mut sguard = self.session_map().lock().unwrap();
+        sguard.get_mut(session_id).map(|session| session.set_responder(Some(msg_sender)));
     }
 
-    pub fn get_connection_type(&self) -> ConnectionType {
-        self.connection_type
-    }
-
-    pub fn set_session(&mut self, sid: SessionId, session: Session) {
-        self.session_map.insert(sid, session);
-    }
-
-    fn create_sessions(&mut self, settings: &Properties) {
-        let connection_type: ConnectionType =
-            settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
-        self.set_connection_type(connection_type);
-        for session_id in settings.session_ids() {
-            let session = Session::with_settings(session_id, settings);
-            self.set_session(session_id.clone(), session);
+    pub fn initialize_new(&mut self) {
+        let session_socket = create_socket_session(self.settings());
+        let (raw_tx, raw_rx) = mpsc::channel::<String>(64);
+        for (sock_addr, id_set) in session_socket {
+            let (msg_tx, msg_rx) = mpsc::channel::<Message>(8);
+            for sid in id_set {
+                self.set_session_responder(&sid, msg_tx.clone())
+            }
+            let tx = raw_tx.clone();
+            let socket_descriptor = Arc::clone(self.sock_descriptors());
+            start_acceptor_task(sock_addr, socket_descriptor, tx, msg_rx);
         }
+
+        start_receiver_task(raw_rx, Arc::clone(self.app()), Arc::clone(self.session_map()));
     }
+}
 
-    pub async fn initialize(&self, settings: &Properties) {
-        let mut join_handles: Vec<JoinHandle<()>> = Vec::new();
-        for (sid, _) in self.session_map.iter() {
-            // get the socket accept port
-            let session_accept_port: u16 =
-                settings.get_or_default(sid, SOCKET_ACCEPT_PORT_SETTING).unwrap();
-            println!("Got the port: {}", session_accept_port);
+fn start_acceptor_task(
+    sock_addr: SocketAddr, socket_descriptor: Arc<Mutex<HashMap<SocketAddr, bool>>>,
+    tx: mpsc::Sender<String>, msg_rx: Receiver<Message>,
+) {
+    tokio::spawn(async move {
+        let listener = TcpListener::bind(sock_addr).await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        socket_descriptor.lock().unwrap().insert(local_addr, true);
+        println!("Port binding done");
+        // let mut msg_rx = Arc::new(msg_rx);
+        let (stream, _) = listener.accept().await.unwrap();
+        println!("Accepted connection");
+        let local_addr = stream.local_addr().unwrap();
+        // let (owned_read_half, owned_write_half) = stream.into_split();
+        // let responder = Arc::new(Mutex::new(owned_write_half));
+        // connections.insert(local_addr, Arc::clone(&responder));
+        handle_message_io(stream, &tx, msg_rx).await;
+    });
+}
 
-            let handle = tokio::spawn(async move {
-                let listener = TcpListener::bind(("127.0.0.1", session_accept_port)).await.unwrap();
-                println!("Port binding done");
-                loop {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    println!("Accepted connection");
-                    handle_connection(stream).await;
+fn start_receiver_task<A: Application + Send + Sync + 'static>(
+    mut rx: Receiver<String>, app: Arc<A>, sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
+) {
+    tokio::spawn(async move {
+        while let Some(s) = rx.recv().await {
+            println!("received: {}", s);
+            let session_id: SessionId = Message::get_reverse_session_id(&s);
+            {
+                let dd = {
+                    let session_guard = sessions.lock().unwrap();
+                    let session = session_guard.get(&session_id).unwrap();
+                    Arc::clone(session.data_dictionary())
+                };
+                if let Ok(message) = Message::from_str(&s, &dd) {
+                    println!("msg parsed: {:?}", &message);
+                    if let Ok(_) = Session::verify(&message, &sessions) {
+                        app.from_app(session_id, message);
+                    } else {
+                        Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+                    }
+                } else {
+                    Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
                 }
-            });
-            join_handles.push(handle);
+            }
+            // app.from_app(s);
         }
-        for handle in join_handles {
-            handle.await.unwrap();
+    });
+}
+
+fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
+    let mut session_map = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let session = Session::with_settings(session_id, settings);
+        session_map.insert(session_id.clone(), session);
+    }
+    session_map
+}
+
+fn create_socket_session(settings: &Properties) -> HashMap<SocketAddr, HashSet<SessionId>> {
+    let mut result_map = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let (host, port): (String, u16) = match connection_type {
+            ConnectionType::ACCEPTOR => (
+                SOCKET_ACCEPT_HOST_IP.to_string(),
+                settings.get_or_default(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
+            ),
+            ConnectionType::INITIATOR => (
+                settings.get_or_default(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
+                settings.get_or_default(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
+            ),
+        };
+        let addr_str = format!("{}:{}", host, port);
+        let sock_address = addr_str.parse::<SocketAddr>().unwrap();
+        result_map
+            .entry(sock_address)
+            .and_modify(|set: &mut HashSet<SessionId>| {
+                set.insert(session_id.clone());
+            })
+            .or_insert_with(|| {
+                let mut s = HashSet::new();
+                s.insert(session_id.clone());
+                s
+            });
+    }
+    result_map
+}
+
+fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool> {
+    let mut descriptor = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let (host, port): (String, u16) = match connection_type {
+            ConnectionType::ACCEPTOR => (
+                SOCKET_ACCEPT_HOST_IP.to_string(),
+                settings.get_or_default(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
+            ),
+            ConnectionType::INITIATOR => (
+                settings.get_or_default(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
+                settings.get_or_default(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
+            ),
+        };
+        let addr_str = format!("{}:{}", host, port);
+        let sock_address = addr_str.parse::<SocketAddr>().unwrap();
+        descriptor.insert(sock_address, false);
+    }
+    descriptor
+}
+
+fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: Receiver<Message>) {
+    tokio::spawn(async move {
+        println!("starting internal msg receiv");
+        // if there is message to be sent out to remote socket then read and send
+        while let Some(msg) = rx.recv().await {
+            println!("sending {}", &msg);
+            let _res = write_stream.write_all(format!("{}", &msg).as_bytes()).await.unwrap();
+            println!("sent {}", &msg);
+        }
+    });
+}
+
+async fn handle_message_io(
+    stream: TcpStream, tx: &mpsc::Sender<String>, rx: mpsc::Receiver<Message>,
+) {
+    println!("handling connection");
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let (read_half, write_half) = stream.into_split();
+    let mut buf_reader = BufReader::new(read_half);
+    start_internal_msg_receiver_task(write_half, rx);
+
+    loop {
+        println!("reading msg");
+        read_message(&mut buf_reader, &mut buf).await;
+        // send message back to application
+        tx.send(String::from_utf8_lossy(&buf[..buf.len()]).to_string()).await.unwrap();
+        buf.clear();
+        // match rx.recv().await {
+        //     Some(m) => println!("msg to send {:?}", m),
+        //     None => println!("error receiving"),
+        // };
+    }
+}
+
+async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut Vec<u8>) {
+    loop {
+        let bytes_read = reader.read_until(SOH as u8, buf).await.unwrap();
+        // println!("bytes received: {:?}", &buf);
+        let slice_start = buf.len() - bytes_read;
+        let slice_end = buf.len();
+        // last read data
+        let byte_slice = &buf[slice_start..slice_end];
+        if byte_slice.starts_with(&[49, 48, 61]) {
+            // b"10="
+            // checksum tag found, break
+            break;
         }
     }
 }
 
-async fn handle_connection(mut tcp_stream: TcpStream) {
-    println!("handling connection");
-    let mut buf = [0; 512];
-    loop {
-        match tcp_stream.read(&mut buf).await {
-            Ok(bytes_read) => tcp_stream.write_all(&buf[..bytes_read]).await.unwrap(),
-            Err(_) => break,
-        };
-    }
+fn test_logon() -> Message {
+    let mut heartbeat = Message::new();
+    heartbeat.header_mut().set_field(StringField::new(8, "FIX.4.3"));
+    heartbeat.header_mut().set_field(StringField::new(35, "A"));
+    heartbeat.header_mut().set_field(StringField::new(34, "1"));
+    heartbeat.header_mut().set_field(StringField::new(49, "FIXIMULATOR"));
+    heartbeat.header_mut().set_field(StringField::new(56, "BANZAI"));
+    heartbeat.set_field(StringField::new(98, "0"));
+    heartbeat.set_field(StringField::new(108, "30"));
+    heartbeat.set_sending_time();
+    heartbeat.set_body_len();
+    heartbeat.set_checksum();
+    // heartbeat.trailer_mut().set_field(StringField::new(10, "110"));
+    heartbeat
 }
 
 #[cfg(test)]

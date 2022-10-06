@@ -1,6 +1,6 @@
 extern crate handlebars;
 extern crate serde;
-extern crate yaserde;
+// extern crate yaserde;
 
 mod code_generator;
 mod templates;

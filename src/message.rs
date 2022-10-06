@@ -1,14 +1,13 @@
-use std::collections::binary_heap::Iter;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::convert::TryFrom;
-use std::hash::Hash;
-use std::iter::Peekable;
+use std::cmp::Ordering;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::{write, Display};
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 
-use crate::data_dictionary::{DataDictionary, HEADER_ID, TRAILER_ID};
+use crate::data_dictionary::{DataDictionary, HEADER_ID};
 use crate::fields::*;
 use crate::quickfix_errors::SessionRejectError;
+use crate::session::{SessionId, SessionIdBuilder};
 
 type SessResult<T> = Result<T, SessionRejectError>;
 
@@ -45,10 +44,10 @@ pub enum Type {
 }
 
 type Tag = u32;
-// pub const SOH: char = '\u{01}';
-pub const SOH: char = '|';
+pub const SOH: char = '\u{01}';
+// pub const SOH: char = '|';
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct StringField {
     tag: Tag,
     value: String,
@@ -71,12 +70,17 @@ impl StringField {
     }
 }
 
-#[derive(Debug, Default)]
+impl Display for StringField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}={}{}", self.tag, self.value, SOH)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct FieldMap {
     fields: HashMap<Tag, StringField>,
     group: HashMap<Tag, Group>,
     field_order: Vec<Tag>,
-    calc_vec_str: Vec<String>,
 }
 
 impl FieldMap {
@@ -115,12 +119,81 @@ impl FieldMap {
         group
     }
 
+    pub fn get_group(&self, tag: Tag) -> Option<&Group> {
+        self.group.get(&tag)
+    }
+
     pub fn set_field_order(&mut self, f_order: &[Tag]) {
         self.field_order = f_order.to_vec();
+    }
+
+    pub fn iter(&self) -> FieldMapIter {
+        let mut map_iter = FieldMapIter::default();
+        map_iter.fieldmap_to_vec(self);
+        map_iter
+    }
+
+    fn is_ordered_field(&self, tag: Tag) -> bool {
+        self.field_order.contains(&tag)
+    }
+
+    fn index_comparator(&self, tag1: Tag, tag2: Tag) -> Ordering {
+        let field_index = |field: Tag| {
+            self.field_order
+                .iter()
+                .position(|needle| *needle == field)
+                .map_or(usize::MAX, |pos| pos)
+        };
+        field_index(tag1).cmp(&field_index(tag2))
+    }
+}
+
+impl std::fmt::Display for FieldMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = String::from_iter(self.iter().into_iter().map(|sfield| sfield.to_string()));
+        write!(f, "{}", s)
     }
 }
 
 #[derive(Debug, Default)]
+pub struct FieldMapIter<'a> {
+    vec_str_field: Vec<&'a StringField>,
+}
+
+impl<'a> FieldMapIter<'a> {
+    fn fieldmap_to_vec(&mut self, field_map: &'a FieldMap) {
+        let mut temp_vec: Vec<&StringField> = field_map.fields.values().collect();
+        if !field_map.field_order.is_empty() {
+            temp_vec.sort_by_cached_key(|&field| {
+                field_map
+                    .field_order
+                    .iter()
+                    .position(|needle| *needle == field.tag())
+                    .map_or(usize::MAX, |pos| pos)
+            })
+        }
+        for str_field in temp_vec {
+            let tag = str_field.tag();
+            self.vec_str_field.push(str_field);
+            if let Some(grp) = field_map.get_group(tag) {
+                for grp_field_map in grp.fields.iter() {
+                    self.fieldmap_to_vec(grp_field_map);
+                }
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for FieldMapIter<'a> {
+    type Item = &'a StringField;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.vec_str_field.into_iter()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct Group {
     delim: u32,
     tag: Tag,
@@ -164,7 +237,7 @@ impl IndexMut<usize> for Group {
 
 type Header = FieldMap;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Message {
     // fields: FieldMap,
     // groups: GroupMap,
@@ -213,17 +286,61 @@ impl Message {
         self.body.group.insert(tag, grp);
     }
 
+    fn calc_checksum(&self) -> u32 {
+        let mut byte_sum = 0u32;
+        for sfield in
+            self.header.iter().into_iter().chain(self.body.iter()).chain(self.trailer.iter())
+        {
+            if sfield.tag() != 10 {
+                for byt in sfield.to_string().as_bytes() {
+                    byte_sum = byte_sum + *byt as u32;
+                    // println!("byte sum {}, byte {}", byte_sum, byt);
+                }
+            }
+        }
+        // println!("byte sum: {}", byte_sum);
+        byte_sum % 256
+    }
+
     pub fn set_checksum(&mut self) {
-        todo!()
+        let checksum_str = format!("{:0>3}", self.calc_checksum());
+        self.trailer_mut().set_field(StringField::new(10, &checksum_str));
+    }
+
+    fn calc_body_len(&self) -> usize {
+        self.header
+            .iter()
+            .into_iter()
+            .chain(self.body.iter())
+            .chain(self.trailer.iter())
+            .filter_map(|sfield| {
+                if sfield.tag() != 8 && sfield.tag() != 9 && sfield.tag() != 10 {
+                    Some(sfield.to_string().as_bytes().len())
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
+    pub fn set_body_len(&mut self) {
+        let body_len = self.calc_body_len();
+        self.header_mut().set_field(StringField::new(9, &body_len.to_string()))
     }
 
     fn get_msg_type(&self) -> Result<String, String> {
         self.header.get_field::<String>(35)
     }
 
+    pub fn set_sending_time(&mut self) {
+        let curr_time = chrono::Utc::now();
+        let sending_time = curr_time.format("%Y%m%d-%T%.3f").to_string();
+        self.header_mut().set_field(StringField::new(52, &sending_time));
+    }
+
     pub fn from_str(s: &str, dd: &DataDictionary) -> SessResult<Self> {
         let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
-        for field in s.split_terminator('|') {
+        for field in s.split_terminator(SOH) {
             let (tag, value) = match field.split_once('=') {
                 Some((t, v)) => {
                     let parse_result = t.parse::<u32>();
@@ -242,6 +359,55 @@ impl Message {
 
         from_vec(vdeq, dd)
     }
+
+    pub fn get_session_id(s: &str) -> SessionId {
+        SessionIdBuilder::default()
+            .begin_string(extract_field_value("8", s))
+            .sender_compid(extract_field_value("49", s))
+            .sender_subid(extract_field_value("50", s))
+            .sender_locationid(extract_field_value("142", s))
+            .target_compid(extract_field_value("56", s))
+            .target_subid(extract_field_value("57", s))
+            .target_locationid(extract_field_value("143", s))
+            .build()
+            .unwrap()
+    }
+
+    pub fn get_reverse_session_id(s: &str) -> SessionId {
+        // sender values from message is put into target & vice-versa
+        SessionIdBuilder::default()
+            .begin_string(extract_field_value("8", s))
+            .sender_compid(extract_field_value("56", s))
+            .sender_subid(extract_field_value("57", s))
+            .sender_locationid(extract_field_value("143", s))
+            .target_compid(extract_field_value("49", s))
+            .target_subid(extract_field_value("50", s))
+            .target_locationid(extract_field_value("142", s))
+            .build()
+            .unwrap()
+    }
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}{}", self.header(), self.body, self.trailer())
+    }
+}
+
+fn extract_field_value<'a>(tag: &str, s: &'a str) -> &'a str {
+    let pat_prefix = match tag {
+        "8" => "",
+        _ => std::str::from_utf8(&[SOH as u8]).unwrap(),
+    };
+    let pat = format!("{}{}=", pat_prefix, tag);
+    if let Some(indx) = s.find(pat.as_str()) {
+        let field_start_pos = indx + pat_prefix.len();
+        // ignore the first SOH prefix, if any, and start from tag
+        let end_pos = s[field_start_pos..].find(SOH).unwrap();
+        let start_pos = s[field_start_pos..].find('=').unwrap();
+        return &s[field_start_pos + start_pos + 1..field_start_pos + end_pos];
+    }
+    ""
 }
 
 fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Message> {
@@ -379,4 +545,21 @@ fn parse_trailer(
 }
 pub const SAMPLE_MSG: &str = "8=FIX.4.2|9=251|35=D|49=AFUNDMGR|56=ABROKER|34=2|52=2003061501:14:49|11=12345|1=111111|63=0|64=20030621|21=3|110=1000|111=50000|55=IBM|48=459200101|22=1|54=1|60=2003061501:14:49|38=5000|40=1|44=15.75|15=USD|59=0|10=127|";
 
-pub struct MessageBuilder {}
+#[cfg(test)]
+mod message_test {
+    use super::*;
+    #[cfg(test)]
+    use crate::data_dictionary::*;
+    use lazy_static::*;
+
+    const SOH: u8 = b'|';
+    const MSG_STR: &str = "8=FIX.4.3|9=73|35=A|34=35|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=061|";
+    lazy_static! {
+        static ref DD: DataDictionary = DataDictionary::from_xml("resources/FIX43.xml");
+    }
+
+    fn basic_test() {
+        let msg = Message::from_str(MSG_STR, &DD);
+        assert!(msg.is_ok());
+    }
+}
