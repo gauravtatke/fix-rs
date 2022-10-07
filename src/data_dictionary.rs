@@ -4,14 +4,15 @@ use std::iter::Iterator;
 use std::{fmt, fs, path::Path, str::FromStr};
 
 use crate::quickfix_errors::*;
+use getset::{CopyGetters, Getters};
 use indexmap::IndexSet;
 use roxmltree::{Document, Node};
 
 type NodeMap<'a, 'i> = HashMap<String, Node<'a, 'i>>;
 type DResult<T> = Result<T, XmlError>;
 
-pub(crate) const HEADER_ID: &str = "Header";
-pub(crate) const TRAILER_ID: &str = "Trailer";
+pub(crate) const HEADER_ID: &str = "header";
+pub(crate) const TRAILER_ID: &str = "trailer";
 
 #[derive(Debug, Copy, Clone)]
 pub enum FixType {
@@ -320,7 +321,7 @@ impl DataDictionary {
         }
         let group_info = GroupInfo {
             delimiter,
-            group_dd,
+            data_dictionary: group_dd,
         };
         let group_name = get_name_attr(group_node)?;
         let group_tag = lookup_field_num_with_name(group_name, doc)?;
@@ -451,10 +452,10 @@ impl FromStr for DataDictionary {
         let component_map: NodeMap = get_component_nodes_by_name(component_node)?;
 
         let header_node = lookup_node(HEADER_ID, &doc)?;
-        dd.add_xml_message(&HEADER_ID.to_ascii_lowercase(), &header_node, &component_map, &doc)?;
+        dd.add_xml_message(&HEADER_ID, &header_node, &component_map, &doc)?;
 
         let trailer_node = lookup_node(TRAILER_ID, &doc)?;
-        dd.add_xml_message(&TRAILER_ID.to_ascii_lowercase(), &trailer_node, &component_map, &doc)?;
+        dd.add_xml_message(&TRAILER_ID, &trailer_node, &component_map, &doc)?;
 
         let messages = lookup_node("messages", &doc)?;
         dd.add_all_xml_messages(&messages, &component_map, &doc)?;
@@ -463,20 +464,12 @@ impl FromStr for DataDictionary {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Getters, CopyGetters)]
 pub struct GroupInfo {
+    #[getset(get_copy = "pub")]
     delimiter: u32,
-    group_dd: DataDictionary,
-}
-
-impl GroupInfo {
-    pub fn get_data_dictionary(&self) -> &DataDictionary {
-        &self.group_dd
-    }
-
-    pub fn get_delimiter(&self) -> u32 {
-        self.delimiter
-    }
+    #[getset(get = "pub")]
+    data_dictionary: DataDictionary,
 }
 
 /********************* ALL XML PARSING RELATED CODE ********************************************/
@@ -582,7 +575,7 @@ fn get_field_values(node: &Node) -> DResult<HashSet<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+mod dictionary_tests {
     use super::*;
     #[cfg(test)]
     use assert_matches::*;
@@ -772,9 +765,9 @@ mod tests {
             group_tag
         );
         let group_info = parent_dd.get_msg_group(msg_type, group_tag).unwrap();
-        let group_dd = group_info.get_data_dictionary();
+        let group_dd = group_info.data_dictionary();
         assert_msg(msg_type, group_dd, flds, req_flds);
-        assert_eq!(delim, group_info.get_delimiter(), "delimiter error");
+        assert_eq!(delim, group_info.delimiter(), "delimiter error");
         assert_eq!(field_order, group_dd.get_ordered_fields().as_slice(), "field order error");
     }
 
@@ -1482,7 +1475,7 @@ mod tests {
         // verify group6
         assert_group("E", 96, &dd, &[102, 97, 93], Some(&[102, 97]), 102, &[102, 97, 93]);
         let group6_info = dd.get_msg_group("E", 96).unwrap();
-        let grp6_dd = group6_info.get_data_dictionary();
+        let grp6_dd = group6_info.data_dictionary();
         // verify group7
         assert_group("E", 97, &grp6_dd, &[41], Some(&[41]), 41, &[41]);
         // verify group3
@@ -1513,7 +1506,7 @@ mod tests {
         // verify group6
         assert_group("E", 96, &dd, &[102, 97, 93], None, 102, &[102, 97, 93]);
         let group6_info = dd.get_msg_group("E", 96).unwrap();
-        let grp6_dd = group6_info.get_data_dictionary();
+        let grp6_dd = group6_info.data_dictionary();
         // verify group7
         assert_group("E", 97, &grp6_dd, &[41], Some(&[41]), 41, &[41]);
         // verify group3
@@ -1587,13 +1580,13 @@ mod tests {
         // verify group6
         assert_group("E", 96, &dd, &[102, 92, 97, 93], exp_req_fields, 102, &[102, 92, 97, 93]);
         let group6_info = dd.get_msg_group("E", 96).unwrap();
-        let group6_dd = group6_info.get_data_dictionary();
+        let group6_dd = group6_info.data_dictionary();
         //verify group2 (group of the comp "CompWithOnlyReqGroup")
         assert_group("E", 92, &group6_dd, &[21, 22], Some(&[22]), 21, &[21, 22]);
         // verify group7 (subgroup of group6)
         assert_group("E", 97, &group6_dd, &[41, 1, 2, 91], None, 41, &[41, 1, 2, 91]);
         let group7_info = group6_dd.get_msg_group("E", 97).unwrap();
-        let group7_dd = group7_info.get_data_dictionary();
+        let group7_dd = group7_info.data_dictionary();
         // verify group1 (group of CompWithFieldsAndNonReqGroup)
         assert_group("E", 91, &group7_dd, &[11, 12], None, 11, &[11, 12]);
         // verify group3

@@ -1,3 +1,4 @@
+use getset::{CopyGetters, Getters, MutGetters};
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{write, Display};
@@ -47,9 +48,12 @@ type Tag = u32;
 pub const SOH: char = '\u{01}';
 // pub const SOH: char = '|';
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, CopyGetters, Getters)]
 pub struct StringField {
+    #[getset(get_copy = "pub")]
     tag: Tag,
+
+    #[getset(get = "pub")]
     value: String,
 }
 
@@ -61,13 +65,13 @@ impl StringField {
         }
     }
 
-    pub fn tag(&self) -> u32 {
-        self.tag
-    }
+    // pub fn tag(&self) -> u32 {
+    //     self.tag
+    // }
 
-    pub fn value(&self) -> &str {
-        self.value.as_str()
-    }
+    // pub fn value(&self) -> &str {
+    //     self.value.as_str()
+    // }
 }
 
 impl Display for StringField {
@@ -193,13 +197,18 @@ impl<'a> IntoIterator for FieldMapIter<'a> {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, CopyGetters, Getters)]
 pub struct Group {
+    #[getset(get_copy)]
     delim: u32,
+
+    #[getset(get_copy)]
     tag: Tag,
+
+    #[getset(get_copy)]
     value: u32,
+
     fields: Vec<FieldMap>,
-    // groups: GroupMap,
 }
 
 impl Group {
@@ -237,10 +246,9 @@ impl IndexMut<usize> for Group {
 
 type Header = FieldMap;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, MutGetters, Getters)]
+#[getset(get = "pub", get_mut = "pub")]
 pub struct Message {
-    // fields: FieldMap,
-    // groups: GroupMap,
     pub header: Header,
     pub body: FieldMap,
     trailer: FieldMap,
@@ -252,22 +260,6 @@ impl Message {
             header: FieldMap::with_field_order(&[8, 9, 35]),
             ..Default::default()
         }
-    }
-
-    pub fn header(&self) -> &Header {
-        &self.header
-    }
-
-    pub fn header_mut(&mut self) -> &mut Header {
-        &mut self.header
-    }
-
-    pub fn trailer(&self) -> &FieldMap {
-        &self.trailer
-    }
-
-    pub fn trailer_mut(&mut self) -> &mut FieldMap {
-        &mut self.trailer
     }
 
     pub fn set_field(&mut self, fld: StringField) {
@@ -282,6 +274,10 @@ impl Message {
         self.body.set_group(tag, value, rep_grp_delimiter)
     }
 
+    pub fn get_group(&self, tag: Tag) -> Option<&Group> {
+        self.body.get_group(tag)
+    }
+
     fn add_group(&mut self, tag: Tag, grp: Group) {
         self.body.group.insert(tag, grp);
     }
@@ -294,11 +290,9 @@ impl Message {
             if sfield.tag() != 10 {
                 for byt in sfield.to_string().as_bytes() {
                     byte_sum = byte_sum + *byt as u32;
-                    // println!("byte sum {}, byte {}", byte_sum, byt);
                 }
             }
         }
-        // println!("byte sum: {}", byte_sum);
         byte_sum % 256
     }
 
@@ -423,23 +417,23 @@ fn parse_group(
     dd: &DataDictionary,
 ) -> SessResult<()> {
     let rg = dd
-        .get_msg_group(HEADER_ID, fld.tag())
+        .get_msg_group(msg_type, fld.tag())
         .ok_or_else(SessionRejectError::tag_not_defined_for_msg)?;
-    let rg_dd = rg.get_data_dictionary();
+    let rg_dd = rg.data_dictionary();
     let field_order = rg_dd.get_ordered_fields();
     let group_count_tag = fld.tag();
     let declared_count = match fld.value().parse::<u32>() {
         Ok(c) => c,
         Err(e) => return Err(SessionRejectError::incorrect_data_format_err()),
     };
-    let delimiter = rg.get_delimiter();
+    let delimiter = rg.delimiter();
     let group = fmap.set_group(fld.tag(), declared_count, delimiter);
     let mut actual_count: i32 = -1;
     let mut previous_offset: i32 = -1;
     while let Some(next_field) = v.pop_front() {
         if next_field.tag() == delimiter {
             actual_count += 1;
-            if actual_count + 1 >= declared_count as i32 {
+            if actual_count >= declared_count as i32 {
                 // incorrect NumInGroups
                 return Err(SessionRejectError::incorrect_num_in_grp_count());
             }
@@ -448,16 +442,17 @@ fn parse_group(
             let group_instance = &mut group[actual_count as usize];
             group_instance.set_field_order(&field_order);
             if rg_dd.is_msg_group(msg_type, next_field.tag()) {
-                parse_group(v, msg_type, &next_field, group_instance, dd)?;
+                parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
             } else {
                 group_instance.set_field(next_field);
             }
         } else if rg_dd.is_msg_group(msg_type, next_field.tag()) {
             if actual_count < 0 {
+                // delimiter not found but other tag is encountered
                 return Err(SessionRejectError::required_tag_missing_err());
             }
             let group_instance = &mut group[actual_count as usize];
-            parse_group(v, msg_type, &next_field, group_instance, dd)?;
+            parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
         } else if rg_dd.is_msg_field(msg_type, next_field.tag()) {
             if actual_count < 0 {
                 // means first field not found i.e. delimiter
@@ -490,7 +485,7 @@ fn parse_header(
 ) -> SessResult<()> {
     if v[0].tag() != BeginString::field()
         || v[1].tag() != BodyLength::field()
-        || v[3].tag() != MsgType::field()
+        || v[2].tag() != MsgType::field()
     {
         return Err(SessionRejectError::tag_specified_out_of_order());
     }
@@ -552,14 +547,108 @@ mod message_test {
     use crate::data_dictionary::*;
     use lazy_static::*;
 
-    const SOH: u8 = b'|';
-    const MSG_STR: &str = "8=FIX.4.3|9=73|35=A|34=35|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=061|";
+    const MSG_STR: &str = "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=061|";
     lazy_static! {
         static ref DD: DataDictionary = DataDictionary::from_xml("resources/FIX43.xml");
     }
 
-    fn basic_test() {
-        let msg = Message::from_str(MSG_STR, &DD);
-        assert!(msg.is_ok());
+    fn soh_replaced_str(s: &str) -> String {
+        let mut buff = [0u8; 1];
+        s.replace('|', SOH.encode_utf8(&mut buff))
     }
+
+    #[test]
+    fn msg_test_simple_no_group() {
+        let msg = Message::from_str(&soh_replaced_str(MSG_STR), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "A");
+        assert_eq!(msg.header().get_field::<String>(8).unwrap(), "FIX.4.3");
+    }
+
+    #[test]
+    fn msg_test_with_header_group() {
+        // header having a group, verify that its parsed
+        // header with NoHops repeating group
+        let msg_with_header: &str =  "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|627=1|628=hopcompid|629=20221006-08:43:36.522|630=0|98=0|108=30|10=061|";
+        let msg = Message::from_str(&soh_replaced_str(msg_with_header), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert!(msg.header().get_group(627).is_some());
+        let header_group = msg.header().get_group(627).unwrap();
+        assert_eq!(header_group.delim(), 628);
+        assert_eq!(header_group.size(), 1);
+        assert_eq!(header_group[0].get_field::<String>(628).unwrap(), "hopcompid");
+        assert_eq!(header_group[0].get_field::<String>(629).unwrap(), "20221006-08:43:36.522");
+        assert_eq!(header_group[0].get_field::<u32>(630).unwrap(), 0);
+    }
+
+    #[test]
+    fn msg_test_with_body_group() {
+        // message body having groups
+        let msg_body_with_repeating_group = "8=FIX.4.4|9=108|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=075|";
+        let msg = Message::from_str(&soh_replaced_str(msg_body_with_repeating_group), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "W");
+        assert!(msg.get_group(268).is_some());
+        let md_entries_grp = msg.get_group(268).unwrap();
+        assert_eq!(md_entries_grp.delim(), 269);
+        assert_eq!(md_entries_grp.size(), 2);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(269).unwrap(), 0);
+        assert_eq!(md_entries_grp[0].get_field::<f32>(270).unwrap(), 8490.07);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(271).unwrap(), 10);
+
+        assert_eq!(md_entries_grp[1].get_field::<u32>(269).unwrap(), 1);
+        assert_eq!(md_entries_grp[1].get_field::<f32>(270).unwrap(), 8519.57);
+        assert_eq!(md_entries_grp[1].get_field::<u32>(271).unwrap(), 20);
+    }
+
+    #[test]
+    fn msg_test_with_group_and_subgroups() {
+        // body having repeating groups having subgroups
+        let new_order_list = "8=FIX.4.4|9=108|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|10=075";
+        let msg = Message::from_str(&soh_replaced_str(new_order_list), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "E");
+        assert!(msg.get_group(73).is_some());
+        let no_orders_grp = msg.get_group(73).unwrap();
+        assert_eq!(no_orders_grp.delim(), 11);
+        assert_eq!(no_orders_grp.size(), 2);
+        assert_eq!(no_orders_grp[0].get_field::<String>(11).unwrap(), "ClientOrderId1");
+        assert_eq!(no_orders_grp[0].get_field::<u32>(67).unwrap(), 1);
+
+        let no_alloc_subgrp = no_orders_grp[0].get_group(78);
+        assert!(no_alloc_subgrp.is_some());
+        let no_alloc_subgrp = no_alloc_subgrp.unwrap();
+        assert_eq!(no_alloc_subgrp.size(), 2);
+        assert_eq!(no_alloc_subgrp[0].get_field::<String>(79).unwrap(), "AllocAct11");
+        assert_eq!(no_alloc_subgrp[0].get_field::<u32>(80).unwrap(), 10);
+
+        assert_eq!(no_alloc_subgrp[1].get_field::<String>(79).unwrap(), "AllocAct12");
+        assert_eq!(no_alloc_subgrp[1].get_field::<u32>(80).unwrap(), 20);
+
+        assert_eq!(no_orders_grp[1].get_field::<String>(11).unwrap(), "ClientOrderId2");
+        assert_eq!(no_orders_grp[1].get_field::<u32>(67).unwrap(), 2);
+
+        let no_alloc_subgrp2 = no_orders_grp[1].get_group(78);
+        assert!(no_alloc_subgrp2.is_some());
+        let no_alloc_subgrp2 = no_alloc_subgrp2.unwrap();
+        assert_eq!(no_alloc_subgrp2.size(), 1);
+        assert_eq!(no_alloc_subgrp2[0].get_field::<String>(79).unwrap(), "AllocAct21");
+        assert_eq!(no_alloc_subgrp2[0].get_field::<u32>(80).unwrap(), 30);
+    }
+
+    fn msg_test_trailer_with_more_fields() {
+        // trailer having all the fields of trailer and verify that it is parsed correctly
+    }
+
+    fn msg_test_invalid_checksum() {}
+
+    fn msg_test_invalid_body_length() {}
+
+    fn msg_test_soh_in_data_field() {}
+
+    fn msg_test_soh_in_non_data_field() {}
 }
