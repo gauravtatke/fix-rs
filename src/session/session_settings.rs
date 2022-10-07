@@ -78,7 +78,7 @@ impl Properties {
     fn check(&self) {
         let connection_type: String = match self.default_property(CONNECTION_TYPE_SETTING) {
             Some(s) => s,
-            None => panic!("connection type not found"),
+            None => panic!("connection_type not found"),
         };
         if connection_type != ACCEPTOR_CONN_TYPE && connection_type != INITIATOR_CONN_TYPE {
             panic!("invalid connection type");
@@ -144,7 +144,7 @@ fn parse_table(lines: &mut Peekable<Lines>) -> HashMap<String, String> {
 mod session_setting_tests {
     use super::*;
 
-    #[test]
+    // #[test]
     fn session_sample_config_test() {
         // println!("{:#?}", &session_config.sessions);
 
@@ -170,18 +170,13 @@ mod session_setting_tests {
         let accept_port = properties
             .get_or_default::<u16>(&properties.default_session_id, SOCKET_ACCEPT_PORT_SETTING);
         println!("{:?}", accept_port);
-        // let cargo_value = cargo_toml.parse::<SessionSetting>().unwrap();
-        // println!("{:#?}", cargo_value);
-        // for (key, val) in cargo_value.as_table().unwrap().iter() {
-        //     println!("key: {:?}, val: {:#?}", key, val);
-        // }
     }
 
     #[test]
     #[should_panic(expected = "default section not found")]
     fn test_no_default_section() {
         let cfg_toml = r#"
-            [[Session]]
+            [Session]
             sender_comp_id = "sender"
             target_comp_id = "target"
         "#;
@@ -189,14 +184,15 @@ mod session_setting_tests {
     }
 
     #[test]
-    #[should_panic(expected = "`connection_type` not found")]
+    #[should_panic(expected = "connection_type not found")]
     fn test_default_no_connection_type() {
         let cfg_toml = r#"
             [Default]
+            begin_string = "FIX.4.3"
             sender_comp_id = "sender"
             target_comp_id = "target"
 
-            [[Session]]
+            [Session]
             sender_comp_id = "sender"
             target_comp_id = "target"
         "#;

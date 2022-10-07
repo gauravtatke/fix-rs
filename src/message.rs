@@ -274,6 +274,10 @@ impl Message {
         self.body.set_group(tag, value, rep_grp_delimiter)
     }
 
+    pub fn get_group(&self, tag: Tag) -> Option<&Group> {
+        self.body.get_group(tag)
+    }
+
     fn add_group(&mut self, tag: Tag, grp: Group) {
         self.body.group.insert(tag, grp);
     }
@@ -429,7 +433,7 @@ fn parse_group(
     while let Some(next_field) = v.pop_front() {
         if next_field.tag() == delimiter {
             actual_count += 1;
-            if actual_count + 1 >= declared_count as i32 {
+            if actual_count >= declared_count as i32 {
                 // incorrect NumInGroups
                 return Err(SessionRejectError::incorrect_num_in_grp_count());
             }
@@ -438,16 +442,17 @@ fn parse_group(
             let group_instance = &mut group[actual_count as usize];
             group_instance.set_field_order(&field_order);
             if rg_dd.is_msg_group(msg_type, next_field.tag()) {
-                parse_group(v, msg_type, &next_field, group_instance, dd)?;
+                parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
             } else {
                 group_instance.set_field(next_field);
             }
         } else if rg_dd.is_msg_group(msg_type, next_field.tag()) {
             if actual_count < 0 {
+                // delimiter not found but other tag is encountered
                 return Err(SessionRejectError::required_tag_missing_err());
             }
             let group_instance = &mut group[actual_count as usize];
-            parse_group(v, msg_type, &next_field, group_instance, dd)?;
+            parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
         } else if rg_dd.is_msg_field(msg_type, next_field.tag()) {
             if actual_count < 0 {
                 // means first field not found i.e. delimiter
@@ -578,12 +583,61 @@ mod message_test {
         assert_eq!(header_group[0].get_field::<u32>(630).unwrap(), 0);
     }
 
+    #[test]
     fn msg_test_with_body_group() {
         // message body having groups
+        let msg_body_with_repeating_group = "8=FIX.4.4|9=108|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=075|";
+        let msg = Message::from_str(&soh_replaced_str(msg_body_with_repeating_group), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "W");
+        assert!(msg.get_group(268).is_some());
+        let md_entries_grp = msg.get_group(268).unwrap();
+        assert_eq!(md_entries_grp.delim(), 269);
+        assert_eq!(md_entries_grp.size(), 2);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(269).unwrap(), 0);
+        assert_eq!(md_entries_grp[0].get_field::<f32>(270).unwrap(), 8490.07);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(271).unwrap(), 10);
+
+        assert_eq!(md_entries_grp[1].get_field::<u32>(269).unwrap(), 1);
+        assert_eq!(md_entries_grp[1].get_field::<f32>(270).unwrap(), 8519.57);
+        assert_eq!(md_entries_grp[1].get_field::<u32>(271).unwrap(), 20);
     }
 
+    #[test]
     fn msg_test_with_group_and_subgroups() {
         // body having repeating groups having subgroups
+        let new_order_list = "8=FIX.4.4|9=108|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|10=075";
+        let msg = Message::from_str(&soh_replaced_str(new_order_list), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "E");
+        assert!(msg.get_group(73).is_some());
+        let no_orders_grp = msg.get_group(73).unwrap();
+        assert_eq!(no_orders_grp.delim(), 11);
+        assert_eq!(no_orders_grp.size(), 2);
+        assert_eq!(no_orders_grp[0].get_field::<String>(11).unwrap(), "ClientOrderId1");
+        assert_eq!(no_orders_grp[0].get_field::<u32>(67).unwrap(), 1);
+
+        let no_alloc_subgrp = no_orders_grp[0].get_group(78);
+        assert!(no_alloc_subgrp.is_some());
+        let no_alloc_subgrp = no_alloc_subgrp.unwrap();
+        assert_eq!(no_alloc_subgrp.size(), 2);
+        assert_eq!(no_alloc_subgrp[0].get_field::<String>(79).unwrap(), "AllocAct11");
+        assert_eq!(no_alloc_subgrp[0].get_field::<u32>(80).unwrap(), 10);
+
+        assert_eq!(no_alloc_subgrp[1].get_field::<String>(79).unwrap(), "AllocAct12");
+        assert_eq!(no_alloc_subgrp[1].get_field::<u32>(80).unwrap(), 20);
+
+        assert_eq!(no_orders_grp[1].get_field::<String>(11).unwrap(), "ClientOrderId2");
+        assert_eq!(no_orders_grp[1].get_field::<u32>(67).unwrap(), 2);
+
+        let no_alloc_subgrp2 = no_orders_grp[1].get_group(78);
+        assert!(no_alloc_subgrp2.is_some());
+        let no_alloc_subgrp2 = no_alloc_subgrp2.unwrap();
+        assert_eq!(no_alloc_subgrp2.size(), 1);
+        assert_eq!(no_alloc_subgrp2[0].get_field::<String>(79).unwrap(), "AllocAct21");
+        assert_eq!(no_alloc_subgrp2[0].get_field::<u32>(80).unwrap(), 30);
     }
 
     fn msg_test_trailer_with_more_fields() {

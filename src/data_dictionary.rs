@@ -472,16 +472,6 @@ pub struct GroupInfo {
     data_dictionary: DataDictionary,
 }
 
-// impl GroupInfo {
-//     pub fn data_dictionary(&self) -> &DataDictionary {
-//         &self.group_dd
-//     }
-
-//     pub fn delimiter(&self) -> u32 {
-//         self.delimiter
-//     }
-// }
-
 /********************* ALL XML PARSING RELATED CODE ********************************************/
 fn get_attribute<'a>(attr: &str, node: &Node<'a, '_>) -> DResult<&'a str> {
     let requested = match node.attribute(attr) {
