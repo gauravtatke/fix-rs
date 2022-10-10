@@ -33,7 +33,7 @@ pub struct Session {
     state: SessionState,
     // session_map: Option<Arc<Mutex<HashMap<se>>>>,
     #[getset(set = "pub")]
-    responder: Option<Arc<TioSender<Message>>>,
+    responder: Option<Arc<TioSender<String>>>,
     #[getset(get = "pub")]
     data_dictionary: Arc<DataDictionary>,
 }
@@ -88,7 +88,7 @@ impl Session {
 
     pub fn send_to_target(&self, msg: Message) {
         let responder = self.responder.as_ref().unwrap();
-        responder.blocking_send(msg).unwrap();
+        responder.blocking_send(msg.to_string()).unwrap();
     }
 
     // pub async fn async_send(session_id: &SessionId, msg: Message) {
@@ -101,23 +101,12 @@ impl Session {
         let sess_ref = sessions.get(session_id).unwrap();
         let session = sess_ref.responder.as_ref();
         let responder = Arc::clone(session.unwrap());
-        let future = tokio::spawn(async move {
-            responder.send(msg).await.unwrap();
-        });
-        if synchronous_send {
-            // tokio::spawn(async move {
-            //     future.await.unwrap();
-            // });
-
-            // another way to wait is to query if it is finished or not
-            loop {
-                println!("not finished future");
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                if future.is_finished() {
-                    println!("future finished");
-                    break;
-                }
-            }
+        if !synchronous_send {
+            tokio::spawn(async move {
+                responder.send(msg.to_string()).await.unwrap();
+            });
+        } else {
+            responder.blocking_send(msg.to_string());
         }
     }
 }

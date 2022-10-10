@@ -24,7 +24,7 @@ async fn main() {
     let session_settings = Properties::new(CONFIG_TOML_PATH);
     let application = DefaultApplication::new();
     let mut acceptor = SocketAcceptor::new(session_settings, application);
-    acceptor.initialize_new();
+    acceptor.initialize();
     loop {
         thread::sleep(Duration::from_millis(5000));
     }

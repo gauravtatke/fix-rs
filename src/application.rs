@@ -31,8 +31,6 @@ impl Application for DefaultApplication {
     fn from_app(
         &self, session_id: &SessionId, sessions: &Arc<DashMap<SessionId, Session>>, msg: Message,
     ) {
-        // do nothing
-        // println!("from_app: {}::{:?}", session_id, msg);
         Session::sync_send_to_target(session_id, sessions, test_logon());
     }
 }

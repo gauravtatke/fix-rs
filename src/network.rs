@@ -98,8 +98,6 @@ pub struct SocketAcceptor<A: Application + Send + Sync> {
     #[getset(set)]
     receiver: Option<TioReceiver<String>>, // receive raw string msg from socket handling task
     #[getset(set)]
-    // sender: Option<mpsc::Sender<Message>>, // send message to socket handling task
-    // connection: Arc<Mutex<HashMap<SessionId, OwnedWriteHalf>>>,
     app: Arc<A>,
 }
 
@@ -129,18 +127,18 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         Message::new()
     }
 
-    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: TioSender<Message>) {
+    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: TioSender<String>) {
         // let mut sguard = self.session_map().lock().unwrap();
         // sguard.get_mut(session_id).map(|session| session.set_responder(Some(msg_sender)));
         let mut session = self.session_map().get_mut(session_id).unwrap();
         session.set_responder(Some(Arc::new(msg_sender)));
     }
 
-    pub fn initialize_new(&mut self) {
+    pub fn initialize(&mut self) {
         let session_socket = create_socket_session(self.settings());
         let (raw_tx, raw_rx) = tio_channel::<String>(64);
         for (sock_addr, id_set) in session_socket {
-            let (msg_tx, msg_rx) = tio_channel::<Message>(8);
+            let (msg_tx, msg_rx) = tio_channel::<String>(16);
             for sid in id_set {
                 self.set_session_responder(&sid, msg_tx.clone())
             }
@@ -155,7 +153,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
 
 fn start_acceptor_task(
     sock_addr: SocketAddr, socket_descriptor: Arc<Mutex<HashMap<SocketAddr, bool>>>,
-    tx: TioSender<String>, msg_rx: TioReceiver<Message>,
+    tx: TioSender<String>, msg_rx: TioReceiver<String>,
 ) {
     tokio::spawn(async move {
         let listener = TcpListener::bind(sock_addr).await.unwrap();
@@ -176,8 +174,8 @@ fn start_acceptor_task(
 fn start_receiver_task<A: Application + Send + Sync + 'static>(
     mut rx: TioReceiver<String>, app: Arc<A>, sessions: Arc<DashMap<SessionId, Session>>,
 ) {
-    tokio::spawn(async move {
-        while let Some(s) = rx.recv().await {
+    std::thread::spawn(move || {
+        while let Some(s) = rx.blocking_recv() {
             println!("received: {}", s);
             let session_id: SessionId = Message::get_reverse_session_id(&s);
             {
@@ -266,21 +264,19 @@ fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool>
     descriptor
 }
 
-fn start_internal_msg_receiver_task(
-    mut write_stream: OwnedWriteHalf, mut rx: TioReceiver<Message>,
-) {
+fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: TioReceiver<String>) {
     tokio::spawn(async move {
         println!("starting internal msg receiv");
         // if there is message to be sent out to remote socket then read and send
         while let Some(msg) = rx.recv().await {
             println!("sending {}", &msg);
-            let _res = write_stream.write_all(format!("{}", &msg).as_bytes()).await.unwrap();
+            let _res = write_stream.write_all(msg.as_bytes()).await.unwrap();
             println!("sent {}", &msg);
         }
     });
 }
 
-async fn handle_message_io(stream: TcpStream, tx: &TioSender<String>, rx: TioReceiver<Message>) {
+async fn handle_message_io(stream: TcpStream, tx: &TioSender<String>, rx: TioReceiver<String>) {
     println!("handling connection");
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let (read_half, write_half) = stream.into_split();
@@ -293,10 +289,6 @@ async fn handle_message_io(stream: TcpStream, tx: &TioSender<String>, rx: TioRec
         // send message back to application
         tx.send(String::from_utf8_lossy(&buf[..buf.len()]).to_string()).await.unwrap();
         buf.clear();
-        // match rx.recv().await {
-        //     Some(m) => println!("msg to send {:?}", m),
-        //     None => println!("error receiving"),
-        // };
     }
 }
 
