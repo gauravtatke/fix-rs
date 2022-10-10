@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+use dashmap::DashMap;
 use getset::{Getters, Setters};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
@@ -8,10 +9,10 @@ use std::io::{Error, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::{self, FromStr};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc::Receiver, mpsc::Sender, Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{channel as tio_channel, Receiver as TioReceiver, Sender as TioSender};
 use tokio::{
     self, io::AsyncBufReadExt, io::BufReader, net::TcpListener, net::TcpStream, task::JoinHandle,
 };
@@ -92,10 +93,10 @@ impl Eq for SocketDescriptor {}
 pub struct SocketAcceptor<A: Application + Send + Sync> {
     settings: Properties,
     connection_type: ConnectionType,
-    session_map: Arc<Mutex<HashMap<SessionId, Session>>>,
+    session_map: Arc<DashMap<SessionId, Session>>,
     sock_descriptors: Arc<Mutex<HashMap<SocketAddr, bool>>>,
     #[getset(set)]
-    receiver: Option<mpsc::Receiver<String>>, // receive raw string msg from socket handling task
+    receiver: Option<TioReceiver<String>>, // receive raw string msg from socket handling task
     #[getset(set)]
     // sender: Option<mpsc::Sender<Message>>, // send message to socket handling task
     // connection: Arc<Mutex<HashMap<SessionId, OwnedWriteHalf>>>,
@@ -111,7 +112,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         Self {
             settings,
             connection_type,
-            session_map: Arc::new(Mutex::new(session_map)),
+            session_map: Arc::new(dashmap::DashMap::from_iter(session_map)),
             sock_descriptors: Arc::new(Mutex::new(socket_desc)),
             receiver: None,
             // sender: None,
@@ -128,19 +129,18 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         Message::new()
     }
 
-    // pub fn get_session(&self, sid: &SessionId) -> Option<&Session> {
-    //     self.session_map.lock().unwrap().get(sid)
-    // }
-    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: Sender<Message>) {
-        let mut sguard = self.session_map().lock().unwrap();
-        sguard.get_mut(session_id).map(|session| session.set_responder(Some(msg_sender)));
+    fn set_session_responder(&mut self, session_id: &SessionId, msg_sender: TioSender<Message>) {
+        // let mut sguard = self.session_map().lock().unwrap();
+        // sguard.get_mut(session_id).map(|session| session.set_responder(Some(msg_sender)));
+        let mut session = self.session_map().get_mut(session_id).unwrap();
+        session.set_responder(Some(Arc::new(msg_sender)));
     }
 
     pub fn initialize_new(&mut self) {
         let session_socket = create_socket_session(self.settings());
-        let (raw_tx, raw_rx) = mpsc::channel::<String>(64);
+        let (raw_tx, raw_rx) = tio_channel::<String>(64);
         for (sock_addr, id_set) in session_socket {
-            let (msg_tx, msg_rx) = mpsc::channel::<Message>(8);
+            let (msg_tx, msg_rx) = tio_channel::<Message>(8);
             for sid in id_set {
                 self.set_session_responder(&sid, msg_tx.clone())
             }
@@ -155,7 +155,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
 
 fn start_acceptor_task(
     sock_addr: SocketAddr, socket_descriptor: Arc<Mutex<HashMap<SocketAddr, bool>>>,
-    tx: mpsc::Sender<String>, msg_rx: Receiver<Message>,
+    tx: TioSender<String>, msg_rx: TioReceiver<Message>,
 ) {
     tokio::spawn(async move {
         let listener = TcpListener::bind(sock_addr).await.unwrap();
@@ -174,27 +174,27 @@ fn start_acceptor_task(
 }
 
 fn start_receiver_task<A: Application + Send + Sync + 'static>(
-    mut rx: Receiver<String>, app: Arc<A>, sessions: Arc<Mutex<HashMap<SessionId, Session>>>,
+    mut rx: TioReceiver<String>, app: Arc<A>, sessions: Arc<DashMap<SessionId, Session>>,
 ) {
     tokio::spawn(async move {
         while let Some(s) = rx.recv().await {
             println!("received: {}", s);
             let session_id: SessionId = Message::get_reverse_session_id(&s);
             {
-                let dd = {
-                    let session_guard = sessions.lock().unwrap();
-                    let session = session_guard.get(&session_id).unwrap();
-                    Arc::clone(session.data_dictionary())
-                };
+                let dd = sessions
+                    .get(&session_id)
+                    .map(|sess| Arc::clone(sess.data_dictionary()))
+                    .unwrap();
                 if let Ok(message) = Message::from_str(&s, &dd) {
-                    println!("msg parsed: {:?}", &message);
+                    println!("msg parsed");
                     if let Ok(_) = Session::verify(&message, &sessions) {
-                        app.from_app(session_id, message);
+                        app.from_app(&session_id, &sessions, message);
                     } else {
-                        Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+                        // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+                        Session::sync_send_to_target(&session_id, &sessions, test_logon());
                     }
                 } else {
-                    Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+                    // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
                 }
             }
             // app.from_app(s);
@@ -266,7 +266,9 @@ fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool>
     descriptor
 }
 
-fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: Receiver<Message>) {
+fn start_internal_msg_receiver_task(
+    mut write_stream: OwnedWriteHalf, mut rx: TioReceiver<Message>,
+) {
     tokio::spawn(async move {
         println!("starting internal msg receiv");
         // if there is message to be sent out to remote socket then read and send
@@ -278,9 +280,7 @@ fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: Re
     });
 }
 
-async fn handle_message_io(
-    stream: TcpStream, tx: &mpsc::Sender<String>, rx: mpsc::Receiver<Message>,
-) {
+async fn handle_message_io(stream: TcpStream, tx: &TioSender<String>, rx: TioReceiver<Message>) {
     println!("handling connection");
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let (read_half, write_half) = stream.into_split();
@@ -314,22 +314,6 @@ async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut Vec<
             break;
         }
     }
-}
-
-fn test_logon() -> Message {
-    let mut heartbeat = Message::new();
-    heartbeat.header_mut().set_field(StringField::new(8, "FIX.4.3"));
-    heartbeat.header_mut().set_field(StringField::new(35, "A"));
-    heartbeat.header_mut().set_field(StringField::new(34, "1"));
-    heartbeat.header_mut().set_field(StringField::new(49, "FIXIMULATOR"));
-    heartbeat.header_mut().set_field(StringField::new(56, "BANZAI"));
-    heartbeat.set_field(StringField::new(98, "0"));
-    heartbeat.set_field(StringField::new(108, "30"));
-    heartbeat.set_sending_time();
-    heartbeat.set_body_len();
-    heartbeat.set_checksum();
-    // heartbeat.trailer_mut().set_field(StringField::new(10, "110"));
-    heartbeat
 }
 
 #[cfg(test)]

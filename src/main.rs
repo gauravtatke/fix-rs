@@ -21,15 +21,15 @@ pub(crate) const CONFIG_TOML_PATH: &str = "src/FixConfig.toml";
 
 #[tokio::main]
 async fn main() {
-    // let session_settings = Properties::new(CONFIG_TOML_PATH);
-    // let application = DefaultApplication::new();
-    // let mut acceptor = SocketAcceptor::new(session_settings, application);
-    // acceptor.initialize_new();
-    // loop {
-    //     thread::sleep(Duration::from_millis(5000));
-    // }
-    let data_dict = data_dictionary::DataDictionary::from_xml(FILE_PATH);
-    let no_order_grp = data_dict.get_msg_group("E", 73).unwrap();
-    let no_alloc_grp = no_order_grp.data_dictionary().get_msg_group("E", 78);
-    println!("{:#?}", no_alloc_grp);
+    let session_settings = Properties::new(CONFIG_TOML_PATH);
+    let application = DefaultApplication::new();
+    let mut acceptor = SocketAcceptor::new(session_settings, application);
+    acceptor.initialize_new();
+    loop {
+        thread::sleep(Duration::from_millis(5000));
+    }
+    // let data_dict = data_dictionary::DataDictionary::from_xml(FILE_PATH);
+    // let no_order_grp = data_dict.get_msg_group("E", 73).unwrap();
+    // let no_alloc_grp = no_order_grp.data_dictionary().get_msg_group("E", 78);
+    // println!("{:#?}", no_alloc_grp);
 }
