@@ -2,11 +2,15 @@
 #![allow(unused_imports)]
 
 use crate::message::*;
+use crate::network::SessionMap;
+use crate::session;
 use crate::session::*;
+use dashmap::DashMap;
+use std::sync::Arc;
 
 pub trait Application {
     fn to_app(msg: String);
-    fn from_app(&self, session_id: SessionId, msg: Message);
+    fn from_app(&self, session_id: &SessionId, sessions: &SessionMap, msg: Message);
 }
 
 pub struct DefaultApplication;
@@ -23,8 +27,7 @@ impl Application for DefaultApplication {
         println!("to_app: {:?}", msg);
     }
 
-    fn from_app(&self, session_id: SessionId, msg: Message) {
-        // do nothing
-        println!("from_app: {}::{:?}", session_id, msg);
+    fn from_app(&self, session_id: &SessionId, sessions: &SessionMap, msg: Message) {
+        Session::sync_send_to_target(session_id, sessions, test_logon());
     }
 }

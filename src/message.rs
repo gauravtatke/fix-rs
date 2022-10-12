@@ -538,8 +538,23 @@ fn parse_trailer(
     }
     Ok(())
 }
-pub const SAMPLE_MSG: &str = "8=FIX.4.2|9=251|35=D|49=AFUNDMGR|56=ABROKER|34=2|52=2003061501:14:49|11=12345|1=111111|63=0|64=20030621|21=3|110=1000|111=50000|55=IBM|48=459200101|22=1|54=1|60=2003061501:14:49|38=5000|40=1|44=15.75|15=USD|59=0|10=127|";
 
+// pub const SAMPLE_MSG: &str = "8=FIX.4.2|9=251|35=D|49=AFUNDMGR|56=ABROKER|34=2|52=2003061501:14:49|11=12345|1=111111|63=0|64=20030621|21=3|110=1000|111=50000|55=IBM|48=459200101|22=1|54=1|60=2003061501:14:49|38=5000|40=1|44=15.75|15=USD|59=0|10=127|";
+
+pub fn test_logon() -> Message {
+    let mut heartbeat = Message::new();
+    heartbeat.header_mut().set_field(StringField::new(8, "FIX.4.3"));
+    heartbeat.header_mut().set_field(StringField::new(35, "A"));
+    heartbeat.header_mut().set_field(StringField::new(34, "1"));
+    heartbeat.header_mut().set_field(StringField::new(49, "FIXIMULATOR"));
+    heartbeat.header_mut().set_field(StringField::new(56, "BANZAI"));
+    heartbeat.set_field(StringField::new(98, "0"));
+    heartbeat.set_field(StringField::new(108, "30"));
+    heartbeat.set_sending_time();
+    heartbeat.set_body_len();
+    heartbeat.set_checksum();
+    heartbeat
+}
 #[cfg(test)]
 mod message_test {
     use super::*;
