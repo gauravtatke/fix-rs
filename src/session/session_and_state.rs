@@ -1,6 +1,8 @@
 use crate::data_dictionary::DataDictionary;
 use crate::fields::MaxMessageSize;
+use crate::io::TioBroadcastSender;
 use crate::message::*;
+use crate::network::SessionMap;
 use crate::session::*;
 use dashmap::DashMap;
 use getset::Getters;
@@ -33,7 +35,7 @@ pub struct Session {
     state: SessionState,
     // session_map: Option<Arc<Mutex<HashMap<se>>>>,
     #[getset(set = "pub")]
-    responder: Option<Arc<TioSender<String>>>,
+    responder: Option<TioBroadcastSender<String>>,
     #[getset(get = "pub")]
     data_dictionary: Arc<DataDictionary>,
 }
@@ -73,40 +75,36 @@ impl Session {
         }
     }
 
-    pub fn verify(
-        msg: &Message, sessions: &Arc<DashMap<SessionId, Session>>,
-    ) -> Result<(), &'static str> {
+    pub fn verify(msg: &Message, sessions: &SessionMap) -> Result<(), &'static str> {
         Ok(())
     }
 
-    pub fn sync_send(
-        msg: Message, session_id: &SessionId, sessions: &Arc<DashMap<SessionId, Session>>,
-    ) {
-        let session = sessions.get(session_id).unwrap();
-        session.send_to_target(msg);
-    }
+    // pub fn sync_send(
+    //     msg: Message, session_id: &SessionId, sessions: &Arc<DashMap<SessionId, Session>>,
+    // ) {
+    //     let session = sessions.get(session_id).unwrap();
+    //     session.send_to_target(msg);
+    // }
 
-    pub fn send_to_target(&self, msg: Message) {
-        let responder = self.responder.as_ref().unwrap();
-        responder.blocking_send(msg.to_string()).unwrap();
-    }
+    // pub fn send_to_target(&self, msg: Message) {
+    //     let responder = self.responder.as_ref().unwrap();
+    //     responder.blocking_send(msg.to_string()).unwrap();
+    // }
 
     // pub async fn async_send(session_id: &SessionId, msg: Message) {
     //     let session =
     // }
-    pub fn sync_send_to_target(
-        session_id: &SessionId, sessions: &Arc<DashMap<SessionId, Session>>, msg: Message,
-    ) {
-        let synchronous_send = true;
-        let sess_ref = sessions.get(session_id).unwrap();
-        let session = sess_ref.responder.as_ref();
-        let responder = Arc::clone(session.unwrap());
-        if !synchronous_send {
-            tokio::spawn(async move {
-                responder.send(msg.to_string()).await.unwrap();
-            });
-        } else {
-            responder.blocking_send(msg.to_string());
-        }
+    pub fn sync_send_to_target(session_id: &SessionId, sessions: &SessionMap, msg: Message) {
+        // let synchronous_send = true;
+        let sess_ref = sessions.get_session(session_id).unwrap();
+        let responder = sess_ref.responder.as_ref().unwrap().clone();
+        responder.send(msg.to_string()).unwrap();
+        // if !synchronous_send {
+        //     tokio::spawn(async move {
+        //         responder.send(msg.to_string()).await.unwrap();
+        //     });
+        // } else {
+        //     responder.send(msg.to_string());
+        // }
     }
 }

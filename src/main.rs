@@ -4,6 +4,7 @@ include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 
 mod application;
 mod data_dictionary;
+mod io;
 mod message;
 mod network;
 mod quickfix_errors;
@@ -12,6 +13,7 @@ mod session;
 use std::{thread, time::Duration};
 
 use application::DefaultApplication;
+use io::acceptor::*;
 use network::SocketAcceptor;
 use session::*;
 use tokio;
@@ -24,7 +26,7 @@ async fn main() {
     let session_settings = Properties::new(CONFIG_TOML_PATH);
     let application = DefaultApplication::new();
     let mut acceptor = SocketAcceptor::new(session_settings, application);
-    acceptor.initialize();
+    acceptor.start_accepting_connections();
     loop {
         thread::sleep(Duration::from_millis(5000));
     }
