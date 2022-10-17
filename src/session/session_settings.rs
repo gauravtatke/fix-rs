@@ -1,5 +1,7 @@
+use crate::quickfix_errors::ConfigErr;
 use crate::session::*;
 use std::collections::HashMap;
+use std::fmt::{Debug, Display};
 use std::fs;
 use std::iter::{Iterator, Peekable};
 use std::path::Path;
@@ -17,17 +19,77 @@ impl Properties {
         Self::from_str(&toml_str)
     }
 
-    pub fn get_or_default<F: FromStr>(&self, session_id: &SessionId, name: &str) -> Option<F> {
-        let default_properties = self.session_settings.get(&self.default_session_id).unwrap();
-        self.session_settings
-            .get(session_id)
-            .and_then(|props| props.get(name))
-            .or_else(|| default_properties.get(name))
-            .and_then(|val| val.as_str().parse::<F>().ok())
+    fn get_default_property(&self, name: &str) -> Option<&String> {
+        self.get_property(&self.default_session_id, name)
     }
 
-    pub fn default_property<'a, F: FromStr>(&self, name: &str) -> Option<F> {
-        self.get_or_default(&self.default_session_id, name)
+    pub fn get_property(&self, session_id: &SessionId, name: &str) -> Option<&String> {
+        let set_value = self.session_settings.get(session_id).and_then(|map| map.get(name));
+        set_value
+    }
+
+    pub fn get_optional_config<F: FromStr>(&self, sid: &SessionId, name: &str) -> Option<F> {
+        let set_value = self.get_property(sid, name).or_else(|| self.get_default_property(name));
+        let parsed_val = match set_value {
+            Some(str_val) => match str_val.parse::<F>() {
+                Ok(parsed) => Some(parsed),
+                Err(e) => {
+                    panic!("Could not parse value {} of session {}", name, sid);
+                }
+            },
+            None => None,
+        };
+        parsed_val
+    }
+
+    pub fn get_default_config<'a, F>(&self, name: &'a str) -> Result<F, ConfigErr<'a>>
+    where
+        F: FromStr,
+        <F as FromStr>::Err: Debug,
+    {
+        let set_value = self.get_default_property(name);
+        let parsed_val = match set_value {
+            Some(str_val) => {
+                str_val.parse::<F>().map_err(|er| ConfigErr::ParseError(format!("{:?}", er)))
+            }
+            None => Err(ConfigErr::NotFound(name)),
+        };
+        parsed_val
+    }
+
+    pub fn get_config<'a, F>(
+        &self, session_id: &SessionId, name: &'a str,
+    ) -> Result<F, ConfigErr<'a>>
+    where
+        F: FromStr,
+        <F as FromStr>::Err: Debug,
+    {
+        let set_value = self.get_property(session_id, name);
+        let parsed_val = match set_value {
+            Some(str_val) => {
+                str_val.parse::<F>().map_err(|er| ConfigErr::ParseError(format!("{:?}", er)))
+            }
+            None => Err(ConfigErr::NotFound(name)),
+        };
+        parsed_val
+    }
+
+    pub fn get_or_default_config<'a, F>(
+        &self, session_id: &SessionId, name: &'a str,
+    ) -> Result<F, ConfigErr<'a>>
+    where
+        F: FromStr,
+        <F as FromStr>::Err: Debug,
+    {
+        let set_value =
+            self.get_property(session_id, name).or_else(|| self.get_default_property(name));
+        let parsed_val = match set_value {
+            Some(str_val) => {
+                str_val.parse::<F>().map_err(|er| ConfigErr::ParseError(format!("{:?}", er)))
+            }
+            None => Err(ConfigErr::NotFound(name)),
+        };
+        parsed_val
     }
 
     pub fn from_str(s: &str) -> Self {
@@ -76,8 +138,8 @@ impl Properties {
     }
 
     fn check(&self) {
-        let connection_type: String = match self.default_property(CONNECTION_TYPE_SETTING) {
-            Some(s) => s,
+        let connection_type: String = match self.get_default_property(CONNECTION_TYPE_SETTING) {
+            Some(s) => s.to_string(),
             None => panic!("connection_type not found"),
         };
         if connection_type != ACCEPTOR_CONN_TYPE && connection_type != INITIATOR_CONN_TYPE {
@@ -86,12 +148,17 @@ impl Properties {
         for session_id in self.session_ids() {
             // verify ports
             if connection_type == ACCEPTOR_CONN_TYPE {
-                if self.get_or_default::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING).is_none() {
+                if self.get_optional_config::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING).is_none()
+                {
                     panic!("acceptor port not found");
                 }
             } else {
-                if self.get_or_default::<String>(session_id, SOCKET_CONNECT_HOST_SETTING).is_none()
-                    || self.get_or_default::<u16>(session_id, SOCKET_CONNECT_PORT_SETTING).is_none()
+                if self
+                    .get_optional_config::<String>(session_id, SOCKET_CONNECT_HOST_SETTING)
+                    .is_none()
+                    || self
+                        .get_optional_config::<u16>(session_id, SOCKET_CONNECT_PORT_SETTING)
+                        .is_none()
                 {
                     panic!("socket connect host or port is missing");
                 }
@@ -99,7 +166,7 @@ impl Properties {
 
             // verify begin string
             let begin_string = self
-                .get_or_default::<String>(session_id, BEGIN_STRING_SETTING)
+                .get_optional_config::<String>(session_id, BEGIN_STRING_SETTING)
                 .expect("begin string is missing");
             if begin_string != FIX42_BEGIN_STR
                 && begin_string != FIX43_BEGIN_STR
@@ -109,8 +176,8 @@ impl Properties {
             }
 
             // verify comp_ids
-            if self.get_or_default::<String>(session_id, SENDER_COMPID_SETTING).is_none()
-                || self.get_or_default::<String>(session_id, TARGET_COMPID_SETTING).is_none()
+            if self.get_optional_config::<String>(session_id, SENDER_COMPID_SETTING).is_none()
+                || self.get_optional_config::<String>(session_id, TARGET_COMPID_SETTING).is_none()
             {
                 panic!("sender and/or target compid missing");
             }
@@ -168,7 +235,7 @@ mod session_setting_tests {
         let properties = Properties::from_str(cargo_toml);
         println!("{:#?}", properties);
         let accept_port = properties
-            .get_or_default::<u16>(&properties.default_session_id, SOCKET_ACCEPT_PORT_SETTING);
+            .get_optional_config::<u16>(&properties.default_session_id, SOCKET_ACCEPT_PORT_SETTING);
         println!("{:?}", accept_port);
     }
 

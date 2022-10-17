@@ -48,16 +48,19 @@ impl Session {
     pub fn with_settings(session_id: &SessionId, session_setting: &Properties) -> Self {
         // setting should have begin_string, sender_compid and target_compid
         // it should also have either accept port or (connect_host, connect_port)
-        let heartbeat_interval: u32 =
-            session_setting.get_or_default(session_id, HEARTBEAT_INTERVAL_SETTING).unwrap_or(30);
+        let heartbeat_interval: u32 = session_setting
+            .get_optional_config(session_id, HEARTBEAT_INTERVAL_SETTING)
+            .unwrap_or(30);
         let reset_on_logon: bool =
-            session_setting.get_or_default(session_id, RESET_ON_LOGON_SETTING).unwrap_or(true);
-        let reset_on_logout: bool =
-            session_setting.get_or_default(session_id, RESET_ON_LOGOUT_SETTING).unwrap_or(true);
-        let reset_on_disconnect: bool =
-            session_setting.get_or_default(session_id, RESET_ON_DISCONNECT_SETTING).unwrap_or(true);
+            session_setting.get_optional_config(session_id, RESET_ON_LOGON_SETTING).unwrap_or(true);
+        let reset_on_logout: bool = session_setting
+            .get_optional_config(session_id, RESET_ON_LOGOUT_SETTING)
+            .unwrap_or(true);
+        let reset_on_disconnect: bool = session_setting
+            .get_optional_config(session_id, RESET_ON_DISCONNECT_SETTING)
+            .unwrap_or(true);
         let data_dict_path: String = session_setting
-            .get_or_default(session_id, DATA_DICTIONARY_FILE_PATH)
+            .get_optional_config(session_id, DATA_DICTIONARY_FILE_PATH)
             .unwrap_or_else(|| "resources/FIX43.xml".to_string());
         // .unwrap_or("resources/FIX43.xml");
         let data_dictionary = DataDictionary::from_xml(data_dict_path);

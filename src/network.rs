@@ -154,7 +154,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         let session_map = create_sessions(&settings);
         // let socket_desc = create_socket_descriptors(&settings);
         let connection_type: ConnectionType =
-            settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+            settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
         Self {
             settings,
             connection_type,
@@ -180,7 +180,7 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
         for (session_id, session) in s_ids.iter() {
             let socket_port = self
                 .settings()
-                .get_or_default::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING)
+                .get_optional_config::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING)
                 .unwrap();
             let socket_addr_str = format!("{}:{}", SOCKET_ACCEPT_HOST_IP, socket_port);
             let socket_addr = socket_addr_str.parse::<SocketAddr>().unwrap();
@@ -274,7 +274,7 @@ fn start_receiver_task<A: Application + Send + Sync + 'static>(
 fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
     let mut session_map = HashMap::new();
     let connection_type: ConnectionType =
-        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+        settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
     for session_id in settings.session_ids() {
         let session = Session::with_settings(session_id, settings);
         session_map.insert(session_id.clone(), session);
@@ -316,16 +316,16 @@ fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
 fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool> {
     let mut descriptor = HashMap::new();
     let connection_type: ConnectionType =
-        settings.default_property(CONNECTION_TYPE_SETTING).unwrap();
+        settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
     for session_id in settings.session_ids() {
         let (host, port): (String, u16) = match connection_type {
             ConnectionType::ACCEPTOR => (
                 SOCKET_ACCEPT_HOST_IP.to_string(),
-                settings.get_or_default(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
+                settings.get_optional_config(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
             ),
             ConnectionType::INITIATOR => (
-                settings.get_or_default(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
-                settings.get_or_default(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
+                settings.get_optional_config(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
+                settings.get_optional_config(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
             ),
         };
         let addr_str = format!("{}:{}", host, port);

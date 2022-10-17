@@ -8,10 +8,10 @@ build="build/main.rs"
 
 [dependencies]
 roxmltree = "0.14.1"
-chrono = "0.4.19"
+chrono = "0.4.22"
+chrono-tz = { version = "0.6", features = [ "filter-by-regex" ] }
 indexmap = "1.9.1"
 thiserror = "1.0.31"
-# toml = "0.5.9"
 serde = { version = "1.0", features = ["derive"] }
 getset = "0.1.2"
 tokio = { version = "1.21.1", features = ["full"] }

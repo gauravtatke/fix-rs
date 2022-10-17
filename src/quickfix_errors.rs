@@ -1,4 +1,4 @@
-use std::num::ParseIntError;
+use std::{num::ParseIntError, str::FromStr};
 
 #[derive(Debug, thiserror::Error)]
 #[error("Session Level Reject Reason - {:?}", .kind)]
@@ -197,14 +197,10 @@ pub enum InvalidMessage {
     MessageDoesNotHaveSOH,
 }
 
-// #[derive(Debug, thiserror::Error)]
-// #[error("Toml config error")]
-// pub enum ConfigTomlErr {
-//     AcceptPortNotFound,
-//     ConnectPortNotFound,
-//     SenderCompIdNotFound,
-//     TargetCompIdNotFound,
-//     BeginStringNotFound,
-//     DefaultSectionNotFound,
-//     ParseError(String),
-// }
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigErr<'a> {
+    #[error("Config Not Present - {}", .0)]
+    NotFound(&'a str),
+    #[error("Could not parse - {}", .0)]
+    ParseError(String),
+}

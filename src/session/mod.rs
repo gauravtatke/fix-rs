@@ -32,10 +32,13 @@ pub const RESET_ON_DISCONNECT_SETTING: &str = "reset_on_disconnect";
 pub const HEARTBEAT_INTERVAL_SETTING: &str = "heartbeat_interval";
 pub const DATA_DICTIONARY_FILE_PATH: &str = "data_dictionary";
 
+
 pub mod session_and_state;
 pub mod session_id;
+pub mod session_schedule;
 pub mod session_settings;
 
 pub use session_and_state::*;
 pub use session_id::*;
+pub use session_schedule::*;
 pub use session_settings::*;
