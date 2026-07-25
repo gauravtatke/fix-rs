@@ -1,4 +1,4 @@
-pub(crate) use tokio::sync::{broadcast, mpsc};
+pub(crate) use tokio::sync::broadcast;
 
 pub(crate) mod acceptor;
 

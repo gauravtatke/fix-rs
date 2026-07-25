@@ -57,3 +57,7 @@ training/
 udemy/venv
 **/target
 Cargo.lock
+
+# Claude Code session history (local notes, not for version control) #
+########################################################################
+session_context/
