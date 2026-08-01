@@ -1,6 +1,6 @@
 edition = "2024"
 attr_fn_like_width = 100
-fn_params_layout = "Compressed"
+fn_params_layout = "Tall"
 fn_call_width = 100
 chain_width = 100
-tab_spaces = 2
+tab_spaces = 4

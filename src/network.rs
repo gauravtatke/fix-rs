@@ -16,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{Receiver as TioReceiver, Sender as TioSender, channel as tio_channel};
 use tokio::{
-  self, io::AsyncBufReadExt, io::BufReader, net::TcpListener, net::TcpStream, task::JoinHandle,
+    self, io::AsyncBufReadExt, io::BufReader, net::TcpListener, net::TcpStream, task::JoinHandle,
 };
 
 use crate::application::Application;
@@ -38,169 +38,173 @@ type SessionRef<'a> = dashmap::mapref::one::Ref<'a, SessionId, Session>;
 
 #[derive(Debug, Default, PartialEq)]
 pub enum ConnectionType {
-  #[default]
-  ACCEPTOR,
-  INITIATOR,
+    #[default]
+    ACCEPTOR,
+    INITIATOR,
 }
 
 impl FromStr for ConnectionType {
-  type Err = &'static str;
-  fn from_str(s: &str) -> Result<Self, Self::Err> {
-    if s.eq_ignore_ascii_case(ACCEPTOR_CONN_TYPE) {
-      Ok(ConnectionType::ACCEPTOR)
-    } else if s.eq_ignore_ascii_case(INITIATOR_CONN_TYPE) {
-      Ok(ConnectionType::INITIATOR)
-    } else {
-      Err("invalid connection type")
+    type Err = &'static str;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case(ACCEPTOR_CONN_TYPE) {
+            Ok(ConnectionType::ACCEPTOR)
+        } else if s.eq_ignore_ascii_case(INITIATOR_CONN_TYPE) {
+            Ok(ConnectionType::INITIATOR)
+        } else {
+            Err("invalid connection type")
+        }
     }
-  }
 }
 
 #[derive(Debug, Getters, Clone)]
 struct SocketDescriptor {
-  #[getset(get)]
-  addr: SocketAddr,
+    #[getset(get)]
+    addr: SocketAddr,
 
-  #[getset(get)]
-  accepted_connections: HashMap<SessionId, Session>,
+    #[getset(get)]
+    accepted_connections: HashMap<SessionId, Session>,
 }
 
 impl SocketDescriptor {
-  fn new(sock: SocketAddr) -> Self {
-    Self {
-      addr: sock,
-      accepted_connections: HashMap::new(),
+    fn new(sock: SocketAddr) -> Self {
+        Self {
+            addr: sock,
+            accepted_connections: HashMap::new(),
+        }
     }
-  }
 
-  fn accept_session(&mut self, session_id: SessionId, session: Session) {
-    self.accepted_connections.insert(session_id, session);
-  }
+    fn accept_session(&mut self, session_id: SessionId, session: Session) {
+        self.accepted_connections.insert(session_id, session);
+    }
 
-  // fn set_responder_in_all(&mut self, tx: TioSender<String>) {
-  //     for (_, session) in self.accepted_connections.iter_mut() {
-  //         session.set_responder(Some(tx.clone()));
-  //     }
-  // }
+    // fn set_responder_in_all(&mut self, tx: TioSender<String>) {
+    //     for (_, session) in self.accepted_connections.iter_mut() {
+    //         session.set_responder(Some(tx.clone()));
+    //     }
+    // }
 }
 
 impl Hash for SocketDescriptor {
-  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-    self.addr.hash(state);
-  }
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.addr.hash(state);
+    }
 }
 
 impl PartialEq for SocketDescriptor {
-  fn eq(&self, other: &Self) -> bool {
-    self.addr == other.addr
-  }
+    fn eq(&self, other: &Self) -> bool {
+        self.addr == other.addr
+    }
 }
 
 impl PartialEq<SocketAddr> for SocketDescriptor {
-  fn eq(&self, other: &SocketAddr) -> bool {
-    self.addr == *other
-  }
+    fn eq(&self, other: &SocketAddr) -> bool {
+        self.addr == *other
+    }
 }
 
 impl Eq for SocketDescriptor {}
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionMap {
-  id_to_session: Arc<DashMap<SessionId, Session>>,
+    id_to_session: Arc<DashMap<SessionId, Session>>,
 }
 
 impl SessionMap {
-  pub fn insert_session(&self, session_id: SessionId, session: Session) {
-    self.id_to_session.insert(session_id, session);
-  }
-
-  pub fn get_session(&self, session_id: &SessionId) -> Option<SessionRef<'_>> {
-    self.id_to_session.get(session_id)
-  }
-
-  pub fn from_iter<I: IntoIterator<Item = (SessionId, Session)>>(it: I) -> Self {
-    Self {
-      id_to_session: Arc::new(DashMap::from_iter(it)),
+    pub fn insert_session(&self, session_id: SessionId, session: Session) {
+        self.id_to_session.insert(session_id, session);
     }
-  }
 
-  pub fn entry(&self, session_id: &SessionId) -> Entry<'_, SessionId, Session> {
-    self.id_to_session.entry(session_id.clone())
-  }
+    pub fn get_session(&self, session_id: &SessionId) -> Option<SessionRef<'_>> {
+        self.id_to_session.get(session_id)
+    }
 
-  pub fn key_values_map(&self) -> HashMap<SessionId, Session> {
-    self
-      .id_to_session
-      .iter()
-      .map(|sref| (sref.key().clone(), sref.value().clone()))
-      .collect::<HashMap<SessionId, Session>>()
-  }
+    pub fn from_iter<I: IntoIterator<Item = (SessionId, Session)>>(it: I) -> Self {
+        Self {
+            id_to_session: Arc::new(DashMap::from_iter(it)),
+        }
+    }
+
+    pub fn entry(&self, session_id: &SessionId) -> Entry<'_, SessionId, Session> {
+        self.id_to_session.entry(session_id.clone())
+    }
+
+    pub fn key_values_map(&self) -> HashMap<SessionId, Session> {
+        self.id_to_session
+            .iter()
+            .map(|sref| (sref.key().clone(), sref.value().clone()))
+            .collect::<HashMap<SessionId, Session>>()
+    }
 }
 
 #[derive(Debug, Getters, Setters)]
 #[getset(get)]
 pub struct SocketAcceptor<A: Application + Send + Sync> {
-  settings: Properties,
-  connection_type: ConnectionType,
-  session_map: SessionMap,
-  // sock_descriptors: Arc<Mutex<HashMap<SocketAddr, bool>>>,
-  // #[getset(set)]
-  // receiver: Option<TioReceiver<String>>, // receive raw string msg from socket handling task
-  #[getset(set)]
-  app: Arc<A>,
+    settings: Properties,
+    connection_type: ConnectionType,
+    session_map: SessionMap,
+    // sock_descriptors: Arc<Mutex<HashMap<SocketAddr, bool>>>,
+    // #[getset(set)]
+    // receiver: Option<TioReceiver<String>>, // receive raw string msg from socket handling task
+    #[getset(set)]
+    app: Arc<A>,
 }
 
 impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
-  pub fn new(settings: Properties, app: A) -> Self {
-    let session_map = create_sessions(&settings);
-    // let socket_desc = create_socket_descriptors(&settings);
-    let connection_type: ConnectionType =
-      settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
-    Self {
-      settings,
-      connection_type,
-      session_map: SessionMap::from_iter(session_map),
-      // sock_descriptors: Arc::new(Mutex::new(socket_desc)),
-      // receiver: None,
-      app: Arc::new(app),
-    }
-  }
-
-  fn set_session_responder(
-    &mut self, session_id: &SessionId, msg_sender: TioBroadcastSender<String>,
-  ) {
-    self.session_map().entry(session_id).and_modify(|session| {
-      session.set_responder(Some(msg_sender));
-    });
-  }
-
-  pub fn start_accepting_connections(&mut self) {
-    let s_ids = self.session_map().key_values_map();
-    let mut socket_to_descriptor: HashMap<SocketAddr, SocketDescriptor> = HashMap::new();
-    let mut io_acceptors: HashMap<SocketDescriptor, IoAcceptor> = HashMap::new();
-    for (session_id, session) in s_ids.iter() {
-      let socket_port =
-        self.settings().get_optional_config::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap();
-      let socket_addr_str = format!("{}:{}", SOCKET_ACCEPT_HOST_IP, socket_port);
-      let socket_addr = socket_addr_str.parse::<SocketAddr>().unwrap();
-      socket_to_descriptor
-        .entry(socket_addr)
-        .or_insert_with(|| SocketDescriptor::new(socket_addr))
-        .accept_session(session_id.clone(), session.clone());
+    pub fn new(settings: Properties, app: A) -> Self {
+        let session_map = create_sessions(&settings);
+        // let socket_desc = create_socket_descriptors(&settings);
+        let connection_type: ConnectionType =
+            settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
+        Self {
+            settings,
+            connection_type,
+            session_map: SessionMap::from_iter(session_map),
+            // sock_descriptors: Arc::new(Mutex::new(socket_desc)),
+            // receiver: None,
+            app: Arc::new(app),
+        }
     }
 
-    let (socket_to_app_tx, socket_to_app_rx) = tio_channel::<String>(64);
-    start_receiver_task(socket_to_app_rx, Arc::clone(self.app()), self.session_map().clone());
-    for (s_addr, s_desc) in socket_to_descriptor.iter() {
-      let (io_acceptor, app_to_socket_tx) = IoAcceptor::create(*s_addr, socket_to_app_tx.clone());
-      // update app_to_socket_tx in all the session accepted by this socket_descriptor
-      for (accepted_sid, _) in s_desc.accepted_connections() {
-        self.set_session_responder(accepted_sid, app_to_socket_tx.clone());
-      }
-      io_acceptor.start();
-      io_acceptors.insert(s_desc.clone(), io_acceptor);
+    fn set_session_responder(
+        &mut self,
+        session_id: &SessionId,
+        msg_sender: TioBroadcastSender<String>,
+    ) {
+        self.session_map().entry(session_id).and_modify(|session| {
+            session.set_responder(Some(msg_sender));
+        });
     }
-  }
+
+    pub fn start_accepting_connections(&mut self) {
+        let s_ids = self.session_map().key_values_map();
+        let mut socket_to_descriptor: HashMap<SocketAddr, SocketDescriptor> = HashMap::new();
+        let mut io_acceptors: HashMap<SocketDescriptor, IoAcceptor> = HashMap::new();
+        for (session_id, session) in s_ids.iter() {
+            let socket_port = self
+                .settings()
+                .get_optional_config::<u16>(session_id, SOCKET_ACCEPT_PORT_SETTING)
+                .unwrap();
+            let socket_addr_str = format!("{}:{}", SOCKET_ACCEPT_HOST_IP, socket_port);
+            let socket_addr = socket_addr_str.parse::<SocketAddr>().unwrap();
+            socket_to_descriptor
+                .entry(socket_addr)
+                .or_insert_with(|| SocketDescriptor::new(socket_addr))
+                .accept_session(session_id.clone(), session.clone());
+        }
+
+        let (socket_to_app_tx, socket_to_app_rx) = tio_channel::<String>(64);
+        start_receiver_task(socket_to_app_rx, Arc::clone(self.app()), self.session_map().clone());
+        for (s_addr, s_desc) in socket_to_descriptor.iter() {
+            let (io_acceptor, app_to_socket_tx) =
+                IoAcceptor::create(*s_addr, socket_to_app_tx.clone());
+            // update app_to_socket_tx in all the session accepted by this socket_descriptor
+            for (accepted_sid, _) in s_desc.accepted_connections() {
+                self.set_session_responder(accepted_sid, app_to_socket_tx.clone());
+            }
+            io_acceptor.start();
+            io_acceptors.insert(s_desc.clone(), io_acceptor);
+        }
+    }
 }
 
 //     pub fn initialize(&mut self) {
@@ -241,41 +245,45 @@ impl<A: Application + Send + Sync + 'static> SocketAcceptor<A> {
 // }
 
 fn start_receiver_task<A: Application + Send + Sync + 'static>(
-  mut rx: TioReceiver<String>, app: Arc<A>, sessions: SessionMap,
+    mut rx: TioReceiver<String>,
+    app: Arc<A>,
+    sessions: SessionMap,
 ) {
-  std::thread::spawn(move || {
-    while let Some(s) = rx.blocking_recv() {
-      println!("received: {}", s);
-      let session_id: SessionId = Message::get_reverse_session_id(&s);
+    std::thread::spawn(move || {
+        while let Some(s) = rx.blocking_recv() {
+            println!("received: {}", s);
+            let session_id: SessionId = Message::get_reverse_session_id(&s);
 
-      let dd =
-        sessions.get_session(&session_id).map(|sess| Arc::clone(sess.data_dictionary())).unwrap();
-      if let Ok(message) = Message::from_str(&s, &dd) {
-        println!("msg parsed");
-        if let Ok(_) = Session::verify(&message, &sessions) {
-          app.from_app(&session_id, &sessions, message);
-        } else {
-          // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
-          Session::sync_send_to_target(&session_id, &sessions, test_logon());
+            let dd = sessions
+                .get_session(&session_id)
+                .map(|sess| Arc::clone(sess.data_dictionary()))
+                .unwrap();
+            if let Ok(message) = Message::from_str(&s, &dd) {
+                println!("msg parsed");
+                if let Ok(_) = Session::verify(&message, &sessions) {
+                    app.from_app(&session_id, &sessions, message);
+                } else {
+                    // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+                    Session::sync_send_to_target(&session_id, &sessions, test_logon());
+                }
+            } else {
+                // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
+            }
+
+            // app.from_app(s);
         }
-      } else {
-        // Session::send(test_logon(), session_id.clone(), Arc::clone(&sessions));
-      }
-
-      // app.from_app(s);
-    }
-  });
+    });
 }
 
 fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
-  let mut session_map = HashMap::new();
-  let connection_type: ConnectionType =
-    settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
-  for session_id in settings.session_ids() {
-    let session = Session::with_settings(session_id, settings);
-    session_map.insert(session_id.clone(), session);
-  }
-  session_map
+    let mut session_map = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let session = Session::with_settings(session_id, settings);
+        session_map.insert(session_id.clone(), session);
+    }
+    session_map
 }
 
 // fn create_socket_session(settings: &Properties) -> HashMap<SocketAddr, HashSet<SessionId>> {
@@ -310,25 +318,25 @@ fn create_sessions(settings: &Properties) -> HashMap<SessionId, Session> {
 // }
 
 fn create_socket_descriptors(settings: &Properties) -> HashMap<SocketAddr, bool> {
-  let mut descriptor = HashMap::new();
-  let connection_type: ConnectionType =
-    settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
-  for session_id in settings.session_ids() {
-    let (host, port): (String, u16) = match connection_type {
-      ConnectionType::ACCEPTOR => (
-        SOCKET_ACCEPT_HOST_IP.to_string(),
-        settings.get_optional_config(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
-      ),
-      ConnectionType::INITIATOR => (
-        settings.get_optional_config(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
-        settings.get_optional_config(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
-      ),
-    };
-    let addr_str = format!("{}:{}", host, port);
-    let sock_address = addr_str.parse::<SocketAddr>().unwrap();
-    descriptor.insert(sock_address, false);
-  }
-  descriptor
+    let mut descriptor = HashMap::new();
+    let connection_type: ConnectionType =
+        settings.get_default_config(CONNECTION_TYPE_SETTING).unwrap();
+    for session_id in settings.session_ids() {
+        let (host, port): (String, u16) = match connection_type {
+            ConnectionType::ACCEPTOR => (
+                SOCKET_ACCEPT_HOST_IP.to_string(),
+                settings.get_optional_config(session_id, SOCKET_ACCEPT_PORT_SETTING).unwrap(),
+            ),
+            ConnectionType::INITIATOR => (
+                settings.get_optional_config(session_id, SOCKET_CONNECT_HOST_SETTING).unwrap(),
+                settings.get_optional_config(session_id, SOCKET_CONNECT_PORT_SETTING).unwrap(),
+            ),
+        };
+        let addr_str = format!("{}:{}", host, port);
+        let sock_address = addr_str.parse::<SocketAddr>().unwrap();
+        descriptor.insert(sock_address, false);
+    }
+    descriptor
 }
 
 // fn start_internal_msg_receiver_task(mut write_stream: OwnedWriteHalf, mut rx: TioReceiver<String>) {
