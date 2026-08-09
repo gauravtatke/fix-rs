@@ -19,7 +19,7 @@ impl SessionState {
 
 #[derive(Debug, Default, Getters, Setters, Clone)]
 pub struct Session {
-    pub session_id: SessionId,
+    pub session_id: LegacySessionId,
     heartbeat_intrvl: u32,
     is_active: bool,
     reset_on_logon: bool,
@@ -35,10 +35,9 @@ pub struct Session {
 }
 
 impl Session {
-    fn set_session_id(&mut self, sid: SessionId) {
+    fn set_session_id(&mut self, sid: LegacySessionId) {
         self.session_id = sid;
     }
-
 
     pub fn verify(msg: &Message, sessions: &SessionMap) -> Result<(), &'static str> {
         Ok(())
@@ -59,7 +58,7 @@ impl Session {
     // pub async fn async_send(session_id: &SessionId, msg: Message) {
     //     let session =
     // }
-    pub fn sync_send_to_target(session_id: &SessionId, sessions: &SessionMap, msg: Message) {
+    pub fn sync_send_to_target(session_id: &LegacySessionId, sessions: &SessionMap, msg: Message) {
         // let synchronous_send = true;
         let sess_ref = sessions.get_session(session_id).unwrap();
         let responder = sess_ref.responder.as_ref().unwrap().clone();

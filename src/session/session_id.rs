@@ -6,7 +6,7 @@ use std::hash::{self, Hash};
 #[derive(Debug, PartialEq, Eq, Getters, Clone, Builder)]
 #[builder(setter(into, strip_option), default, build_fn(skip))]
 #[getset(get = "pub")]
-pub struct SessionId {
+pub struct LegacySessionId {
     begin_string: String,
     sender_compid: String,
     sender_subid: Option<String>,
@@ -19,19 +19,19 @@ pub struct SessionId {
     id: String,
 }
 
-impl std::default::Default for SessionId {
+impl std::default::Default for LegacySessionId {
     fn default() -> Self {
-        SessionIdBuilder::new("DEFAULT", "", "").build().unwrap()
+        LegacySessionIdBuilder::new("DEFAULT", "", "").build().unwrap()
     }
 }
 
-impl Hash for SessionId {
+impl Hash for LegacySessionId {
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
-impl SessionId {
+impl LegacySessionId {
     fn set_session_id(&mut self) {
         self.id.push_str(&self.begin_string);
         self.id.push(':');
@@ -58,26 +58,25 @@ impl SessionId {
             self.id.push_str(&self.target_locationid.clone().unwrap());
         }
     }
-
 }
 
-impl fmt::Display for SessionId {
+impl fmt::Display for LegacySessionId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.id)
     }
 }
 
-impl SessionIdBuilder {
+impl LegacySessionIdBuilder {
     pub fn new<S: Into<String>>(begin_string: S, sender_comp: S, target_comp: S) -> Self {
-        let mut sessionid_builder = SessionIdBuilder::default();
+        let mut sessionid_builder = LegacySessionIdBuilder::default();
         sessionid_builder.begin_string = Some(begin_string.into());
         sessionid_builder.sender_compid = Some(sender_comp.into());
         sessionid_builder.target_compid = Some(target_comp.into());
         sessionid_builder
     }
 
-    pub fn build(&self) -> Result<SessionId, SessionIdBuilderError> {
-        let mut session_id = SessionId {
+    pub fn build(&self) -> Result<LegacySessionId, LegacySessionIdBuilderError> {
+        let mut session_id = LegacySessionId {
             begin_string: self.begin_string.as_ref().unwrap().to_string(),
             sender_compid: self.sender_compid.as_ref().unwrap().to_string(),
             sender_subid: self.sender_subid.clone().flatten().and_then(|s| {

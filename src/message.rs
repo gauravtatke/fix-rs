@@ -8,7 +8,7 @@ use std::str::FromStr;
 use crate::data_dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::fields::*;
 use crate::quickfix_errors::{FieldError, SessionRejectError};
-use crate::session::{SessionId, SessionIdBuilder};
+use crate::session::{LegacySessionId, LegacySessionIdBuilder};
 
 type SessResult<T> = Result<T, SessionRejectError>;
 
@@ -348,8 +348,8 @@ impl Message {
         from_vec(vdeq, dd)
     }
 
-    pub fn get_session_id(s: &str) -> SessionId {
-        SessionIdBuilder::default()
+    pub fn get_session_id(s: &str) -> LegacySessionId {
+        LegacySessionIdBuilder::default()
             .begin_string(extract_field_value("8", s))
             .sender_compid(extract_field_value("49", s))
             .sender_subid(extract_field_value("50", s))
@@ -361,9 +361,9 @@ impl Message {
             .unwrap()
     }
 
-    pub fn get_reverse_session_id(s: &str) -> SessionId {
+    pub fn get_reverse_session_id(s: &str) -> LegacySessionId {
         // sender values from message is put into target & vice-versa
-        SessionIdBuilder::default()
+        LegacySessionIdBuilder::default()
             .begin_string(extract_field_value("8", s))
             .sender_compid(extract_field_value("56", s))
             .sender_subid(extract_field_value("57", s))

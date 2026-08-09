@@ -42,7 +42,6 @@ impl SessionSchedule {
         }
     }
 
-
     pub fn is_session_time(&self) -> bool {
         if self.is_non_stop {
             return true;
@@ -176,7 +175,7 @@ mod schedule_tests {
     use chrono::Local;
     use chrono_tz::Tz;
 
-#[test]
+    #[test]
     fn test_between_session() {
         let schedule = SessionScheduleBuilder::default()
             .start_time(NaiveTime::from_str("9:00:01").unwrap())

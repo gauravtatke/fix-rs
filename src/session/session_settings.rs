@@ -2,6 +2,7 @@ use crate::quickfix_errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
 use chrono_tz::Tz;
+use getset::Getters;
 use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -62,48 +63,66 @@ struct FixProperties {
     timezone: Option<Tz>,
 }
 
-#[derive(Debug, Default)]
-pub struct SessionProperties {
-    default: FixProperties,
-    sessions: HashMap<String, SessionConfig>,
+#[derive(Debug, Clone, Eq, Getters)]
+#[getset(get = "pub")]
+pub struct SessionId {
+    begin_string: String,
+    sender_comp_id: String,
+    sender_sub_id: Option<String>,
+    sender_location_id: Option<String>,
+    target_comp_id: String,
+    target_sub_id: Option<String>,
+    target_location_id: Option<String>,
+    session_qualifier: Option<String>,
+    id: String,
 }
 
-impl SessionProperties {
-    pub fn from_str(settings: &str) -> Result<Self, ConfigParseError> {
-        let parsed_toml = settings.parse::<toml::Table>()?;
-        let default_value =
-            parsed_toml.get("Default").ok_or(ConfigParseError::MissingDefaultSection)?;
-        let default_table =
-            default_value.as_table().ok_or(ConfigParseError::MissingDefaultSection)?;
-        let mut sessions = HashMap::new();
-        if let Some(session_tables) = parsed_toml.get("Session").and_then(|v| v.as_array()) {
-            for (i, table) in session_tables.iter().enumerate() {
-                let mut cloned_table = default_table.clone();
-                cloned_table.extend(
-                    table
-                        .as_table()
-                        .ok_or(ConfigParseError::InvalidSessionBlock { index: i })?
-                        .clone(),
-                );
-                let effective_session = Value::Table(cloned_table)
-                    .try_into::<FixProperties>()
-                    .map_err(|e| ConfigParseError::SessionDeserialize {
-                        index: i,
-                        source: e,
-                    })?;
-                let session_config = SessionConfig::try_from(effective_session)?;
-                let session_id = session_config.get_session_id();
-                sessions.insert(session_id, session_config);
-            }
+impl SessionId {
+    pub fn reverse_id(&self) -> SessionId {
+        SessionId {
+            begin_string: self.begin_string.clone(),
+            sender_comp_id: self.target_comp_id.clone(),
+            sender_sub_id: self.target_sub_id.clone(),
+            sender_location_id: self.target_location_id.clone(),
+            target_comp_id: self.sender_comp_id.clone(),
+            target_sub_id: self.sender_sub_id.clone(),
+            target_location_id: self.sender_location_id.clone(),
+            session_qualifier: self.session_qualifier.clone(),
+            id: create_sessionid_string(
+                &self.begin_string,
+                &self.target_comp_id,
+                self.target_sub_id.clone(),
+                self.target_location_id.clone(),
+                &self.sender_comp_id,
+                self.sender_sub_id.clone(),
+                self.sender_location_id.clone(),
+                self.session_qualifier.clone(),
+            ),
         }
-        let default_properties: FixProperties = default_value
-            .clone()
-            .try_into::<FixProperties>()
-            .map_err(ConfigParseError::DefaultDeserialize)?;
-        Ok(Self {
-            default: default_properties,
-            sessions,
-        })
+    }
+}
+
+// Hash and PartialEq use only the `id` field — two SessionIdV2 values with
+// the same composite id string are the same session. Derived impls would hash
+// all fields, breaking the Borrow<str> contract below.
+impl std::hash::Hash for SessionId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+impl PartialEq for SessionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+// Allows HashMap<SessionIdV2, V>::get("some_str") without constructing a full
+// SessionIdV2 for lookups. The Borrow contract requires hash(self) == hash(self.borrow()),
+// which holds because Hash above hashes only self.id — the same bytes &str hashes.
+impl std::borrow::Borrow<str> for SessionId {
+    fn borrow(&self) -> &str {
+        &self.id
     }
 }
 
@@ -113,58 +132,89 @@ pub struct SessionConfig {
     begin_string: String,
     connection_type: ConnectionType,
     sender_comp_id: String,
-    sender_sub_id: Option<String>,          // optional, no default
-    sender_location_id: Option<String>,     // optional, no default
+    sender_sub_id: Option<String>,      // optional, no default
+    sender_location_id: Option<String>, // optional, no default
     target_comp_id: String,
-    target_sub_id: Option<String>,          // optional, no default
-    target_location_id: Option<String>,     // optional, no default
-    session_qualifier: Option<String>,      // optional, no default
+    target_sub_id: Option<String>,      // optional, no default
+    target_location_id: Option<String>, // optional, no default
+    session_qualifier: Option<String>,  // optional, no default
     // host & port (required per connection_type, validated in TryFrom)
     socket_accept_port: Option<u16>,
     socket_connect_port: Option<u16>,
     socket_connect_host: Option<String>,
     heartbeat_interval: Option<u32>,
     // schedule
-    start_time: NaiveTime,                  // default: 00:00:00
-    end_time: NaiveTime,                    // default: 23:59:59
-    start_day: Option<Weekday>,             // optional, must pair with end_day
-    end_day: Option<Weekday>,               // optional, must pair with start_day
-    timezone: Tz,                           // default: UTC
+    start_time: NaiveTime,      // default: 00:00:00
+    end_time: NaiveTime,        // default: 23:59:59
+    start_day: Option<Weekday>, // optional, must pair with end_day
+    end_day: Option<Weekday>,   // optional, must pair with start_day
+    timezone: Tz,               // default: UTC
     // session behavior
-    reset_on_logon: bool,                   // default: false
-    reset_on_disconnect: bool,              // default: false
-    reset_on_logout: bool,                  // default: false
-    data_dictionary: PathBuf,               // default: derived from begin_string (e.g. FIX43.xml)
+    reset_on_logon: bool,      // default: false
+    reset_on_disconnect: bool, // default: false
+    reset_on_logout: bool,     // default: false
+    data_dictionary: PathBuf,  // default: derived from begin_string (e.g. FIX43.xml)
 }
 
+fn create_sessionid_string(
+    begin_str: &str,
+    sender_compid: &str,
+    sender_subid: Option<String>,
+    sender_locationid: Option<String>,
+    target_compid: &str,
+    target_subid: Option<String>,
+    target_locationid: Option<String>,
+    session_qualifier: Option<String>,
+) -> String {
+    // Format: "BeginString:SenderCompID/SubID/LocationID->TargetCompID/SubID/LocationID:Qualifier"
+    // e.g. "FIX.4.3:SENDER/sub/loc->TARGET/sub/loc:qual" (optional parts omitted when absent)
+    let mut sid = format!("{}:{}", begin_str, sender_compid);
+    if let Some(subid) = sender_subid {
+        sid.push('/');
+        sid.push_str(&subid);
+    }
+    if let Some(locid) = sender_locationid {
+        sid.push('/');
+        sid.push_str(&locid);
+    }
+    sid.push_str("->");
+    sid.push_str(target_compid);
+    if let Some(t_subid) = target_subid {
+        sid.push('/');
+        sid.push_str(&t_subid);
+    }
+    if let Some(t_locid) = target_locationid {
+        sid.push('/');
+        sid.push_str(&t_locid);
+    }
+    if let Some(qualifier) = session_qualifier {
+        sid.push(':');
+        sid.push_str(&qualifier);
+    }
+    sid
+}
 impl SessionConfig {
-    fn get_session_id(&self) -> String {
-        // Format: "BeginString:SenderCompID/SubID/LocationID->TargetCompID/SubID/LocationID:Qualifier"
-        // e.g. "FIX.4.3:SENDER/sub/loc->TARGET/sub/loc:qual" (optional parts omitted when absent)
-        let mut sid = format!("{}:{}", self.begin_string, self.sender_comp_id);
-        if let Some(sub_id) = &self.sender_sub_id {
-            sid.push('/');
-            sid.push_str(sub_id);
+    fn to_session_id(&self) -> SessionId {
+        SessionId {
+            begin_string: self.begin_string.clone(),
+            sender_comp_id: self.sender_comp_id.clone(),
+            sender_sub_id: self.sender_sub_id.clone(),
+            sender_location_id: self.sender_location_id.clone(),
+            target_comp_id: self.target_comp_id.clone(),
+            target_sub_id: self.target_sub_id.clone(),
+            target_location_id: self.target_location_id.clone(),
+            session_qualifier: self.session_qualifier.clone(),
+            id: create_sessionid_string(
+                &self.begin_string,
+                &self.sender_comp_id,
+                self.sender_sub_id.clone(),
+                self.sender_location_id.clone(),
+                &self.target_comp_id,
+                self.target_sub_id.clone(),
+                self.target_location_id.clone(),
+                self.session_qualifier.clone(),
+            ),
         }
-        if let Some(location_id) = &self.sender_location_id {
-            sid.push('/');
-            sid.push_str(location_id);
-        }
-        sid.push_str("->");
-        sid.push_str(&self.target_comp_id);
-        if let Some(target_sub_id) = &self.target_sub_id {
-            sid.push('/');
-            sid.push_str(target_sub_id);
-        }
-        if let Some(target_location_id) = &self.target_location_id {
-            sid.push('/');
-            sid.push_str(target_location_id);
-        }
-        if let Some(session_qualifier) = &self.session_qualifier {
-            sid.push(':');
-            sid.push_str(session_qualifier);
-        }
-        sid
     }
 }
 
@@ -287,13 +337,57 @@ impl TryFrom<FixProperties> for SessionConfig {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct SessionProperties {
+    default: FixProperties,
+    sessions: HashMap<SessionId, SessionConfig>,
+}
 
+impl SessionProperties {
+    pub fn from_str(settings: &str) -> Result<Self, ConfigParseError> {
+        let parsed_toml = settings.parse::<toml::Table>()?;
+        let default_value =
+            parsed_toml.get("Default").ok_or(ConfigParseError::MissingDefaultSection)?;
+        let default_table =
+            default_value.as_table().ok_or(ConfigParseError::MissingDefaultSection)?;
+        let mut sessions = HashMap::new();
+        if let Some(session_tables) = parsed_toml.get("Session").and_then(|v| v.as_array()) {
+            for (i, table) in session_tables.iter().enumerate() {
+                let mut cloned_table = default_table.clone();
+                cloned_table.extend(
+                    table
+                        .as_table()
+                        .ok_or(ConfigParseError::InvalidSessionBlock { index: i })?
+                        .clone(),
+                );
+                let effective_session = Value::Table(cloned_table)
+                    .try_into::<FixProperties>()
+                    .map_err(|e| ConfigParseError::SessionDeserialize {
+                        index: i,
+                        source: e,
+                    })?;
+                let session_config = SessionConfig::try_from(effective_session)?;
+                // let session_id = session_config.get_session_id();
+                let session_id = session_config.to_session_id();
+                sessions.insert(session_id, session_config);
+            }
+        }
+        let default_properties: FixProperties = default_value
+            .clone()
+            .try_into::<FixProperties>()
+            .map_err(ConfigParseError::DefaultDeserialize)?;
+        Ok(Self {
+            default: default_properties,
+            sessions,
+        })
+    }
+}
 #[cfg(test)]
 mod session_setting_tests {
     use super::*;
     use std::path::Path;
 
-#[test]
+    #[test]
     fn test_fix_properties_deserialize_single_block() {
         let toml_str = r#"
             connection_type = "acceptor"
@@ -631,6 +725,59 @@ mod session_setting_tests {
         assert_eq!(s.end_day, Some(Weekday::Fri));
         assert_eq!(s.start_time, NaiveTime::from_hms_opt(8, 0, 0).unwrap());
         assert_eq!(s.end_time, NaiveTime::from_hms_opt(16, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_reverse_id_swaps_sender_and_target() {
+        let cfg = r#"
+            [Default]
+            connection_type = "acceptor"
+            begin_string = "FIX.4.3"
+            socket_accept_port = 10114
+
+            [[Session]]
+            sender_comp_id = "SENDER"
+            target_comp_id = "TARGET"
+            sender_sub_id = "s_sub"
+            sender_location_id = "s_loc"
+            target_sub_id = "t_sub"
+            target_location_id = "t_loc"
+            session_qualifier = "qual1"
+        "#;
+
+        let props = SessionProperties::from_str(cfg).unwrap();
+        let (sid, _) = props.sessions.iter().next().unwrap();
+
+        assert_eq!(sid.id(), "FIX.4.3:SENDER/s_sub/s_loc->TARGET/t_sub/t_loc:qual1");
+
+        let reversed = sid.reverse_id();
+        assert_eq!(reversed.id(), "FIX.4.3:TARGET/t_sub/t_loc->SENDER/s_sub/s_loc:qual1");
+        assert_eq!(reversed.sender_comp_id(), "TARGET");
+        assert_eq!(reversed.target_comp_id(), "SENDER");
+
+        // reverse of reverse == original
+        assert_eq!(reversed.reverse_id(), *sid);
+    }
+
+    #[test]
+    fn test_reverse_id_minimal_no_optional_fields() {
+        let cfg = r#"
+            [Default]
+            connection_type = "acceptor"
+            begin_string = "FIX.4.3"
+            socket_accept_port = 10114
+
+            [[Session]]
+            sender_comp_id = "ALPHA"
+            target_comp_id = "BETA"
+        "#;
+
+        let props = SessionProperties::from_str(cfg).unwrap();
+        let (sid, _) = props.sessions.iter().next().unwrap();
+
+        assert_eq!(sid.id(), "FIX.4.3:ALPHA->BETA");
+        assert_eq!(sid.reverse_id().id(), "FIX.4.3:BETA->ALPHA");
+        assert_eq!(sid.reverse_id().reverse_id(), *sid);
     }
 
     #[test]
