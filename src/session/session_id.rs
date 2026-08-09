@@ -1,7 +1,5 @@
-use crate::session::*;
 use derive_builder::Builder;
 use getset::Getters;
-use std::collections::HashMap;
 use std::fmt;
 use std::hash::{self, Hash};
 
@@ -61,58 +59,6 @@ impl SessionId {
         }
     }
 
-    pub fn from_map(
-        prop_map: &HashMap<String, String>,
-        defaults: &HashMap<String, String>,
-    ) -> Self {
-        let mut builder = SessionIdBuilder::default();
-        builder
-            .begin_string(
-                prop_map
-                    .get(BEGIN_STRING_SETTING)
-                    .or_else(|| defaults.get(BEGIN_STRING_SETTING))
-                    .unwrap(),
-            )
-            .sender_compid(
-                prop_map
-                    .get(SENDER_COMPID_SETTING)
-                    .or_else(|| defaults.get(SENDER_COMPID_SETTING))
-                    .unwrap(),
-            )
-            .target_compid(
-                prop_map
-                    .get(TARGET_COMPID_SETTING)
-                    .or_else(|| defaults.get(TARGET_COMPID_SETTING))
-                    .unwrap(),
-            );
-
-        if let Some(sender_sub) =
-            prop_map.get(SENDER_SUBID_SETTING).or_else(|| defaults.get(SENDER_SUBID_SETTING))
-        {
-            builder.sender_subid(sender_sub);
-        }
-
-        if let Some(sender_loc) = prop_map
-            .get(SENDER_LOCATIONID_SETTING)
-            .or_else(|| defaults.get(SENDER_LOCATIONID_SETTING))
-        {
-            builder.sender_locationid(sender_loc);
-        }
-
-        if let Some(target_sub) =
-            prop_map.get(TARGET_SUBID_SETTING).or_else(|| defaults.get(TARGET_SUBID_SETTING))
-        {
-            builder.target_subid(target_sub);
-        }
-        if let Some(target_loc) = prop_map
-            .get(TARGET_LOCATIONID_SETTING)
-            .or_else(|| defaults.get(TARGET_LOCATIONID_SETTING))
-        {
-            builder.target_locationid(target_loc);
-        }
-
-        builder.build().unwrap()
-    }
 }
 
 impl fmt::Display for SessionId {

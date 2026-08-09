@@ -8,15 +8,18 @@ build = "build/main.rs"
 
 [dependencies]
 roxmltree = "0.21.1"
-chrono = "0.4.45"
-chrono-tz = { version = "0.10", features = ["filter-by-regex"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["filter-by-regex", "serde"] }
 indexmap = "2.14.0"
 thiserror = "2.0.18"
 serde = { version = "1.0", features = ["derive"] }
+toml = "1.1.4"
 getset = "0.1.7"
 tokio = { version = "1.52.3", features = ["full"] }
 derive_builder = "0.20.2"
 dashmap = "6.2.1"
+log = "0.4.33"
+env_logger = "0.11.11"
 
 [build-dependencies]
 roxmltree = "0.21.1"

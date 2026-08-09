@@ -1,0 +1,13 @@
+[Default]
+connection_type = "acceptor"
+begin_string = "FIX.4.3"
+socket_accept_port = 10114
+
+[[Session]]
+sender_comp_id = "FIXIMULATOR_tender1"
+target_comp_id = "BANZAI_target1"
+
+[[Session]]
+sender_comp_id = "FIXIMULATOR_sender2"
+target_comp_id = "BANZAI_target2"
+socket_accept_port = 10115

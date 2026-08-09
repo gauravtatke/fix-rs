@@ -31,6 +31,10 @@ pub const RESET_ON_LOGOUT_SETTING: &str = "reset_on_logout";
 pub const RESET_ON_DISCONNECT_SETTING: &str = "reset_on_disconnect";
 pub const HEARTBEAT_INTERVAL_SETTING: &str = "heartbeat_interval";
 pub const DATA_DICTIONARY_FILE_PATH: &str = "data_dictionary";
+pub const START_DAY_SETTING: &str = "start_day";
+pub const END_DAY_SETTING: &str = "end_day";
+pub const START_TIME: &str = "start_time";
+pub const END_TIME: &str = "end_time";
 
 pub mod session_and_state;
 pub mod session_id;

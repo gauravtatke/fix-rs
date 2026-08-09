@@ -202,11 +202,26 @@ pub enum InvalidMessage {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConfigErr<'a> {
-    #[error("Config Not Present - {}", .0)]
-    NotFound(&'a str),
-    #[error("Could not parse - {}", .0)]
-    ParseError(String),
+pub enum ConfigParseError {
+    #[error("Invalid TOML: {0}")]
+    InvalidToml(#[from] toml::de::Error),
+    #[error("Missing [Default] section")]
+    MissingDefaultSection,
+    #[error("Session block {index} is not a valid table")]
+    InvalidSessionBlock { index: usize },
+    #[error("Failed to deserialize session block {index}: {source}")]
+    SessionDeserialize {
+        index: usize,
+        source: toml::de::Error,
+    },
+    #[error("Failed to deserialize [Default] section: {0}")]
+    DefaultDeserialize(toml::de::Error),
+    #[error("Invalid field={field} value={value}")]
+    InvalidFieldValue { field: String, value: String },
+    #[error("Missing required field {field}")]
+    MissingRequiredField { field: String },
+    #[error("Validation failed: {msg}")]
+    ValidationFailed { msg: String },
 }
 
 #[derive(Debug, thiserror::Error)]

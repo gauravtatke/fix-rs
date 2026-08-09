@@ -1,4 +1,3 @@
-use super::{Properties, SessionId};
 use chrono::{Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use derive_builder::Builder;
@@ -43,34 +42,6 @@ impl SessionSchedule {
         }
     }
 
-    pub fn create_schedule(session_id: &SessionId, settings: &Properties) -> Self {
-        let start_time = settings.get_optional_config::<NaiveTime>(session_id, START_TIME_SETTING);
-        let end_time = settings.get_optional_config::<NaiveTime>(session_id, END_TIME_SETTING);
-
-        let mut is_non_stop = false;
-        if start_time.is_none() && end_time.is_none() {
-            is_non_stop = true;
-        } else if start_time.is_none() || end_time.is_none() {
-            panic!("start_time and end_time both are mandatory");
-        }
-
-        let start_day = settings.get_optional_config::<Weekday>(session_id, START_DAY_SETTING);
-        let end_day = settings.get_optional_config::<Weekday>(session_id, END_DAY_SETTING);
-        if is_non_stop && (start_day.is_some() || end_day.is_some()) {
-            panic!("start or end day specified without start time or end time");
-        }
-
-        let time_zone: chrono_tz::Tz =
-            settings.get_optional_config(session_id, TIMEZONE_SETTING).unwrap_or(chrono_tz::UTC);
-        SessionSchedule::new(
-            start_time.unwrap(),
-            start_day,
-            end_time.unwrap(),
-            end_day,
-            time_zone,
-            is_non_stop,
-        )
-    }
 
     pub fn is_session_time(&self) -> bool {
         if self.is_non_stop {
@@ -205,20 +176,7 @@ mod schedule_tests {
     use chrono::Local;
     use chrono_tz::Tz;
 
-    #[test]
-    fn test_session_time() {
-        session_time(Tz::Europe__London);
-        let local_time = Local::now();
-        println!(
-            "\n\nlocal_time {}, naive_local {}, naive_utc: {}\n\n",
-            local_time,
-            local_time.naive_local(),
-            local_time.naive_utc()
-        );
-        assert_eq!(is_current_time_between(Tz::Asia__Kolkata, "05:00:00", "13:00:00"), false);
-    }
-
-    #[test]
+#[test]
     fn test_between_session() {
         let schedule = SessionScheduleBuilder::default()
             .start_time(NaiveTime::from_str("9:00:01").unwrap())
