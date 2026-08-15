@@ -125,7 +125,7 @@ parallel disconnected API.
 Session-level protocol logic: logon/heartbeat/test-request/logout sequencing, message dispatch, and the Application
 trait for handing messages to/from user code. Reference: `session_context/qfj-session-message-flow.md`.
 
-- [ ] **4.1 — `SessionState` struct.**
+- [x] **4.1 — `SessionState` struct.**
   Pure-data struct in `src/session/session_and_state.rs`: logon/logout/reset booleans (`logon_sent`, `logon_received`,
   `logout_sent`, `logout_received`, `reset_sent`, `reset_received`, `is_initiator`), heartbeat interval (`u32`), timing
   fields (`last_sent_time`, `last_received_time` as `Instant` or equivalent), `test_request_counter` (`u32`),
@@ -142,10 +142,10 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
   and needed on every inbound message, computing it once avoids repeated allocation. `SessionConfig::to_session_id()`
   produces a `SessionId`, and `SessionProperties` uses `HashMap<SessionId, SessionConfig>`. Manual `Hash`/`PartialEq`
   (on `id`
-  only) + `Borrow<str>` enables string-key lookups on the map. Old `SessionId` renamed to `LegacySessionId` (prototype
-  code, will be removed). 2 tests verify reverse_id correctness (full fields + minimal).
+  only) + `Borrow<str>` enables string-key lookups on the map. Old `SessionId` renamed to `SessionId` (prototype code,
+  will be removed). 2 tests verify reverse_id correctness (full fields + minimal).
 
-- [ ] **4.3 — `Application` trait + `DefaultApplication`.**
+- [x] **4.3 — `Application` trait + `DefaultApplication`.**
   Rewrite `src/application.rs`. The trait has 7 methods matching QFJ's interface:
     - `on_create(&mut self, session_id: &SessionId)` — session constructed
     - `on_logon(&mut self, session_id: &SessionId)` — logon complete
@@ -162,13 +162,13 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
   `DoNotSend` added to `quickfix_errors.rs`. Done when: `DefaultApplication` compiles and a test calls each callback
   without panicking.
 
-- [ ] **4.4 — `Responder` trait.**
+- [x] **4.4 — `Responder` trait.**
   Wire abstraction in `src/session/` (or `src/network.rs`): `fn send(&self, message: &str) -> bool` and
   `fn disconnect(&self)`. M4 provides a `MockResponder` (captures sent messages in a `Vec<String>` behind a `RefCell` or
   `Mutex`) for testing. Real TCP responder comes in M5. Done when: `MockResponder` compiles and a test verifies `send()`
   captures the message string.
 
-- [ ] **4.5 — Session struct + `verify()`.**
+- [x] **4.5 — Session struct + `verify()`.**
   Rewrite `Session` in `src/session/session_and_state.rs`. Session owns: `SessionId`, `SessionState`,
   `Arc<DataDictionary>`, `Box<dyn Application>`, `Option<Box<dyn Responder>>`, config fields (heartbeat interval,
   reset-on-logon/logout/disconnect flags). Delete the old prototype fields (`msg_q`, broadcast responder, etc.).
@@ -183,7 +183,7 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
        mismatch, bad logon state, and the from_callback dispatch (using a test Application impl that records which
        callback was called).
 
-- [ ] **4.6 — Admin message builders.**
+- [x] **4.6 — Admin message builders.**
   Methods on Session: `generate_logon()`, `generate_logout(reason: Option<&str>)`,
   `generate_heartbeat(test_req_id: Option<&str>)`, `generate_test_request(id: &str)`. Each: creates a `Message`, sets
   the MsgType, calls `initialize_header(&mut header)` (stamps BeginString, SenderCompID, TargetCompID, MsgSeqNum,

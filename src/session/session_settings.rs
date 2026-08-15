@@ -78,31 +78,87 @@ pub struct SessionId {
 }
 
 impl SessionId {
-    pub fn reverse_id(&self) -> SessionId {
-        SessionId {
-            begin_string: self.begin_string.clone(),
-            sender_comp_id: self.target_comp_id.clone(),
-            sender_sub_id: self.target_sub_id.clone(),
-            sender_location_id: self.target_location_id.clone(),
-            target_comp_id: self.sender_comp_id.clone(),
-            target_sub_id: self.sender_sub_id.clone(),
-            target_location_id: self.sender_location_id.clone(),
-            session_qualifier: self.session_qualifier.clone(),
-            id: create_sessionid_string(
-                &self.begin_string,
-                &self.target_comp_id,
-                self.target_sub_id.clone(),
-                self.target_location_id.clone(),
-                &self.sender_comp_id,
-                self.sender_sub_id.clone(),
-                self.sender_location_id.clone(),
-                self.session_qualifier.clone(),
-            ),
+    pub fn new(begin_string: &str, sender_comp_id: &str, target_comp_id: &str) -> Self {
+        let id = create_sessionid_string(
+            begin_string,
+            sender_comp_id,
+            None,
+            None,
+            target_comp_id,
+            None,
+            None,
+            None,
+        );
+        Self {
+            begin_string: begin_string.to_owned(),
+            sender_comp_id: sender_comp_id.to_owned(),
+            sender_sub_id: None,
+            sender_location_id: None,
+            target_comp_id: target_comp_id.to_owned(),
+            target_sub_id: None,
+            target_location_id: None,
+            session_qualifier: None,
+            id,
         }
+    }
+
+    pub fn with_sender_sub_id(mut self, sub_id: &str) -> Self {
+        self.sender_sub_id = Some(sub_id.to_owned());
+        self.id = self.compute_id();
+        self
+    }
+
+    pub fn with_sender_location_id(mut self, loc_id: &str) -> Self {
+        self.sender_location_id = Some(loc_id.to_owned());
+        self.id = self.compute_id();
+        self
+    }
+
+    pub fn with_target_sub_id(mut self, sub_id: &str) -> Self {
+        self.target_sub_id = Some(sub_id.to_owned());
+        self.id = self.compute_id();
+        self
+    }
+
+    pub fn with_target_location_id(mut self, loc_id: &str) -> Self {
+        self.target_location_id = Some(loc_id.to_owned());
+        self.id = self.compute_id();
+        self
+    }
+
+    pub fn with_session_qualifier(mut self, qualifier: &str) -> Self {
+        self.session_qualifier = Some(qualifier.to_owned());
+        self.id = self.compute_id();
+        self
+    }
+
+    fn compute_id(&self) -> String {
+        create_sessionid_string(
+            &self.begin_string,
+            &self.sender_comp_id,
+            self.sender_sub_id.clone(),
+            self.sender_location_id.clone(),
+            &self.target_comp_id,
+            self.target_sub_id.clone(),
+            self.target_location_id.clone(),
+            self.session_qualifier.clone(),
+        )
+    }
+
+    pub fn reverse_id(&self) -> SessionId {
+        let mut reversed =
+            SessionId::new(&self.begin_string, &self.target_comp_id, &self.sender_comp_id);
+        reversed.sender_sub_id = self.target_sub_id.clone();
+        reversed.sender_location_id = self.target_location_id.clone();
+        reversed.target_sub_id = self.sender_sub_id.clone();
+        reversed.target_location_id = self.sender_location_id.clone();
+        reversed.session_qualifier = self.session_qualifier.clone();
+        reversed.id = reversed.compute_id();
+        reversed
     }
 }
 
-// Hash and PartialEq use only the `id` field — two SessionIdV2 values with
+// Hash and PartialEq use only the `id` field — two SessionId values with
 // the same composite id string are the same session. Derived impls would hash
 // all fields, breaking the Borrow<str> contract below.
 impl std::hash::Hash for SessionId {
@@ -117,8 +173,8 @@ impl PartialEq for SessionId {
     }
 }
 
-// Allows HashMap<SessionIdV2, V>::get("some_str") without constructing a full
-// SessionIdV2 for lookups. The Borrow contract requires hash(self) == hash(self.borrow()),
+// Allows HashMap<SessionId, V>::get("some_str") without constructing a full
+// SessionId for lookups. The Borrow contract requires hash(self) == hash(self.borrow()),
 // which holds because Hash above hashes only self.id — the same bytes &str hashes.
 impl std::borrow::Borrow<str> for SessionId {
     fn borrow(&self) -> &str {
@@ -195,26 +251,24 @@ fn create_sessionid_string(
 }
 impl SessionConfig {
     fn to_session_id(&self) -> SessionId {
-        SessionId {
-            begin_string: self.begin_string.clone(),
-            sender_comp_id: self.sender_comp_id.clone(),
-            sender_sub_id: self.sender_sub_id.clone(),
-            sender_location_id: self.sender_location_id.clone(),
-            target_comp_id: self.target_comp_id.clone(),
-            target_sub_id: self.target_sub_id.clone(),
-            target_location_id: self.target_location_id.clone(),
-            session_qualifier: self.session_qualifier.clone(),
-            id: create_sessionid_string(
-                &self.begin_string,
-                &self.sender_comp_id,
-                self.sender_sub_id.clone(),
-                self.sender_location_id.clone(),
-                &self.target_comp_id,
-                self.target_sub_id.clone(),
-                self.target_location_id.clone(),
-                self.session_qualifier.clone(),
-            ),
+        let mut sid =
+            SessionId::new(&self.begin_string, &self.sender_comp_id, &self.target_comp_id);
+        if let Some(ref sub) = self.sender_sub_id {
+            sid = sid.with_sender_sub_id(sub);
         }
+        if let Some(ref loc) = self.sender_location_id {
+            sid = sid.with_sender_location_id(loc);
+        }
+        if let Some(ref sub) = self.target_sub_id {
+            sid = sid.with_target_sub_id(sub);
+        }
+        if let Some(ref loc) = self.target_location_id {
+            sid = sid.with_target_location_id(loc);
+        }
+        if let Some(ref qual) = self.session_qualifier {
+            sid = sid.with_session_qualifier(qual);
+        }
+        sid
     }
 }
 

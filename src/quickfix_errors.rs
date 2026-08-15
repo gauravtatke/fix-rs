@@ -231,3 +231,42 @@ pub enum FieldError {
     #[error("Could not parse field value into the requested type")]
     InvalidFormat,
 }
+
+// Session-level errors raised by verify_msg — distinct from SessionRejectError,
+// which covers FIX-level Reject(3) reasons during message parsing.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("BeginString mismatch: expected {expected} got {received}")]
+    BeginStringMismatch { expected: String, received: String },
+    #[error("Message type {msg_type} not valid for current session state")]
+    InvalidStateForMsgType { msg_type: String },
+    #[error("CompID mismatch: expected sender={expected_sender} target={expected_target}")]
+    CompIdMismatch {
+        expected_sender: String,
+        expected_target: String,
+    },
+    #[error("MsgSeqNum too low: received {received} expected {expected}")]
+    SeqNumTooLow { received: u32, expected: u32 },
+    #[error("Missing header field tag={tag}")]
+    MissingHeaderField { tag: u32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Do not send")]
+pub struct DonotSend;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Reject logon: {reason:?}")]
+pub struct RejectLogon {
+    reason: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("Unsupported message type")]
+    UnsupportedMessageType,
+    #[error("Required field is missing")]
+    FieldNotFound,
+    #[error("Field value does not parse to the expected value")]
+    IncorrectDataFormat,
+}
