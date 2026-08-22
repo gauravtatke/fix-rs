@@ -2,13 +2,6 @@ use chrono::{Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use derive_builder::Builder;
 
-// schedule related settings
-const START_DAY_SETTING: &str = "start_day";
-const END_DAY_SETTING: &str = "end_day";
-const START_TIME_SETTING: &str = "start_time";
-const END_TIME_SETTING: &str = "end_time";
-const TIMEZONE_SETTING: &str = "default_timezone";
-
 #[derive(Debug, Builder)]
 pub struct SessionSchedule {
     start_time: NaiveTime,

@@ -193,7 +193,7 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
   tests verify that `generate_heartbeat` produces a message with correct header fields and the MockResponder captures
   the serialized output.
 
-- [ ] **4.7 — Inbound dispatch (`next_message`).**
+- [x] **4.7 — Inbound dispatch (`next_message`).**
   `Session::next_message(&mut self, message: Message)` — the MsgType switch:
     - `A` (Logon) → `next_logon`: validate session enabled + in session time, check ResetSeqNumFlag, verify, set
       logon-received, if acceptor generate logon response, call `application.on_logon()`

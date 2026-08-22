@@ -8,7 +8,7 @@ use std::str::FromStr;
 use crate::data_dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::fields::*;
 use crate::quickfix_errors::{FieldError, SessionRejectError};
-use crate::session::{LegacySessionId, LegacySessionIdBuilder};
+use crate::session::{SessionId, SessionIdBuilder};
 
 type SessResult<T> = Result<T, SessionRejectError>;
 
@@ -310,7 +310,7 @@ impl Message {
         self.header_mut().set_field(StringField::new(9, &body_len.to_string()))
     }
 
-    fn get_msg_type(&self) -> Result<String, FieldError> {
+    pub fn get_msg_type(&self) -> Result<String, FieldError> {
         self.header.get_field::<String>(35)
     }
 
@@ -348,31 +348,29 @@ impl Message {
         from_vec(vdeq, dd)
     }
 
-    pub fn get_session_id(s: &str) -> LegacySessionId {
-        LegacySessionIdBuilder::default()
-            .begin_string(extract_field_value("8", s))
-            .sender_compid(extract_field_value("49", s))
-            .sender_subid(extract_field_value("50", s))
-            .sender_locationid(extract_field_value("142", s))
-            .target_compid(extract_field_value("56", s))
-            .target_subid(extract_field_value("57", s))
-            .target_locationid(extract_field_value("143", s))
+    pub fn get_session_id(&self) -> SessionId {
+        let begin_str = self.header.get_field::<String>(8).unwrap();
+        let sender_comp = self.header.get_field::<String>(49).unwrap();
+        let target_comp = self.header.get_field::<String>(56).unwrap();
+        SessionIdBuilder::new(&begin_str, &sender_comp, &target_comp)
+            .sender_sub_id(self.header.get_field::<String>(50).ok().as_deref())
+            .sender_location_id(self.header.get_field::<String>(142).ok().as_deref())
+            .target_sub_id(self.header.get_field::<String>(57).ok().as_deref())
+            .target_location_id(self.header.get_field::<String>(143).ok().as_deref())
             .build()
-            .unwrap()
     }
 
-    pub fn get_reverse_session_id(s: &str) -> LegacySessionId {
+    pub fn get_reverse_session_id(&self) -> SessionId {
         // sender values from message is put into target & vice-versa
-        LegacySessionIdBuilder::default()
-            .begin_string(extract_field_value("8", s))
-            .sender_compid(extract_field_value("56", s))
-            .sender_subid(extract_field_value("57", s))
-            .sender_locationid(extract_field_value("143", s))
-            .target_compid(extract_field_value("49", s))
-            .target_subid(extract_field_value("50", s))
-            .target_locationid(extract_field_value("142", s))
+        let begin_str = self.header.get_field::<String>(8).unwrap();
+        let sender_comp = self.header.get_field::<String>(49).unwrap();
+        let target_comp = self.header.get_field::<String>(56).unwrap();
+        SessionIdBuilder::new(&begin_str, &target_comp, &sender_comp)
+            .sender_sub_id(self.header.get_field::<String>(57).ok().as_deref())
+            .sender_location_id(self.header.get_field::<String>(143).ok().as_deref())
+            .target_sub_id(self.header.get_field::<String>(50).ok().as_deref())
+            .target_location_id(self.header.get_field::<String>(142).ok().as_deref())
             .build()
-            .unwrap()
     }
 }
 

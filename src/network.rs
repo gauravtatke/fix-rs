@@ -1,11 +1,9 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::session::*;
-
 pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
 
-type SessionRef<'a> = dashmap::mapref::one::Ref<'a, LegacySessionId, Session>;
+// type SessionRef<'a> = dashmap::mapref::one::Ref<'a, LegacySessionId, Session>;
 
 // #[derive(Debug, Clone, Default)]
 // pub struct SessionMap {

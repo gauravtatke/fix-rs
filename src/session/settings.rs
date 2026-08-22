@@ -2,12 +2,47 @@ use crate::quickfix_errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
 use chrono_tz::Tz;
-use getset::Getters;
 use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use toml::Value;
+
+// FIX protocol version strings
+const FIX42_BEGIN_STR: &str = "FIX.4.2";
+const FIX43_BEGIN_STR: &str = "FIX.4.3";
+const FIX44_BEGIN_STR: &str = "FIX.4.4";
+
+// Connection types
+const ACCEPTOR_CONN_TYPE: &str = "acceptor";
+const INITIATOR_CONN_TYPE: &str = "initiator";
+
+// Config TOML section names
+const DEFAULT_SECTION_NAME: &str = "Default";
+const SESSION_SECTION_NAME: &str = "Session";
+
+// Config setting key names
+const BEGIN_STRING_SETTING: &str = "begin_string";
+const SENDER_COMPID_SETTING: &str = "sender_comp_id";
+const SENDER_SUBID_SETTING: &str = "sender_sub_id";
+const SENDER_LOCATIONID_SETTING: &str = "sender_location_id";
+const TARGET_COMPID_SETTING: &str = "target_comp_id";
+const TARGET_SUBID_SETTING: &str = "target_sub_id";
+const TARGET_LOCATIONID_SETTING: &str = "target_location_id";
+const SESSION_QUALIFIER_SETTING: &str = "session_qualifier";
+const CONNECTION_TYPE_SETTING: &str = "connection_type";
+const SOCKET_ACCEPT_PORT_SETTING: &str = "socket_accept_port";
+const SOCKET_CONNECT_PORT_SETTING: &str = "socket_connect_port";
+const SOCKET_CONNECT_HOST_SETTING: &str = "socket_connect_host";
+const RESET_ON_LOGON_SETTING: &str = "reset_on_logon";
+const RESET_ON_LOGOUT_SETTING: &str = "reset_on_logout";
+const RESET_ON_DISCONNECT_SETTING: &str = "reset_on_disconnect";
+const HEARTBEAT_INTERVAL_SETTING: &str = "heartbeat_interval";
+const DATA_DICTIONARY_FILE_PATH: &str = "data_dictionary";
+const START_DAY_SETTING: &str = "start_day";
+const END_DAY_SETTING: &str = "end_day";
+const START_TIME: &str = "start_time";
+const END_TIME: &str = "end_time";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionType {
@@ -63,125 +98,6 @@ struct FixProperties {
     timezone: Option<Tz>,
 }
 
-#[derive(Debug, Clone, Eq, Getters)]
-#[getset(get = "pub")]
-pub struct SessionId {
-    begin_string: String,
-    sender_comp_id: String,
-    sender_sub_id: Option<String>,
-    sender_location_id: Option<String>,
-    target_comp_id: String,
-    target_sub_id: Option<String>,
-    target_location_id: Option<String>,
-    session_qualifier: Option<String>,
-    id: String,
-}
-
-impl SessionId {
-    pub fn new(begin_string: &str, sender_comp_id: &str, target_comp_id: &str) -> Self {
-        let id = create_sessionid_string(
-            begin_string,
-            sender_comp_id,
-            None,
-            None,
-            target_comp_id,
-            None,
-            None,
-            None,
-        );
-        Self {
-            begin_string: begin_string.to_owned(),
-            sender_comp_id: sender_comp_id.to_owned(),
-            sender_sub_id: None,
-            sender_location_id: None,
-            target_comp_id: target_comp_id.to_owned(),
-            target_sub_id: None,
-            target_location_id: None,
-            session_qualifier: None,
-            id,
-        }
-    }
-
-    pub fn with_sender_sub_id(mut self, sub_id: &str) -> Self {
-        self.sender_sub_id = Some(sub_id.to_owned());
-        self.id = self.compute_id();
-        self
-    }
-
-    pub fn with_sender_location_id(mut self, loc_id: &str) -> Self {
-        self.sender_location_id = Some(loc_id.to_owned());
-        self.id = self.compute_id();
-        self
-    }
-
-    pub fn with_target_sub_id(mut self, sub_id: &str) -> Self {
-        self.target_sub_id = Some(sub_id.to_owned());
-        self.id = self.compute_id();
-        self
-    }
-
-    pub fn with_target_location_id(mut self, loc_id: &str) -> Self {
-        self.target_location_id = Some(loc_id.to_owned());
-        self.id = self.compute_id();
-        self
-    }
-
-    pub fn with_session_qualifier(mut self, qualifier: &str) -> Self {
-        self.session_qualifier = Some(qualifier.to_owned());
-        self.id = self.compute_id();
-        self
-    }
-
-    fn compute_id(&self) -> String {
-        create_sessionid_string(
-            &self.begin_string,
-            &self.sender_comp_id,
-            self.sender_sub_id.clone(),
-            self.sender_location_id.clone(),
-            &self.target_comp_id,
-            self.target_sub_id.clone(),
-            self.target_location_id.clone(),
-            self.session_qualifier.clone(),
-        )
-    }
-
-    pub fn reverse_id(&self) -> SessionId {
-        let mut reversed =
-            SessionId::new(&self.begin_string, &self.target_comp_id, &self.sender_comp_id);
-        reversed.sender_sub_id = self.target_sub_id.clone();
-        reversed.sender_location_id = self.target_location_id.clone();
-        reversed.target_sub_id = self.sender_sub_id.clone();
-        reversed.target_location_id = self.sender_location_id.clone();
-        reversed.session_qualifier = self.session_qualifier.clone();
-        reversed.id = reversed.compute_id();
-        reversed
-    }
-}
-
-// Hash and PartialEq use only the `id` field — two SessionId values with
-// the same composite id string are the same session. Derived impls would hash
-// all fields, breaking the Borrow<str> contract below.
-impl std::hash::Hash for SessionId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-impl PartialEq for SessionId {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-// Allows HashMap<SessionId, V>::get("some_str") without constructing a full
-// SessionId for lookups. The Borrow contract requires hash(self) == hash(self.borrow()),
-// which holds because Hash above hashes only self.id — the same bytes &str hashes.
-impl std::borrow::Borrow<str> for SessionId {
-    fn borrow(&self) -> &str {
-        &self.id
-    }
-}
-
 #[derive(Debug)]
 pub struct SessionConfig {
     // identity (required)
@@ -212,63 +128,17 @@ pub struct SessionConfig {
     data_dictionary: PathBuf,  // default: derived from begin_string (e.g. FIX43.xml)
 }
 
-fn create_sessionid_string(
-    begin_str: &str,
-    sender_compid: &str,
-    sender_subid: Option<String>,
-    sender_locationid: Option<String>,
-    target_compid: &str,
-    target_subid: Option<String>,
-    target_locationid: Option<String>,
-    session_qualifier: Option<String>,
-) -> String {
-    // Format: "BeginString:SenderCompID/SubID/LocationID->TargetCompID/SubID/LocationID:Qualifier"
-    // e.g. "FIX.4.3:SENDER/sub/loc->TARGET/sub/loc:qual" (optional parts omitted when absent)
-    let mut sid = format!("{}:{}", begin_str, sender_compid);
-    if let Some(subid) = sender_subid {
-        sid.push('/');
-        sid.push_str(&subid);
-    }
-    if let Some(locid) = sender_locationid {
-        sid.push('/');
-        sid.push_str(&locid);
-    }
-    sid.push_str("->");
-    sid.push_str(target_compid);
-    if let Some(t_subid) = target_subid {
-        sid.push('/');
-        sid.push_str(&t_subid);
-    }
-    if let Some(t_locid) = target_locationid {
-        sid.push('/');
-        sid.push_str(&t_locid);
-    }
-    if let Some(qualifier) = session_qualifier {
-        sid.push(':');
-        sid.push_str(&qualifier);
-    }
-    sid
-}
 impl SessionConfig {
     fn to_session_id(&self) -> SessionId {
-        let mut sid =
-            SessionId::new(&self.begin_string, &self.sender_comp_id, &self.target_comp_id);
-        if let Some(ref sub) = self.sender_sub_id {
-            sid = sid.with_sender_sub_id(sub);
-        }
-        if let Some(ref loc) = self.sender_location_id {
-            sid = sid.with_sender_location_id(loc);
-        }
-        if let Some(ref sub) = self.target_sub_id {
-            sid = sid.with_target_sub_id(sub);
-        }
-        if let Some(ref loc) = self.target_location_id {
-            sid = sid.with_target_location_id(loc);
-        }
-        if let Some(ref qual) = self.session_qualifier {
-            sid = sid.with_session_qualifier(qual);
-        }
-        sid
+        let builder =
+            SessionIdBuilder::new(&self.begin_string, &self.sender_comp_id, &self.target_comp_id);
+        builder
+            .sender_sub_id(self.sender_sub_id.as_deref())
+            .sender_location_id(self.sender_location_id.as_deref())
+            .target_sub_id(self.target_sub_id.as_deref())
+            .target_location_id(self.target_location_id.as_deref())
+            .session_qualifier(self.session_qualifier.as_deref())
+            .build()
     }
 }
 
@@ -779,59 +649,6 @@ mod session_setting_tests {
         assert_eq!(s.end_day, Some(Weekday::Fri));
         assert_eq!(s.start_time, NaiveTime::from_hms_opt(8, 0, 0).unwrap());
         assert_eq!(s.end_time, NaiveTime::from_hms_opt(16, 0, 0).unwrap());
-    }
-
-    #[test]
-    fn test_reverse_id_swaps_sender_and_target() {
-        let cfg = r#"
-            [Default]
-            connection_type = "acceptor"
-            begin_string = "FIX.4.3"
-            socket_accept_port = 10114
-
-            [[Session]]
-            sender_comp_id = "SENDER"
-            target_comp_id = "TARGET"
-            sender_sub_id = "s_sub"
-            sender_location_id = "s_loc"
-            target_sub_id = "t_sub"
-            target_location_id = "t_loc"
-            session_qualifier = "qual1"
-        "#;
-
-        let props = SessionProperties::from_str(cfg).unwrap();
-        let (sid, _) = props.sessions.iter().next().unwrap();
-
-        assert_eq!(sid.id(), "FIX.4.3:SENDER/s_sub/s_loc->TARGET/t_sub/t_loc:qual1");
-
-        let reversed = sid.reverse_id();
-        assert_eq!(reversed.id(), "FIX.4.3:TARGET/t_sub/t_loc->SENDER/s_sub/s_loc:qual1");
-        assert_eq!(reversed.sender_comp_id(), "TARGET");
-        assert_eq!(reversed.target_comp_id(), "SENDER");
-
-        // reverse of reverse == original
-        assert_eq!(reversed.reverse_id(), *sid);
-    }
-
-    #[test]
-    fn test_reverse_id_minimal_no_optional_fields() {
-        let cfg = r#"
-            [Default]
-            connection_type = "acceptor"
-            begin_string = "FIX.4.3"
-            socket_accept_port = 10114
-
-            [[Session]]
-            sender_comp_id = "ALPHA"
-            target_comp_id = "BETA"
-        "#;
-
-        let props = SessionProperties::from_str(cfg).unwrap();
-        let (sid, _) = props.sessions.iter().next().unwrap();
-
-        assert_eq!(sid.id(), "FIX.4.3:ALPHA->BETA");
-        assert_eq!(sid.reverse_id().id(), "FIX.4.3:BETA->ALPHA");
-        assert_eq!(sid.reverse_id().reverse_id(), *sid);
     }
 
     #[test]
