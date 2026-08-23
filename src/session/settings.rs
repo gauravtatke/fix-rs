@@ -2,6 +2,7 @@ use crate::quickfix_errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
 use chrono_tz::Tz;
+use getset::{CloneGetters, CopyGetters};
 use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -41,8 +42,8 @@ const HEARTBEAT_INTERVAL_SETTING: &str = "heartbeat_interval";
 const DATA_DICTIONARY_FILE_PATH: &str = "data_dictionary";
 const START_DAY_SETTING: &str = "start_day";
 const END_DAY_SETTING: &str = "end_day";
-const START_TIME: &str = "start_time";
-const END_TIME: &str = "end_time";
+const START_TIME_SETTING: &str = "start_time";
+const END_TIME_SETTING: &str = "end_time";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionType {
@@ -67,6 +68,10 @@ impl TryFrom<&str> for ConnectionType {
     }
 }
 
+// Raw deserialization target for a single TOML block ([Default] or [[Session]]).
+// Every field is Option because any field can be absent in any given block —
+// the merge and validation happen later when converting to SessionConfig.
+// This struct is private; external code only sees SessionConfig.
 #[derive(Debug, Deserialize, Default)]
 struct FixProperties {
     begin_string: Option<String>,
@@ -98,7 +103,13 @@ struct FixProperties {
     timezone: Option<Tz>,
 }
 
-#[derive(Debug)]
+// Validated, fully-resolved configuration for one FIX session.
+// Produced by merging a [[Session]] block's FixProperties on top of the
+// [Default] block's FixProperties, then validating required fields and
+// cross-field constraints (e.g. acceptor needs socket_accept_port,
+// start_time/end_time must both be present or both absent).
+// Defaults are applied here (e.g. timezone → UTC, reset flags → false).
+#[derive(Debug, Getters, CloneGetters, CopyGetters)]
 pub struct SessionConfig {
     // identity (required)
     begin_string: String,
@@ -116,11 +127,16 @@ pub struct SessionConfig {
     socket_connect_host: Option<String>,
     heartbeat_interval: Option<u32>,
     // schedule
-    start_time: NaiveTime,      // default: 00:00:00
-    end_time: NaiveTime,        // default: 23:59:59
+    #[getset(get_copy = "pub")]
+    start_time: Option<NaiveTime>, // optional, must pair with end_time
+    #[getset(get_copy = "pub")]
+    end_time: Option<NaiveTime>, // optional, must pair with start_time
+    #[getset(get_copy = "pub")]
     start_day: Option<Weekday>, // optional, must pair with end_day
-    end_day: Option<Weekday>,   // optional, must pair with start_day
-    timezone: Tz,               // default: UTC
+    #[getset(get_copy = "pub")]
+    end_day: Option<Weekday>, // optional, must pair with start_day
+    #[getset(get_copy = "pub")]
+    timezone: Tz, // default: UTC
     // session behavior
     reset_on_logon: bool,      // default: false
     reset_on_disconnect: bool, // default: false
@@ -142,6 +158,9 @@ impl SessionConfig {
     }
 }
 
+// Validates a merged FixProperties and produces a SessionConfig.
+// This is where required-field checks, connection-type-specific validation,
+// and schedule pairing rules are enforced.
 impl TryFrom<FixProperties> for SessionConfig {
     type Error = ConfigParseError;
     fn try_from(settings: FixProperties) -> Result<Self, Self::Error> {
@@ -200,12 +219,13 @@ impl TryFrom<FixProperties> for SessionConfig {
             socket_connect_port: None,
             socket_connect_host: None,
             start_day: None,
-            start_time: settings.start_time.unwrap_or(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+            start_time: settings.start_time,
             end_day: None,
-            end_time: settings.end_time.unwrap_or(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+            end_time: settings.end_time,
         };
 
-        // socket host/port validation
+        // Connection-type-specific validation:
+        // Acceptors require socket_accept_port; initiators require host, port, and heartbeat.
         if connection_type == ConnectionType::Acceptor {
             config.socket_accept_port = Some(settings.socket_accept_port.ok_or(
                 ConfigParseError::MissingRequiredField {
@@ -241,8 +261,37 @@ impl TryFrom<FixProperties> for SessionConfig {
             }
         }
 
+        // Schedule pairing rules: start_time/end_time must both be present or both
+        // absent. start_day/end_day are the same, and additionally require times.
+        match (settings.start_time, settings.end_time) {
+            (Some(st), Some(et)) => {
+                config.start_time = Some(st);
+                config.end_time = Some(et);
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ConfigParseError::ValidationFailed {
+                    msg: format!(
+                        "Either {} & {} both should be present or both should be absent",
+                        START_TIME_SETTING, END_TIME_SETTING
+                    ),
+                });
+            }
+        }
+
         match (settings.start_day, settings.end_day) {
             (Some(sd), Some(ed)) => {
+                if config.start_time.is_none() || config.end_time.is_none() {
+                    return Err(ConfigParseError::ValidationFailed {
+                        msg: format!(
+                            "{} & {} are missing but {} & {} are present",
+                            START_TIME_SETTING,
+                            END_TIME_SETTING,
+                            START_DAY_SETTING,
+                            END_DAY_SETTING
+                        ),
+                    });
+                }
                 config.start_day = Some(sd);
                 config.end_day = Some(ed);
             }
@@ -261,6 +310,10 @@ impl TryFrom<FixProperties> for SessionConfig {
     }
 }
 
+// Top-level config: one [Default] block plus zero or more [[Session]] blocks.
+// Each session's effective config is the [Default] values with per-session
+// overrides merged on top, then validated into a SessionConfig.
+// Sessions are keyed by SessionId (derived from begin_string + comp IDs).
 #[derive(Debug, Default)]
 pub struct SessionProperties {
     default: FixProperties,
@@ -268,6 +321,10 @@ pub struct SessionProperties {
 }
 
 impl SessionProperties {
+    // Parses a TOML config string. For each [[Session]], clones the [Default]
+    // table, merges session-specific keys on top (session wins on conflict),
+    // deserializes the merged table into FixProperties, then validates into
+    // SessionConfig. The [Default] block itself is kept as raw FixProperties.
     pub fn from_str(settings: &str) -> Result<Self, ConfigParseError> {
         let parsed_toml = settings.parse::<toml::Table>()?;
         let default_value =
@@ -485,8 +542,8 @@ mod session_setting_tests {
         assert_eq!(s.socket_accept_port, Some(10114));
         assert_eq!(s.heartbeat_interval, Some(30));
         assert_eq!(s.data_dictionary, PathBuf::from("resources/FIX43.xml"));
-        assert_eq!(s.start_time, NaiveTime::from_hms_opt(8, 0, 0).unwrap());
-        assert_eq!(s.end_time, NaiveTime::from_hms_opt(16, 0, 0).unwrap());
+        assert_eq!(s.start_time, Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap()));
+        assert_eq!(s.end_time, Some(NaiveTime::from_hms_opt(16, 0, 0).unwrap()));
         assert_eq!(s.timezone, chrono_tz::US::Eastern);
         // fields not in default or session stay None
         assert_eq!(s.session_qualifier, None);
@@ -647,8 +704,8 @@ mod session_setting_tests {
         assert_eq!(s.socket_accept_port, Some(10114));
         assert_eq!(s.start_day, Some(Weekday::Mon));
         assert_eq!(s.end_day, Some(Weekday::Fri));
-        assert_eq!(s.start_time, NaiveTime::from_hms_opt(8, 0, 0).unwrap());
-        assert_eq!(s.end_time, NaiveTime::from_hms_opt(16, 0, 0).unwrap());
+        assert_eq!(s.start_time, Some(NaiveTime::from_hms_opt(8, 0, 0).unwrap()));
+        assert_eq!(s.end_time, Some(NaiveTime::from_hms_opt(16, 0, 0).unwrap()));
     }
 
     #[test]
@@ -667,7 +724,7 @@ mod session_setting_tests {
         let props = SessionProperties::from_str(cfg).unwrap();
         let s = props.sessions.get("FIX.4.3:SENDER->TARGET").unwrap();
 
-        assert_eq!(s.start_time, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        assert_eq!(s.end_time, NaiveTime::from_hms_opt(23, 59, 59).unwrap());
+        assert_eq!(s.start_time, None);
+        assert_eq!(s.end_time, None);
     }
 }

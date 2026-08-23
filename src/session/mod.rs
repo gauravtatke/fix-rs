@@ -12,6 +12,7 @@ use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
 use crate::message::{Message, StringField};
 use crate::quickfix_errors::SessionError;
+use crate::session::schedule::SessionSchedule;
 use getset::Getters;
 use getset::Setters;
 use log::warn;
@@ -33,6 +34,7 @@ pub struct Session {
     reset_on_logout: bool,
     reset_on_disconnect: bool,
     state: SessionState,
+    schedule: SessionSchedule,
     responder: Option<Box<dyn Responder>>,
     data_dict: Arc<DataDictionary>,
     app: Box<dyn Application>,
@@ -42,6 +44,7 @@ impl Session {
     fn new(
         id: SessionId,
         state: SessionState,
+        schedule: SessionSchedule,
         responder: Box<dyn Responder>,
         dictionary: DataDictionary,
         app: Box<dyn Application>,
@@ -53,6 +56,7 @@ impl Session {
             reset_on_logout: false,
             reset_on_disconnect: false,
             state,
+            schedule,
             responder: Some(responder),
             data_dict: Arc::new(dictionary),
             app,
@@ -63,6 +67,8 @@ impl Session {
         matches!(msg_type, "0" | "1" | "2" | "3" | "4" | "5" | "A")
     }
 
+    // Before logon, only Logon messages are valid. During logout (sent but
+    // not received), only Logout and SequenceReset are accepted.
     fn valid_logon_state(&self, msg_type: &str) -> bool {
         if !self.state.logon_received {
             return matches!(msg_type, "A");
@@ -191,6 +197,8 @@ impl Session {
         self.send_raw(&mut msg);
     }
 
+    // Inbound dispatch: extracts MsgType, routes to per-type handler.
+    // App-level messages fall through to verify → seq check → from_callback.
     fn next_message(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         let msg_type = msg.get_msg_type()?;
         match msg_type.as_str() {
@@ -207,6 +215,7 @@ impl Session {
         }
     }
 
+    // Checks MsgSeqNum: rejects if too low, warns if too high, increments expected.
     fn verify_seq_number(&mut self, msg: &Message) -> Result<(), Box<dyn Error>> {
         let incoming_seq_num = msg.header().get_field::<u32>(34)?;
         if incoming_seq_num > self.state.next_target_msg_seq_num {
@@ -225,13 +234,19 @@ impl Session {
         Ok(())
     }
 
+    // Handles inbound Logon (MsgType=A). Guards: must be active and in session time.
+    // Resets seq nums if ResetSeqNumFlag=Y, verifies, notifies app, and
+    // acceptors respond with their own Logon.
     fn next_logon(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         if !self.is_active {
             return Err(Box::from(SessionError::InvalidStateForMsgType {
                 msg_type: "A".to_string(),
             }));
         }
-        // todo: check if session is between schedule
+        if !self.schedule.is_session_time() {
+            return Err(Box::from(SessionError::OutOfSessionTime));
+        }
+
         if let Ok(reset_seq_flag) = msg.get_field::<String>(141) {
             if reset_seq_flag == "Y" {
                 self.state.reset(Instant::now());
@@ -250,6 +265,7 @@ impl Session {
         Ok(())
     }
 
+    // Handles inbound Heartbeat (MsgType=0). Verify, seq check, notify app. No response.
     fn next_heartbeat(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
@@ -257,6 +273,7 @@ impl Session {
         Ok(())
     }
 
+    // Handles inbound TestRequest (MsgType=1). Responds with Heartbeat echoing TestReqID.
     fn next_test_request(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
@@ -266,6 +283,8 @@ impl Session {
         Ok(())
     }
 
+    // Handles inbound Logout (MsgType=5). If we didn't initiate the logout,
+    // responds with our own Logout. Always disconnects after notifying app.
     fn next_logout(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
         self.app.from_admin(&self.id, msg)?;
@@ -279,33 +298,48 @@ impl Session {
         Ok(())
     }
 
+    // Timer-driven session lifecycle, called periodically by the event loop.
+    // Three phases:
+    //   1. Pre-logon: initiator sends Logon if in session time, disconnects on timeout
+    //   2. Post-logon, outside schedule: initiates graceful Logout
+    //   3. Post-logon, in schedule: heartbeat escalation (heartbeat → test request → disconnect)
     fn next_tick(&mut self) -> Result<(), Box<dyn Error>> {
-        // let now = Instant::now();
+        let now = Instant::now();
         if self.responder.is_none() || !self.is_active {
             return Ok(());
         }
-        // TODO: these check should include the session-schedule checks
-        if self.state.is_initiator && self.state.is_logon_timed_out(Instant::now()) {
-            self.generate_logout(Some("logon timed out"));
-            self.state.logon_sent = true;
+
+        // not logged on — initiator tries to connect, acceptor waits
+        if !self.state.logon_received {
+            if self.schedule.is_session_time() && self.state.is_initiator && !self.state.logon_sent {
+                self.generate_logon();
+                self.state.logon_sent = true;
+            } else if self.state.is_logon_timed_out(now) {
+                self.responder.as_ref().unwrap().disconnect();
+            }
+            return Ok(());
         }
 
-        if self.state.is_logout_timed_out(Instant::now()) {
+        // logged on but session time ended — initiate graceful logout
+        if !self.schedule.is_session_time() {
+            if !self.state.logout_sent {
+                self.generate_logout(None);
+                self.state.logout_sent = true;
+            } else if self.state.is_logout_timed_out(now) {
+                self.responder.as_ref().unwrap().disconnect();
+            }
+            return Ok(());
+        }
+
+        // logged on, in session time — heartbeat management
+        if self.state.is_timed_out(now) {
             self.responder.as_ref().unwrap().disconnect();
-        }
-
-        if self.state.is_timed_out(Instant::now()) {
-            self.responder.as_ref().unwrap().disconnect();
-        }
-
-        if self.state.is_test_request_needed(Instant::now()) {
+        } else if self.state.is_test_request_needed(now) {
             self.generate_test_request("test");
             self.state.test_request_counter += 1;
-        }
-
-        if self.state.is_heartbeat_needed(Instant::now()) {
+        } else if self.state.is_heartbeat_needed(now) {
             self.generate_heartbeat(None);
-            self.state.last_sent_time = Instant::now();
+            self.state.last_sent_time = now;
         }
 
         Ok(())
@@ -377,6 +411,7 @@ mod session_tests {
     use super::*;
     use crate::application::Application;
     use crate::quickfix_errors::{AppError, DonotSend, RejectLogon};
+    use std::time::Duration;
 
     struct TestApplication {
         calls: RefCell<Vec<String>>,
@@ -436,9 +471,10 @@ mod session_tests {
     fn make_session(app: Box<dyn Application>) -> Session {
         let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
         let state = SessionState::new(30, false, Instant::now());
+        let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let responder = MockResponder::new();
         let dd = DataDictionary::default();
-        Session::new(id, state, Box::new(responder), dd, app)
+        Session::new(id, state, schedule, Box::new(responder), dd, app)
     }
 
     #[test]
@@ -618,10 +654,17 @@ mod session_tests {
     fn test_next_logon_initiator_does_not_send_logon_response() {
         let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
         let state = SessionState::new(30, true, Instant::now());
+        let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let responder = MockResponder::new();
         let dd = DataDictionary::default();
-        let mut session =
-            Session::new(id, state, Box::new(responder), dd, Box::new(TestApplication::new()));
+        let mut session = Session::new(
+            id,
+            state,
+            schedule,
+            Box::new(responder),
+            dd,
+            Box::new(TestApplication::new()),
+        );
         session.is_active = true;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
@@ -959,5 +1002,244 @@ mod session_tests {
         let mut msg = make_msg("D", "TARGET", "SENDER", 1);
         session.next_message(&mut msg).unwrap();
         assert_eq!(session.state.next_target_msg_seq_num, 2);
+    }
+
+    // --- next_tick helpers ---
+
+    fn make_initiator_session(app: Box<dyn Application>) -> Session {
+        let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
+        let state = SessionState::new(30, true, Instant::now());
+        let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
+        let responder = MockResponder::new();
+        let dd = DataDictionary::default();
+        Session::new(id, state, schedule, Box::new(responder), dd, app)
+    }
+
+    fn make_session_with_schedule(
+        app: Box<dyn Application>,
+        is_initiator: bool,
+        schedule: SessionSchedule,
+    ) -> Session {
+        let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
+        let state = SessionState::new(30, is_initiator, Instant::now());
+        let responder = MockResponder::new();
+        let dd = DataDictionary::default();
+        Session::new(id, state, schedule, Box::new(responder), dd, app)
+    }
+
+    // A schedule that is always outside session time (window already passed today).
+    fn expired_schedule() -> SessionSchedule {
+        use chrono::NaiveTime;
+        SessionSchedule::new(
+            Some(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+            None,
+            Some(NaiveTime::from_hms_opt(0, 0, 1).unwrap()),
+            None,
+            chrono_tz::UTC,
+        )
+    }
+
+    // --- next_tick tests: no responder / inactive ---
+
+    #[test]
+    fn test_next_tick_no_responder_is_noop() {
+        let mut session = make_session(Box::new(TestApplication::new()));
+        session.responder = None;
+        session.is_active = true;
+        session.next_tick().unwrap();
+        // no panic, no messages sent
+    }
+
+    #[test]
+    fn test_next_tick_inactive_is_noop() {
+        let mut session = make_session(Box::new(TestApplication::new()));
+        session.is_active = false;
+        session.next_tick().unwrap();
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+    }
+
+    // --- next_tick tests: pre-logon, initiator ---
+
+    #[test]
+    fn test_next_tick_initiator_sends_logon_in_session_time() {
+        let mut session = make_initiator_session(Box::new(TestApplication::new()));
+        session.is_active = true;
+
+        session.next_tick().unwrap();
+
+        assert!(session.state.logon_sent);
+        let mock = get_mock_responder(&session);
+        let sent = mock.sent_messages.borrow();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "A"));
+    }
+
+    #[test]
+    fn test_next_tick_initiator_does_not_resend_logon() {
+        let mut session = make_initiator_session(Box::new(TestApplication::new()));
+        session.is_active = true;
+        session.state.logon_sent = true;
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_next_tick_initiator_disconnects_on_logon_timeout() {
+        let mut session = make_initiator_session(Box::new(TestApplication::new()));
+        session.is_active = true;
+        session.state.logon_sent = true;
+        // Push last_sent_time far enough back to trigger logon timeout (>10s)
+        session.state.last_sent_time = Instant::now() - Duration::from_secs(15);
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.is_disconnected());
+    }
+
+    #[test]
+    fn test_next_tick_initiator_no_logon_outside_session_time() {
+        let schedule = expired_schedule();
+        let mut session =
+            make_session_with_schedule(Box::new(TestApplication::new()), true, schedule);
+        session.is_active = true;
+
+        session.next_tick().unwrap();
+
+        assert!(!session.state.logon_sent);
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+    }
+
+    // --- next_tick tests: pre-logon, acceptor ---
+
+    #[test]
+    fn test_next_tick_acceptor_pre_logon_is_noop() {
+        let mut session = make_session(Box::new(TestApplication::new()));
+        session.is_active = true;
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+        assert!(!mock.is_disconnected());
+    }
+
+    // --- next_tick tests: logged on, outside session time ---
+
+    #[test]
+    fn test_next_tick_logged_on_outside_schedule_sends_logout() {
+        let schedule = expired_schedule();
+        let mut session =
+            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        session.is_active = true;
+        session.state.logon_received = true;
+
+        session.next_tick().unwrap();
+
+        assert!(session.state.logout_sent);
+        let mock = get_mock_responder(&session);
+        let sent = mock.sent_messages.borrow();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5"));
+    }
+
+    #[test]
+    fn test_next_tick_logged_on_outside_schedule_does_not_resend_logout() {
+        let schedule = expired_schedule();
+        let mut session =
+            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        session.is_active = true;
+        session.state.logon_received = true;
+        session.state.logout_sent = true;
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_next_tick_logout_timeout_disconnects() {
+        let schedule = expired_schedule();
+        let mut session =
+            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        session.is_active = true;
+        session.state.logon_received = true;
+        session.state.logout_sent = true;
+        // Push last_sent_time back to trigger logout timeout (>2s)
+        session.state.last_sent_time = Instant::now() - Duration::from_secs(5);
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.is_disconnected());
+    }
+
+    // --- next_tick tests: logged on, in session time, heartbeat escalation ---
+
+    #[test]
+    fn test_next_tick_sends_heartbeat_when_needed() {
+        let mut session = make_logged_on_session(Box::new(TestApplication::new()));
+        // Push last_sent_time back past heartbeat interval (30s)
+        session.state.last_sent_time = Instant::now() - Duration::from_secs(31);
+        // Keep last_received_time recent so test request doesn't trigger
+        session.state.last_received_time = Instant::now();
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        let sent = mock.sent_messages.borrow();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "0"));
+    }
+
+    #[test]
+    fn test_next_tick_sends_test_request_over_heartbeat() {
+        let mut session = make_logged_on_session(Box::new(TestApplication::new()));
+        // No receive for > 1.5x interval (>45s) triggers test request
+        session.state.last_received_time = Instant::now() - Duration::from_secs(46);
+        session.state.last_sent_time = Instant::now();
+
+        session.next_tick().unwrap();
+
+        assert_eq!(session.state.test_request_counter, 1);
+        let mock = get_mock_responder(&session);
+        let sent = mock.sent_messages.borrow();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "1"));
+    }
+
+    #[test]
+    fn test_next_tick_disconnects_on_timeout() {
+        let mut session = make_logged_on_session(Box::new(TestApplication::new()));
+        // No receive for > 2x interval (>60s) with counter > 1
+        session.state.last_received_time = Instant::now() - Duration::from_secs(61);
+        session.state.test_request_counter = 2;
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.is_disconnected());
+        // Should NOT also send test request or heartbeat (else-if chain)
+        assert!(mock.sent_messages.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_next_tick_no_action_when_all_timers_fresh() {
+        let mut session = make_logged_on_session(Box::new(TestApplication::new()));
+        // Both timestamps are recent — nothing should fire
+        session.state.last_sent_time = Instant::now();
+        session.state.last_received_time = Instant::now();
+
+        session.next_tick().unwrap();
+
+        let mock = get_mock_responder(&session);
+        assert!(mock.sent_messages.borrow().is_empty());
+        assert!(!mock.is_disconnected());
     }
 }

@@ -249,6 +249,8 @@ pub enum SessionError {
     SeqNumTooLow { received: u32, expected: u32 },
     #[error("Missing header field tag={tag}")]
     MissingHeaderField { tag: u32 },
+    #[error("Not in session time")]
+    OutOfSessionTime,
 }
 
 #[derive(Debug, thiserror::Error)]

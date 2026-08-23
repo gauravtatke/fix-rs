@@ -41,28 +41,37 @@ impl SessionState {
         }
     }
 
+    // True when we haven't sent anything for >= heartbeat_interval seconds.
     pub(crate) fn is_heartbeat_needed(&self, instant_now: Instant) -> bool {
         instant_now.duration_since(self.last_sent_time)
             >= Duration::from_secs(self.heartbeat_interval as u64)
     }
 
+    // True when we haven't received anything for > 1.5x heartbeat_interval.
+    // Triggers sending a TestRequest to probe the counterparty.
     pub(crate) fn is_test_request_needed(&self, instant_now: Instant) -> bool {
         let threshold = (self.heartbeat_interval * 3) / 2;
         instant_now.duration_since(self.last_received_time) > Duration::from_secs(threshold as u64)
     }
 
+    // True when no response for > 2x heartbeat_interval AND we've already
+    // sent at least 2 test requests. Signals the counterparty is dead.
     pub(crate) fn is_timed_out(&self, instant_now: Instant) -> bool {
         instant_now.duration_since(self.last_received_time)
             > Duration::from_secs(self.heartbeat_interval as u64 * 2)
             && self.test_request_counter > 1
     }
 
+    // True when we sent a logon but haven't received a response within the threshold.
+    // Safe to call at any time — returns false once logon_received is set.
     pub(crate) fn is_logon_timed_out(&self, instant_now: Instant) -> bool {
         self.logon_sent
             && !self.logon_received
             && instant_now.duration_since(self.last_sent_time) > LOGON_TIMEOUT_THRESHOLD
     }
 
+    // True when we sent a logout but the counterparty hasn't acknowledged it.
+    // Returns false once logout_received is set.
     pub(crate) fn is_logout_timed_out(&self, instant_now: Instant) -> bool {
         self.logout_sent
             && !self.logout_received
@@ -77,6 +86,8 @@ impl SessionState {
         self.next_target_msg_seq_num += 1;
     }
 
+    // Clears all session-level flags and resets sequence numbers to 1.
+    // Preserves config fields (heartbeat_interval, is_initiator).
     pub(crate) fn reset(&mut self, instant_now: Instant) {
         self.logon_sent = false;
         self.logon_received = false;

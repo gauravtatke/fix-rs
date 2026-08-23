@@ -1,37 +1,36 @@
-use chrono::{Datelike, NaiveTime, TimeZone, Utc, Weekday};
+use crate::session::SessionConfig;
+use chrono::{DateTime, Datelike, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
-use derive_builder::Builder;
 
-#[derive(Debug, Builder)]
+#[derive(Debug)]
 pub struct SessionSchedule {
-    start_time: NaiveTime,
-    end_time: NaiveTime,
-    #[builder(setter(strip_option), default)]
+    start_time: Option<NaiveTime>,
+    end_time: Option<NaiveTime>,
     start_day: Option<Weekday>,
-    #[builder(setter(strip_option), default)]
     end_day: Option<Weekday>,
-    #[builder(default = "chrono_tz::Tz::GMT")]
-    time_zone: chrono_tz::Tz,
-    #[builder(default)]
+    time_zone: Tz,
     is_non_stop: bool,
 }
 
 impl SessionSchedule {
     pub fn new(
-        start_time: NaiveTime,
+        start_time: Option<NaiveTime>,
         start_day: Option<Weekday>,
-        end_time: NaiveTime,
+        end_time: Option<NaiveTime>,
         end_day: Option<Weekday>,
         timezone: Tz,
-        non_stop: bool,
     ) -> Self {
+        let is_non_stop = match (start_time, start_day, end_time, end_day) {
+            (None, None, None, None) => true,
+            _ => false,
+        };
         Self {
             start_time,
             start_day,
             end_time,
             end_day,
             time_zone: timezone,
-            is_non_stop: non_stop,
+            is_non_stop: is_non_stop,
         }
     }
 
@@ -39,11 +38,17 @@ impl SessionSchedule {
         if self.is_non_stop {
             return true;
         }
+        let now_utc = Utc::now();
+        self.is_session_time_at(now_utc)
+    }
 
-        let now_datetime = self.time_zone.from_utc_datetime(&Utc::now().naive_utc());
+    fn is_session_time_at(&self, now_utc: DateTime<Utc>) -> bool {
+        let now_datetime = self.time_zone.from_utc_datetime(&now_utc.naive_utc()).naive_local();
+        let start_time = self.start_time.unwrap();
+        let end_time = self.end_time.unwrap();
         // get today's session start and end datetime
-        let today_start_datetime = now_datetime.date().and_time(self.start_time).unwrap();
-        let today_end_datetime = now_datetime.date().and_time(self.end_time).unwrap();
+        let today_start_datetime = now_datetime.date().and_time(start_time);
+        let today_end_datetime = now_datetime.date().and_time(end_time);
         if self.start_day.is_none() && self.end_day.is_none() {
             // daily session start and end
             // now should be between today's session start and end datetimes
@@ -59,125 +64,187 @@ impl SessionSchedule {
         // same weekday as self.start_day
         while weekly_start_date.weekday() != session_start_weekday {
             // go back one date prior
-            weekly_start_date = weekly_start_date.pred();
+            weekly_start_date = weekly_start_date.pred_opt().unwrap();
             if weekly_start_date.weekday() == session_end_weekday {
-                // means that today's date if already out of sesssion window
-                // because going back end day is encountered
+                // early exit. going backwards if we encounter end_day then we are already out of session window
+                // consider mon-fri session & we are on saturday/sunday
                 return false;
             }
         }
-        // weekly start_date is on correct weekday for sesssion
+        // weekly start_date is on correct weekday for session
         // update the date with time of self.start_time
-        let weekly_start_datetime =
-            weekly_start_date.and_time(today_start_datetime.time()).unwrap();
+        let weekly_start_datetime = weekly_start_date.and_time(start_time);
 
         while weekly_end_date.weekday() != session_end_weekday {
             // go forward one day
-            weekly_end_date = weekly_end_date.succ();
+            weekly_end_date = weekly_end_date.succ_opt().unwrap();
             if weekly_end_date.weekday() == session_start_weekday {
-                // means that today's date if already out of sesssion window
-                // because going forward start day is encountered
+                // early exit. going forward if we encounter start_day then we are already out of session window
+                // consider mon-fri session & we are on saturday/sunday
                 return false;
             }
         }
-        let weekly_end_datetime = weekly_end_date.and_time(today_end_datetime.time()).unwrap();
+        let weekly_end_datetime = weekly_end_date.and_time(end_time);
         weekly_start_datetime <= now_datetime && now_datetime <= weekly_end_datetime
     }
+}
 
-    // this is for testing purposes
-    pub fn find_nearest_interval(&self) {
-        let local_date_time = self.time_zone.from_utc_datetime(&Utc::now().naive_utc());
-        let start_date_time = local_date_time.date().and_time(self.start_time).unwrap();
-        let end_date_time = local_date_time.date().and_time(self.end_time).unwrap();
-        println!("local_date_time {}", local_date_time);
-        if self.start_day.is_none() && self.end_day.is_none() {
-            // daily start and end time
-        }
-        // start going back 1 day until you get to same day of the week
-        let mut weekly_start = start_date_time.date();
-        let start_weekday = self.start_day.unwrap();
-        let end_weekday = self.end_day.unwrap();
-        while weekly_start.weekday() != start_weekday {
-            weekly_start = weekly_start.pred();
-            if weekly_start.weekday() == end_weekday {
-                // going back if it encounters end weekday first then
-                // it means if was already outside of the
-                panic!("Out of session: end day going back");
-            }
-        }
-        // start date is weekly start
-        let weekly_start = weekly_start.and_time(start_date_time.time()).unwrap();
-
-        let mut weekly_end = end_date_time.date();
-        while weekly_end.weekday() != end_weekday {
-            weekly_end = weekly_end.succ();
-            if weekly_end.weekday() == start_weekday {
-                // start weekdat encountered going forward in time
-                // means current datetime is already out of session time
-                panic!("Out of session: start day goind forwward");
-            }
-        }
-        let weekly_end = weekly_end.and_time(end_date_time.time()).unwrap();
-        println!("\n\n session interval start {}, end {}\n\n", weekly_start, weekly_end);
+impl From<&SessionConfig> for SessionSchedule {
+    fn from(config: &SessionConfig) -> Self {
+        SessionSchedule::new(
+            config.start_time(),
+            config.start_day(),
+            config.end_time(),
+            config.end_day(),
+            config.timezone(),
+        )
     }
-}
-
-pub fn session_time(time_zone: chrono_tz::Tz) -> bool {
-    // create a current datetime = Utc::now()
-    // extract the time from above
-    // start and end time to utc start & end
-    let naive_utc_datetime = Utc::now().naive_utc();
-    let naive_utc_date = naive_utc_datetime.date();
-    let naive_utc_time = naive_utc_datetime.time();
-    println!(
-        "UTC datetime {}, date {}, time {}\n",
-        naive_utc_datetime, naive_utc_date, naive_utc_time
-    );
-
-    let sc_datetime = time_zone.from_utc_datetime(&naive_utc_datetime);
-    println!(
-        "TZ {} datetime {}, date {}, time {}\n",
-        time_zone,
-        sc_datetime,
-        sc_datetime.naive_local(),
-        sc_datetime.time()
-    );
-
-    let curr_offset = time_zone.offset_from_utc_datetime(&naive_utc_datetime);
-    println!("offset {:?}", curr_offset);
-    true
-}
-
-pub fn is_current_time_between(curr_timezone: Tz, start: &str, end: &str) -> bool {
-    let utc_naive_date_time = Utc::now().naive_utc();
-    let curr_naive_tz_time = curr_timezone.from_utc_datetime(&utc_naive_date_time).time();
-    let start = start.parse::<NaiveTime>().unwrap();
-    let end = end.parse::<NaiveTime>().unwrap();
-    println!(
-        "tz: {}, curr_utc: {}, curr_tz_time: {}, start: {}, end: {}",
-        curr_timezone, utc_naive_date_time, curr_naive_tz_time, start, end
-    );
-    start <= curr_naive_tz_time && curr_naive_tz_time <= end
 }
 
 #[cfg(test)]
 mod schedule_tests {
-    use std::str::FromStr;
-
     use super::*;
-    use chrono::Local;
-    use chrono_tz::Tz;
+    use chrono::NaiveDate;
+
+    fn daily_schedule(start: &str, end: &str) -> SessionSchedule {
+        SessionSchedule::new(
+            Some(start.parse().unwrap()),
+            None,
+            Some(end.parse().unwrap()),
+            None,
+            chrono_tz::UTC,
+        )
+    }
+
+    fn weekly_schedule(
+        start: &str,
+        start_day: Weekday,
+        end: &str,
+        end_day: Weekday,
+    ) -> SessionSchedule {
+        SessionSchedule::new(
+            Some(start.parse().unwrap()),
+            Some(start_day),
+            Some(end.parse().unwrap()),
+            Some(end_day),
+            chrono_tz::UTC,
+        )
+    }
+
+    fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
+        NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .and_hms_opt(hour, min, sec)
+            .unwrap()
+            .and_utc()
+    }
+
+    // --- non-stop ---
 
     #[test]
-    fn test_between_session() {
-        let schedule = SessionScheduleBuilder::default()
-            .start_time(NaiveTime::from_str("9:00:01").unwrap())
-            .end_time(NaiveTime::from_str("15:29:59").unwrap())
-            .build()
-            .unwrap();
-        println!(
-            "time between {}",
-            is_current_time_between(Tz::Asia__Kolkata, "9:00:01", "19:30:00")
+    fn test_non_stop_always_true() {
+        let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
+        assert!(schedule.is_session_time());
+    }
+
+    // --- daily schedule (no weekdays) ---
+
+    #[test]
+    fn test_daily_within_window() {
+        let schedule = daily_schedule("09:00:00", "17:00:00");
+        assert!(schedule.is_session_time_at(utc(2026, 8, 20, 12, 0, 0)));
+    }
+
+    #[test]
+    fn test_daily_before_start() {
+        let schedule = daily_schedule("09:00:00", "17:00:00");
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 20, 8, 59, 59)));
+    }
+
+    #[test]
+    fn test_daily_after_end() {
+        let schedule = daily_schedule("09:00:00", "17:00:00");
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 20, 17, 0, 1)));
+    }
+
+    #[test]
+    fn test_daily_at_exact_start() {
+        let schedule = daily_schedule("09:00:00", "17:00:00");
+        assert!(schedule.is_session_time_at(utc(2026, 8, 20, 9, 0, 0)));
+    }
+
+    #[test]
+    fn test_daily_at_exact_end() {
+        let schedule = daily_schedule("09:00:00", "17:00:00");
+        assert!(schedule.is_session_time_at(utc(2026, 8, 20, 17, 0, 0)));
+    }
+
+    // --- weekly schedule (Mon-Fri) ---
+
+    #[test]
+    fn test_weekly_mid_week_in_session() {
+        // 2026-08-19 is a Wednesday
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(schedule.is_session_time_at(utc(2026, 8, 19, 12, 0, 0)));
+    }
+
+    #[test]
+    fn test_weekly_start_day_within_hours() {
+        // 2026-08-17 is a Monday
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(schedule.is_session_time_at(utc(2026, 8, 17, 10, 0, 0)));
+    }
+
+    #[test]
+    fn test_weekly_start_day_before_start_time() {
+        // Monday before 09:00
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 17, 8, 59, 59)));
+    }
+
+    #[test]
+    fn test_weekly_end_day_within_hours() {
+        // 2026-08-21 is a Friday
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(schedule.is_session_time_at(utc(2026, 8, 21, 16, 0, 0)));
+    }
+
+    #[test]
+    fn test_weekly_end_day_after_end_time() {
+        // Friday after 17:00
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 21, 17, 0, 1)));
+    }
+
+    #[test]
+    fn test_weekly_saturday_outside_session() {
+        // 2026-08-22 is a Saturday
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 22, 12, 0, 0)));
+    }
+
+    #[test]
+    fn test_weekly_sunday_outside_session() {
+        // 2026-08-23 is a Sunday
+        let schedule = weekly_schedule("09:00:00", Weekday::Mon, "17:00:00", Weekday::Fri);
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 23, 12, 0, 0)));
+    }
+
+    // --- timezone handling ---
+
+    #[test]
+    fn test_timezone_conversion() {
+        // Schedule is 09:00-17:00 in Asia/Kolkata (UTC+5:30)
+        // 03:30 UTC = 09:00 IST → at start boundary
+        let schedule = SessionSchedule::new(
+            Some("09:00:00".parse().unwrap()),
+            None,
+            Some("17:00:00".parse().unwrap()),
+            None,
+            chrono_tz::Asia::Kolkata,
         );
+        assert!(schedule.is_session_time_at(utc(2026, 8, 20, 3, 30, 0)));
+        // 03:29 UTC = 08:59 IST → before start
+        assert!(!schedule.is_session_time_at(utc(2026, 8, 20, 3, 29, 0)));
     }
 }
