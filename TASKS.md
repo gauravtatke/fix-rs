@@ -206,7 +206,7 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
       triggers logon-received + logon response, receiving a TestRequest triggers heartbeat with echoed TestReqID,
       receiving a Logout triggers logout response + disconnect, receiving an application message triggers `from_app`.
 
-- [ ] **4.8 — Timer logic (`next_tick`).**
+- [x] **4.8 — Timer logic (`next_tick`).**
   `Session::next_tick(&mut self)` — called periodically (by the network layer in M5, but testable in isolation now):
     1. If not connected (no responder) → return
     2. If logon not received:

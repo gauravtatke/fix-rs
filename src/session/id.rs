@@ -54,7 +54,7 @@ impl std::borrow::Borrow<str> for SessionId {
     }
 }
 
-pub struct SessionIdBuilder {
+pub(crate) struct SessionIdBuilder {
     begin_string: String,
     sender_comp_id: String,
     sender_sub_id: Option<String>,
@@ -63,7 +63,6 @@ pub struct SessionIdBuilder {
     target_sub_id: Option<String>,
     target_location_id: Option<String>,
     session_qualifier: Option<String>,
-    id: Option<String>,
 }
 
 impl SessionIdBuilder {
@@ -77,7 +76,6 @@ impl SessionIdBuilder {
             target_sub_id: None,
             target_location_id: None,
             session_qualifier: None,
-            id: None,
         }
     }
 
@@ -141,6 +139,7 @@ impl SessionIdBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_sessionid_string(
     begin_str: &str,
     sender_compid: &str,

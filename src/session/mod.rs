@@ -13,17 +13,17 @@ use crate::data_dictionary::DataDictionary;
 use crate::message::{Message, StringField};
 use crate::quickfix_errors::SessionError;
 use crate::session::schedule::SessionSchedule;
-use getset::Getters;
-use getset::Setters;
 use log::warn;
 use state::SessionState;
-use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Getters, Setters)]
+#[cfg(test)]
+use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::VecDeque;
+
 pub struct Session {
     id: SessionId,
     is_active: bool,
@@ -40,8 +40,12 @@ pub struct Session {
     app: Box<dyn Application>,
 }
 
+fn is_admin_msg_type(msg_type: &str) -> bool {
+    matches!(msg_type, "0" | "1" | "2" | "3" | "4" | "5" | "A")
+}
+
 impl Session {
-    fn new(
+    pub(crate) fn new(
         id: SessionId,
         state: SessionState,
         schedule: SessionSchedule,
@@ -63,10 +67,6 @@ impl Session {
         }
     }
 
-    fn is_admin_msg_type(&self, msg_type: &str) -> bool {
-        matches!(msg_type, "0" | "1" | "2" | "3" | "4" | "5" | "A")
-    }
-
     // Before logon, only Logon messages are valid. During logout (sent but
     // not received), only Logout and SequenceReset are accepted.
     fn valid_logon_state(&self, msg_type: &str) -> bool {
@@ -81,8 +81,8 @@ impl Session {
 
     // Routes a verified inbound message to the appropriate Application callback.
     // Admin messages (MsgType 0-5, A) → from_admin; all others → from_app.
-    fn from_callback(&mut self, msg_type: &str, msg: &Message) -> Result<(), Box<dyn Error>> {
-        if self.is_admin_msg_type(msg_type) {
+    fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), Box<dyn Error>> {
+        if is_admin_msg_type(msg_type) {
             self.app.from_admin(&self.id, msg)?;
         } else {
             self.app.from_app(&self.id, msg)?;
@@ -198,8 +198,8 @@ impl Session {
     }
 
     // Inbound dispatch: extracts MsgType, routes to per-type handler.
-    // App-level messages fall through to verify → seq check → from_callback.
-    fn next_message(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    // App-level messages fall through to verify → seq check → dispatch_to_app.
+    pub(crate) fn next_message(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
         let msg_type = msg.get_msg_type()?;
         match msg_type.as_str() {
             "A" => self.next_logon(msg),
@@ -209,7 +209,7 @@ impl Session {
             _ => {
                 self.verify_msg(msg)?;
                 self.verify_seq_number(msg)?;
-                self.from_callback(&msg_type, msg)?;
+                self.dispatch_to_app(&msg_type, msg)?;
                 Ok(())
             }
         }
@@ -247,10 +247,10 @@ impl Session {
             return Err(Box::from(SessionError::OutOfSessionTime));
         }
 
-        if let Ok(reset_seq_flag) = msg.get_field::<String>(141) {
-            if reset_seq_flag == "Y" {
-                self.state.reset(Instant::now());
-            }
+        if let Ok(reset_seq_flag) = msg.get_field::<String>(141)
+            && reset_seq_flag == "Y"
+        {
+            self.state.reset(Instant::now());
         }
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
@@ -303,7 +303,7 @@ impl Session {
     //   1. Pre-logon: initiator sends Logon if in session time, disconnects on timeout
     //   2. Post-logon, outside schedule: initiates graceful Logout
     //   3. Post-logon, in schedule: heartbeat escalation (heartbeat → test request → disconnect)
-    fn next_tick(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn next_tick(&mut self) -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         if self.responder.is_none() || !self.is_active {
             return Ok(());
@@ -351,11 +351,13 @@ pub trait Responder {
     fn disconnect(&self);
 }
 
+#[cfg(test)]
 struct MockResponder {
     sent_messages: RefCell<VecDeque<String>>,
     disconnected: RefCell<bool>,
 }
 
+#[cfg(test)]
 impl MockResponder {
     fn new() -> Self {
         Self {
@@ -369,6 +371,7 @@ impl MockResponder {
     }
 }
 
+#[cfg(test)]
 impl Responder for MockResponder {
     fn send(&self, msg: &str) -> bool {
         self.sent_messages.borrow_mut().push_back(msg.to_string());
@@ -478,14 +481,14 @@ mod session_tests {
     }
 
     #[test]
-    fn test_from_callback_dispatches_admin_to_from_admin() {
+    fn test_dispatch_to_app_dispatches_admin_to_from_admin() {
         let mut session = make_session(Box::new(TestApplication::new()));
         let msg = Message::new();
 
         let app = session.app.as_ref() as *const dyn Application as *const TestApplication;
 
         for msg_type in &["0", "1", "2", "3", "4", "5", "A"] {
-            session.from_callback(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, &msg).unwrap();
         }
 
         let calls = unsafe { &*app }.calls();
@@ -494,14 +497,14 @@ mod session_tests {
     }
 
     #[test]
-    fn test_from_callback_dispatches_app_to_from_app() {
+    fn test_dispatch_to_app_dispatches_app_to_from_app() {
         let mut session = make_session(Box::new(TestApplication::new()));
         let msg = Message::new();
 
         let app = session.app.as_ref() as *const dyn Application as *const TestApplication;
 
         for msg_type in &["D", "8", "G", "AE"] {
-            session.from_callback(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, &msg).unwrap();
         }
 
         let calls = unsafe { &*app }.calls();
@@ -511,12 +514,11 @@ mod session_tests {
 
     #[test]
     fn test_is_admin_msg_type() {
-        let session = make_session(Box::new(TestApplication::new()));
         for t in &["0", "1", "2", "3", "4", "5", "A"] {
-            assert!(session.is_admin_msg_type(t), "{} should be admin", t);
+            assert!(is_admin_msg_type(t), "{} should be admin", t);
         }
         for t in &["D", "8", "G", "AE", "B", "7"] {
-            assert!(!session.is_admin_msg_type(t), "{} should not be admin", t);
+            assert!(!is_admin_msg_type(t), "{} should not be admin", t);
         }
     }
 

@@ -13,24 +13,22 @@ pub struct SessionSchedule {
 }
 
 impl SessionSchedule {
-    pub fn new(
+    pub(crate) fn new(
         start_time: Option<NaiveTime>,
         start_day: Option<Weekday>,
         end_time: Option<NaiveTime>,
         end_day: Option<Weekday>,
         timezone: Tz,
     ) -> Self {
-        let is_non_stop = match (start_time, start_day, end_time, end_day) {
-            (None, None, None, None) => true,
-            _ => false,
-        };
+        let is_non_stop =
+            matches!((start_time, start_day, end_time, end_day), (None, None, None, None));
         Self {
             start_time,
             start_day,
             end_time,
             end_day,
             time_zone: timezone,
-            is_non_stop: is_non_stop,
+            is_non_stop,
         }
     }
 

@@ -2,7 +2,7 @@ use crate::quickfix_errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
 use chrono_tz::Tz;
-use getset::{CloneGetters, CopyGetters};
+use getset::CopyGetters;
 use log::{error, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -109,7 +109,7 @@ struct FixProperties {
 // cross-field constraints (e.g. acceptor needs socket_accept_port,
 // start_time/end_time must both be present or both absent).
 // Defaults are applied here (e.g. timezone → UTC, reset flags → false).
-#[derive(Debug, Getters, CloneGetters, CopyGetters)]
+#[derive(Debug, CopyGetters)]
 pub struct SessionConfig {
     // identity (required)
     begin_string: String,
@@ -321,6 +321,10 @@ pub struct SessionProperties {
 }
 
 impl SessionProperties {
+    pub fn sessions(&self) -> &HashMap<SessionId, SessionConfig> {
+        &self.sessions
+    }
+
     // Parses a TOML config string. For each [[Session]], clones the [Default]
     // table, merges session-specific keys on top (session wins on conflict),
     // deserializes the merged table into FixProperties, then validates into
