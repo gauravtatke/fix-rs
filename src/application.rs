@@ -37,6 +37,15 @@ pub trait Application: Send {
         session_id: &SessionId,
         message: &Message,
     ) -> Result<Vec<Message>, AppError>;
+
+    // Unsolicited outbound seam. The engine polls this each timer tick; the app
+    // returns any messages it wants sent on its own initiative (e.g. a streaming
+    // market-data feed that keeps going after a single request). The default is
+    // "nothing to send", so apps that only do request-response ignore it. The
+    // app never calls the session — it just hands back messages when asked.
+    fn poll_outbound(&mut self, _session_id: &SessionId) -> Vec<Message> {
+        Vec::new()
+    }
 }
 
 pub struct DefaultApplication;

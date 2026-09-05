@@ -1,3 +1,4 @@
+use crate::application::Application;
 use crate::quickfix_errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
@@ -160,7 +161,7 @@ impl SessionConfig {
             .build()
     }
 
-    pub fn to_session(&self) -> Session {
+    pub fn to_session(&self, app: Box<dyn Application>) -> Session {
         let session_id = self.to_session_id();
         let session_state = SessionState::new(
             self.heartbeat_interval.unwrap_or(30),
@@ -185,6 +186,7 @@ impl SessionConfig {
             schedule: session_schedule,
             responder: None,
             data_dict: Arc::new(dictionary),
+            app,
         }
     }
 }

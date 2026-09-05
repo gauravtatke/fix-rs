@@ -1,4 +1,3 @@
-use crate::application::Application;
 use crate::session::{Session, SessionId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -7,66 +6,60 @@ use std::time::Duration;
 
 pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
 
-pub(crate) struct SessionEntry {
-    pub(crate) session: Session,
-    pub(crate) app: Box<dyn Application>,
-}
-
-impl SessionEntry {
-    pub fn new(session: Session, app: Box<dyn Application>) -> Self {
-        SessionEntry { session, app }
-    }
-}
-
 /// Immutable, thread-safe registry of all configured sessions.
 ///
 /// Built once at startup via `.collect()` (`FromIterator`) and never modified afterward —
-/// the outer `Arc<HashMap>` is read-only. Individual entries are independently lockable
-/// (`Arc<Mutex<SessionEntry>>`), so one thread dispatching messages to session A doesn't
+/// the outer `Arc<HashMap>` is read-only. Each session is independently lockable
+/// (`Arc<Mutex<Session>>`), so one thread dispatching messages to session A doesn't
 /// block another thread running `next_tick` on session B.
+///
+/// Each `Session` owns its `Application` directly, so there is no separate entry
+/// wrapper — the map holds bare sessions.
 ///
 /// `Clone` is cheap — it bumps the `Arc` refcount, not the map contents.
 #[derive(Clone, Default)]
 pub struct SessionMap {
-    session_entries: Arc<HashMap<SessionId, Arc<Mutex<SessionEntry>>>>,
+    sessions: Arc<HashMap<SessionId, Arc<Mutex<Session>>>>,
 }
 
 impl SessionMap {
     pub fn len(&self) -> usize {
-        self.session_entries.len()
+        self.sessions.len()
     }
 
-    pub fn get(&self, session_id: &SessionId) -> Option<Arc<Mutex<SessionEntry>>> {
-        self.session_entries.get(session_id).cloned()
+    pub fn get(&self, session_id: &SessionId) -> Option<Arc<Mutex<Session>>> {
+        self.sessions.get(session_id).cloned()
     }
 
-    pub fn values(&self) -> impl Iterator<Item = Arc<Mutex<SessionEntry>>> {
-        self.session_entries.values().cloned()
+    pub fn values(&self) -> impl Iterator<Item = Arc<Mutex<Session>>> {
+        self.sessions.values().cloned()
     }
 }
 
-impl FromIterator<(SessionId, SessionEntry)> for SessionMap {
-    fn from_iter<T: IntoIterator<Item = (SessionId, SessionEntry)>>(iter: T) -> Self {
+impl FromIterator<(SessionId, Session)> for SessionMap {
+    fn from_iter<T: IntoIterator<Item = (SessionId, Session)>>(iter: T) -> Self {
         let mut session_map = HashMap::new();
         for (session_id, session) in iter {
             session_map.insert(session_id, Arc::new(Mutex::new(session)));
         }
         Self {
-            session_entries: Arc::new(session_map),
+            sessions: Arc::new(session_map),
         }
     }
 }
 
 /// Spawns a background thread that ticks every session once per second.
-/// Each tick drives session-level timers (heartbeat, logon timeout, etc.).
+/// Each tick drives session-level timers (heartbeat, logon timeout, etc.) and
+/// then drains any unsolicited outbound messages the app has queued
+/// (`poll_outbound`) — e.g. a streaming market-data feed.
 pub fn start_timer(session_map: SessionMap) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_secs(1));
             for session_arc in session_map.values() {
-                let mut entry = session_arc.lock().unwrap();
-                let SessionEntry { session, app } = &mut *entry;
-                let _ = session.next_tick(app.as_mut());
+                let mut session = session_arc.lock().unwrap();
+                let _ = session.next_tick();
+                let _ = session.poll_outbound();
             }
         }
     })
@@ -89,14 +82,20 @@ mod session_map_tests {
         fn disconnect(&self) {}
     }
 
-    fn make_test_entry(sender: &str, target: &str) -> (SessionId, SessionEntry) {
+    fn make_test_entry(sender: &str, target: &str) -> (SessionId, Session) {
         let id = SessionId::new("FIX.4.3", sender, target);
         let state = SessionState::new(30, false, Instant::now());
         let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let dd = DataDictionary::default();
-        let session = Session::new(id.clone(), state, schedule, Some(Box::new(StubResponder)), dd);
-        let entry = SessionEntry::new(session, Box::new(DefaultApplication::new()));
-        (id, entry)
+        let session = Session::new(
+            id.clone(),
+            state,
+            schedule,
+            Some(Box::new(StubResponder)),
+            dd,
+            Box::new(DefaultApplication::new()),
+        );
+        (id, session)
     }
 
     #[test]

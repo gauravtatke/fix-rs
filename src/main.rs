@@ -12,7 +12,7 @@ mod session;
 
 use crate::application::DefaultApplication;
 use crate::io::acceptor::IoAcceptor;
-use crate::network::{SOCKET_ACCEPT_HOST_IP, SessionEntry, SessionMap};
+use crate::network::{SOCKET_ACCEPT_HOST_IP, SessionMap};
 use crate::session::{ConnectionType, SessionProperties};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -31,9 +31,8 @@ fn main() {
         .iter()
         .filter(|(id, config)| config.connection_type() == ConnectionType::Acceptor)
         .map(|(id, config)| {
-            let session = config.to_session();
-            let session_entry = SessionEntry::new(session, Box::new(DefaultApplication::new()));
-            return (id.clone(), session_entry);
+            let session = config.to_session(Box::new(DefaultApplication::new()));
+            (id.clone(), session)
         })
         .collect();
     let socket_addrs = properties
