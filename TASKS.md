@@ -204,7 +204,8 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
     - default → verify (which calls `application.from_app()`), incr target seq num v1 skips: ResendRequest (`2`),
       SequenceReset (`4`), Reject (`3`) — log and increment seq num only. Done when: unit tests cover: receiving a Logon
       triggers logon-received + logon response, receiving a TestRequest triggers heartbeat with echoed TestReqID,
-      receiving a Logout triggers logout response + disconnect, receiving an application message triggers `from_app`.
+      receiving a Logout triggers logout response + disconnect, receiving an application message triggers
+      `on_app_msg_received`.
 
 - [x] **4.8 — Timer logic (`next_tick`).**
   `Session::next_tick(&mut self)` — called periodically (by the network layer in M5, but testable in isolation now):
@@ -229,64 +230,133 @@ real sockets.
 Replaces the disposable Tokio prototype in `network.rs`/`io/` with `std::net::TcpStream` + `std::thread`.
 
 - [x] **5.1 — Delete Tokio prototype code.** Old async acceptor, broadcast channels, and task-spawning code removed.
-- [x] **5.2 — `FixMessageReader`.** `src/io/fix_message_reader.rs`: `FixMessageReader<R: Read>` wraps `BufReader`,
-  reads SOH-delimited FIX bytes until checksum tag `10=XXX\x01`. 4 tests.
+- [x] **5.2 — `FixMessageReader`.** `src/io/fix_message_reader.rs`: `FixMessageReader<R: Read>` wraps `BufReader`, reads
+  SOH-delimited FIX bytes until checksum tag `10=XXX\x01`. 4 tests.
 - [x] **5.3 — `TcpResponder`.** `src/io/tcp_responder.rs`: `Responder` impl wrapping `Mutex<TcpStream>`. 5 tests.
 - [x] **5.4 — `SessionMap`.** `src/network.rs`: `Arc<HashMap<SessionId, Arc<Mutex<Session>>>>`, built via
   `FromIterator`, immutable after construction. 6 tests.
-- [x] **5.5 — `IoAcceptor`.** `src/io/acceptor.rs`: binds `TcpListener`, spawns reader thread per connection,
-  dispatches via `reverse_session_id` lookup. Supporting changes: `Session::set_responder()`,
+- [x] **5.5 — `IoAcceptor`.** `src/io/acceptor.rs`: binds `TcpListener`, spawns reader thread per connection, dispatches
+  via `reverse_session_id` lookup. Supporting changes: `Session::set_responder()`,
   `session_id_from_raw()`/`reverse_session_id_from_raw()` in `message.rs`.
 - [x] **5.6 — Timer thread.** `src/network.rs`: `start_timer()` spawns background thread, sleep 1s → tick all sessions.
 - [x] **5.7 — Wire `main.rs` + integration test with QFJ Banzai.**
-  - `SessionConfig::to_session()` constructs Session from config.
-  - `connection_type()` and `socket_accept_port()` getters exposed on `SessionConfig`.
-  - `main.rs` wired: parse config → build `SessionMap` → start timer → spawn one `IoAcceptor` thread per bind address →
-    join all.
-  - `generate_logon()` fixed to include `EncryptMethod=0` (tag 98) — Banzai rejected Logon without it.
-  - `Display` impl added for `SessionId`.
-  - `SessionMap::len()` added.
-  - Integration-tested against QFJ Banzai (initiator): Logon handshake succeeds, heartbeat exchange runs cleanly with
-    sequence numbers in lockstep.
+    - `SessionConfig::to_session()` constructs Session from config.
+    - `connection_type()` and `socket_accept_port()` getters exposed on `SessionConfig`.
+    - `main.rs` wired: parse config → build `SessionMap` → start timer → spawn one `IoAcceptor` thread per bind
+      address → join all.
+    - `generate_logon()` fixed to include `EncryptMethod=0` (tag 98) — Banzai rejected Logon without it.
+    - `Display` impl added for `SessionId`.
+    - `SessionMap::len()` added.
+    - Integration-tested against QFJ Banzai (initiator): Logon handshake succeeds, heartbeat exchange runs cleanly with
+      sequence numbers in lockstep.
 
 - [x] **5.8 — Disconnect cleanup.**
   When `handle_connection`'s read loop breaks (EOF or error), lock the session and clean up:
   clear the responder (`self.responder = None`), reset logon/logout flags (`logon_sent`,
-  `logon_received`, `logout_sent`, `logout_received` → false), and call `app.on_logout()`.
-  This stops the timer from sending heartbeats into a dead socket and leaves the session in a
-  state where a new connection can re-logon cleanly.
-  - `Session::disconnect()` method centralizes teardown: calls `responder.disconnect()`, sets
-    responder to `None`, resets all logon/logout flags, calls `app.on_logout()`.
-  - `next_logout` and all `next_tick` disconnect paths now route through `disconnect()`.
-  - `handle_connection` in `acceptor.rs` calls `session.disconnect()` after the read loop breaks.
-  - Test infrastructure refactored: `MockResponder` in `session_tests` now uses a shared
-    `MockState` (`Arc<Mutex>`) pattern — state survives after `Session` drops the responder on
-    disconnect, eliminating the unsafe `get_mock_responder` pointer cast.
-  - 6 new disconnect tests added, all existing tests updated. 166 tests passing.
+  `logon_received`, `logout_sent`, `logout_received` → false), and call `app.on_logout()`. This stops the timer from
+  sending heartbeats into a dead socket and leaves the session in a state where a new connection can re-logon cleanly.
+    - `Session::disconnect()` method centralizes teardown: calls `responder.disconnect()`, sets responder to `None`,
+      resets all logon/logout flags, calls `app.on_logout()`.
+    - `next_logout` and all `next_tick` disconnect paths now route through `disconnect()`.
+    - `handle_connection` in `acceptor.rs` calls `session.disconnect()` after the read loop breaks.
+    - Test infrastructure refactored: `MockResponder` in `session_tests` now uses a shared
+      `MockState` (`Arc<Mutex>`) pattern — state survives after `Session` drops the responder on disconnect, eliminating
+      the unsafe `get_mock_responder` pointer cast.
+    - 6 new disconnect tests added, all existing tests updated. 166 tests passing.
 
 - [x] **5.9 — Apply reset flags.**
   *Depends on 5.8.* Act on the `reset_on_disconnect`, `reset_on_logon`, and `reset_on_logout`
   config flags that are already stored in `Session` but never used:
     - `reset_on_disconnect`: in the disconnect cleanup path (5.8), if true → `state.reset()`
       (zeroes seq nums back to 1).
-    - `reset_on_logon`: in `next_logon`, before processing the inbound Logon → `state.reset()`.
-      For acceptors this fires on receiving a Logon; for initiators it would fire before sending.
-    - `reset_on_logout`: in `next_logout`, after processing the inbound Logout → `state.reset()`.
-  These are operational choices agreed between counterparties (not part of the FIX spec itself).
-  When all three are false (default), seq nums persist across reconnections — which requires
-  ResendRequest support (deferred to v1.2+). For v1, setting `reset_on_logon = true` in
-  `FixCfg.toml` is the practical workaround. Done when: unit tests verify each flag triggers
-  `state.reset()` at the right point, and Banzai reconnect with `reset_on_logon = true` starts
-  from seq 1 on both sides.
+    - `reset_on_logon`: in `next_logon`, before processing the inbound Logon → `state.reset()`. For acceptors this fires
+      on receiving a Logon; for initiators it would fire before sending.
+    - `reset_on_logout`: in `next_logout`, after processing the inbound Logout → `state.reset()`. These are operational
+      choices agreed between counterparties (not part of the FIX spec itself). When all three are false (default), seq
+      nums persist across reconnections — which requires ResendRequest support (deferred to v1.2+). For v1, setting
+      `reset_on_logon = true` in
+      `FixCfg.toml` is the practical workaround. Done when: unit tests verify each flag triggers
+      `state.reset()` at the right point, and Banzai reconnect with `reset_on_logon = true` starts from seq 1 on both
+      sides.
 
 - [x] **5.10 — Cleanup.** Tokio dependency already removed from `Cargo.toml` and `src/io/mod.rs`
   (cleaned up during 5.1). No remaining references in the codebase.
 
 **M5 exit criteria**: Acceptor binds, accepts TCP connections, completes Logon handshake, exchanges heartbeats with a
-real QFJ initiator. Reconnections handled cleanly (disconnect detected, session state reset per config flags).
-Initiator support deferred to a later milestone.
+real QFJ initiator. Reconnections handled cleanly (disconnect detected, session state reset per config flags). Initiator
+support deferred to a later milestone.
 
-## M6 — Close out v1 (sketch)
+## M6 — Outbound app messages + close out v1
 
-Wire `MarketDataRequest`/`MarketDataSnapshotFullRefresh` end-to-end between a real initiator and acceptor using M3's
-typed messages and M4/M5's session/network layers. This is the "v1 is done" milestone.
+Wire application-level outbound messages end-to-end. Requires an architectural refactor:
+extract `Box<dyn Application>` from Session into a sibling `SessionEntry` struct, using Rust's split-borrow pattern so
+Session and Application can be mutably accessed independently from a single lock. M3 (typed message codegen) is
+deferred — v1 uses the raw `Message` API.
+
+See `session_context/2026-09-05-outbound-design.md` for the full design rationale.
+
+- [x] **6.1 — Rename Application trait methods.**
+  Rename for clarity (QFJ's `from`/`to` convention is non-obvious):
+    - `on_admin_msg_sending` → `on_admin_msg_sending`
+    - `on_admin_msg_received` → `on_admin_msg_received`
+    - `on_app_msg_sending` → `on_app_msg_sending`
+    - `on_app_msg_received` → `on_app_msg_received`
+      Mechanical find-and-replace across: `src/application.rs` (trait + `DefaultApplication`),
+      `src/session/mod.rs` (all call sites + `TestApplication` in tests). Done when: `cargo test` green, all 172 tests
+      pass, no `on_app_msg_received`/`on_app_msg_sending`/`on_admin_msg_received`/
+      `on_admin_msg_sending` method names remain.
+
+- [x] **6.2 — Change `on_app_msg_received` return type.**
+  *Depends on 6.1.* Change return from `Result<(), AppError>` to
+  `Result<Vec<Message>, AppError>`. Update `DefaultApplication` (return `Ok(vec![])`),
+  `TestApplication` in tests (same). In `dispatch_to_app`, collect the returned `Vec` but don't send yet — just drop it.
+  This is a seam for 6.4. Done when: `cargo test` green, return type updated everywhere.
+
+- [x] **6.3 — Extract Application from Session into SessionEntry.**
+  *Depends on 6.2.* The big structural change:
+    - Remove `app: Box<dyn Application>` field from `Session` struct.
+    - Remove `app` parameter from `Session::new()`.
+    - Add `app: &mut dyn Application` parameter to all Session methods that use it:
+      `next_message`, `next_logon`, `next_logout`, `next_heartbeat`, `next_test_request`,
+      `next_tick`, `disconnect`, `dispatch_to_app`, `generate_logon`, `generate_logout`,
+      `generate_heartbeat`, `generate_test_request`.
+    - Create `SessionEntry { session: Session, app: Box<dyn Application> }`.
+    - Update `SessionMap` to hold `Arc<Mutex<SessionEntry>>` instead of `Arc<Mutex<Session>>`.
+    - Update `FromIterator` for `SessionMap`.
+    - Update `handle_connection` in `src/io/acceptor.rs`: lock gives `&mut SessionEntry`, use split borrows
+      (`entry.session.method(&mut msg, &mut *entry.app)`).
+    - Update `start_timer` in `src/network.rs`: same split-borrow pattern for `next_tick`.
+    - Update `SessionConfig::to_session` in `src/session/settings.rs`: returns `Session`
+      only (no app). Caller wraps with `SessionEntry`.
+    - Update `main.rs`: build `SessionEntry` per session, collect into `SessionMap`.
+    - Update all tests: construct Session and app separately, pass `&mut app` into method calls. `TestApplication` is
+      now a local variable — no more unsafe pointer casts via
+      `get_test_app`. Done when: `cargo test` green, `Session` struct has no `app` field, all interaction with
+      Application goes through the `app` parameter.
+
+- [ ] **6.4 — Add `send_app_message` + wire outbound responses.**
+  *Depends on 6.3.* New public method `Session::send_app_message(&mut self, msg: Message,
+  app: &mut dyn Application)`: calls `initialize_header`, calls `app.on_app_msg_sending`
+  (can cancel via `DonotSend`), calls `send_raw`. Update `dispatch_to_app` to iterate the
+  `Vec<Message>` returned by `on_app_msg_received` and call `send_app_message` for each. Done when: tests verify that
+  messages returned from `on_app_msg_received` are serialized and captured by MockResponder with correct headers
+  (BeginString, CompIDs, MsgSeqNum).
+
+- [ ] **6.5 — Write MarketDataApp sample application.**
+  *Depends on 6.4.* New `src/sample_app.rs` (or similar): struct `MarketDataApp` implementing
+  `Application`. `on_app_msg_received` handles MsgType `V` (MarketDataRequest) → builds and returns a `W`
+  (MarketDataSnapshotFullRefresh) with echoed MDReqID (tag 262) and dummy market data. All other callbacks are no-ops.
+  Wire into `main.rs` replacing
+  `DefaultApplication`. Done when: `cargo build` clean, `main.rs` starts the acceptor with `MarketDataApp`.
+
+- [ ] **6.6 — Integration test with QFJ Banzai.**
+  *Depends on 6.5.* End-to-end against a QFJ Banzai initiator:
+    1. Logon handshake completes (already working from M5)
+    2. Banzai sends MarketDataRequest (35=V)
+    3. fix-rs acceptor responds with MarketDataSnapshotFullRefresh (35=W)
+    4. Heartbeat exchange continues normally
+    5. Logout cleanly This is the v1 "done" gate. Done when: the above sequence runs without errors on both sides.
+
+**M6 exit criteria**: Application-level messages flow end-to-end between a real QFJ initiator and the fix-rs acceptor.
+Session doesn't own Application. No ownership cycles. Architecture supports future unsolicited sends without structural
+changes.

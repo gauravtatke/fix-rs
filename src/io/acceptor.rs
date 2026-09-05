@@ -1,7 +1,7 @@
 use crate::io::fix_message_reader::FixMessageReader;
 use crate::io::tcp_responder::TcpResponder;
 use crate::message::{self, Message};
-use crate::network::SessionMap;
+use crate::network::{SessionEntry, SessionMap};
 use log::info;
 use std::error::Error;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -56,10 +56,11 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
     if let Some(s_arc) = session_map.get(&reverse_id) {
         info!("{} incoming: {}", reverse_id, wire_display(&first_msg_str));
         {
-            let mut session = s_arc.lock().unwrap();
+            let mut entry = s_arc.lock().unwrap();
+            let SessionEntry { session, app } = &mut *entry;
             session.set_responder(Box::new(TcpResponder::new(stream)));
             let mut first_msg = Message::from_str(&first_msg_str, session.dictionary())?;
-            session.next_message(&mut first_msg)?;
+            session.next_message(&mut first_msg, app.as_mut())?;
         }
         loop {
             // Lock released before blocking read — other threads (timer, outbound sends)
@@ -69,12 +70,15 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
                 Err(_) => break,
             };
             info!("{} incoming: {}", reverse_id, wire_display(&msg_str));
-            let mut session = s_arc.lock().unwrap();
+            let mut entry = s_arc.lock().unwrap();
+            let SessionEntry { session, app } = &mut *entry;
             let mut msg = Message::from_str(&msg_str, session.dictionary())?;
-            session.next_message(&mut msg)?;
+            session.next_message(&mut msg, app.as_mut())?;
         }
         info!("{} event: Connection closed ({})", reverse_id, peer_addr);
-        s_arc.lock().unwrap().disconnect();
+        let mut entry = s_arc.lock().unwrap();
+        let SessionEntry { session, app } = &mut *entry;
+        session.disconnect(app.as_mut());
     } else {
         info!("No session found for {}, dropping connection from {}", reverse_id, peer_addr);
     }

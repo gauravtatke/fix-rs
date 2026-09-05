@@ -32,7 +32,6 @@ pub struct Session {
     schedule: SessionSchedule,
     responder: Option<Box<dyn Responder>>,
     data_dict: Arc<DataDictionary>,
-    app: Box<dyn Application>,
 }
 
 fn is_admin_msg_type(msg_type: &str) -> bool {
@@ -46,7 +45,6 @@ impl Session {
         schedule: SessionSchedule,
         responder: Option<Box<dyn Responder>>,
         dictionary: DataDictionary,
-        app: Box<dyn Application>,
     ) -> Self {
         Self {
             id,
@@ -58,7 +56,6 @@ impl Session {
             schedule,
             responder,
             data_dict: Arc::new(dictionary),
-            app,
         }
     }
 
@@ -72,7 +69,7 @@ impl Session {
 
     // Tears down the connection and resets session to pre-logon state.
     // Called when the reader thread detects EOF/error (peer disconnected).
-    pub fn disconnect(&mut self) {
+    pub fn disconnect(&mut self, app: &mut dyn Application) {
         if let Some(ref responder) = self.responder {
             responder.disconnect();
         }
@@ -82,7 +79,7 @@ impl Session {
         self.state.logout_sent = false;
         self.state.logout_received = false;
         info!("{} event: Disconnected", self.id);
-        self.app.on_logout(&self.id);
+        app.on_logout(&self.id);
         // Seq num reset goes last — flags and on_logout must fire regardless.
         if self.reset_on_disconnect {
             self.state.reset(Instant::now());
@@ -102,12 +99,17 @@ impl Session {
     }
 
     // Routes a verified inbound message to the appropriate Application callback.
-    // Admin messages (MsgType 0-5, A) → from_admin; all others → from_app.
-    fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), Box<dyn Error>> {
+    // Admin messages (MsgType 0-5, A) → on_admin_msg_received; all others → on_app_msg_received.
+    fn dispatch_to_app(
+        &mut self,
+        msg_type: &str,
+        msg: &Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         if is_admin_msg_type(msg_type) {
-            self.app.from_admin(&self.id, msg)?;
+            app.on_admin_msg_received(&self.id, msg)?;
         } else {
-            self.app.from_app(&self.id, msg)?;
+            app.on_app_msg_received(&self.id, msg)?;
         }
         Ok(())
     }
@@ -178,63 +180,67 @@ impl Session {
     }
 
     // Builds and sends a Logon (MsgType=A) with HeartBtInt.
-    fn generate_logon(&mut self) {
+    fn generate_logon(&mut self, app: &mut dyn Application) {
         let mut msg = Message::new();
         msg.header_mut().set_field(StringField::new(35, "A"));
         msg.set_field(StringField::new(98, "0"));
         msg.set_field(StringField::new(108, &self.state.heartbeat_interval.to_string()));
         self.initialize_header(&mut msg);
-        self.app.to_admin(&self.id, &mut msg);
+        app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
     }
 
     // Builds and sends a Logout (MsgType=5) with optional Text reason.
-    fn generate_logout(&mut self, reason: Option<&str>) {
+    fn generate_logout(&mut self, reason: Option<&str>, app: &mut dyn Application) {
         let mut msg = Message::new();
         msg.header_mut().set_field(StringField::new(35, "5"));
         self.initialize_header(&mut msg);
         if let Some(reason) = reason {
             msg.set_field(StringField::new(58, reason));
         }
-        self.app.to_admin(&self.id, &mut msg);
+        app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
     }
 
     // Builds and sends a Heartbeat (MsgType=0). Echoes TestReqID if responding to a TestRequest.
-    fn generate_heartbeat(&mut self, test_req_id: Option<&str>) {
+    fn generate_heartbeat(&mut self, test_req_id: Option<&str>, app: &mut dyn Application) {
         let mut msg = Message::new();
         msg.header_mut().set_field(StringField::new(35, "0"));
         if let Some(test_reqid) = test_req_id {
             msg.set_field(StringField::new(112, test_reqid));
         }
         self.initialize_header(&mut msg);
-        self.app.to_admin(&self.id, &mut msg);
+        app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
     }
 
     // Builds and sends a TestRequest (MsgType=1) with the given TestReqID.
-    fn generate_test_request(&mut self, req_id: &str) {
+    fn generate_test_request(&mut self, req_id: &str, app: &mut dyn Application) {
         let mut msg = Message::new();
         msg.header_mut().set_field(StringField::new(35, "1"));
         msg.set_field(StringField::new(112, req_id));
         self.initialize_header(&mut msg);
-        self.app.to_admin(&self.id, &mut msg);
+        app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
     }
 
     // Inbound dispatch: extracts MsgType, routes to per-type handler.
     // App-level messages fall through to verify → seq check → dispatch_to_app.
-    pub(crate) fn next_message(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn next_message(
+        &mut self,
+        msg: &mut Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         let msg_type = msg.get_msg_type()?;
         match msg_type.as_str() {
-            "A" => self.next_logon(msg),
-            "5" => self.next_logout(msg),
-            "1" => self.next_test_request(msg),
-            "0" => self.next_heartbeat(msg),
+            "A" => self.next_logon(msg, app),
+            "5" => self.next_logout(msg, app),
+            "1" => self.next_test_request(msg, app),
+            "0" => self.next_heartbeat(msg, app),
             _ => {
                 self.verify_msg(msg)?;
                 self.verify_seq_number(msg)?;
-                self.dispatch_to_app(&msg_type, msg)?;
+                self.dispatch_to_app(&msg_type, msg, app)?;
                 Ok(())
             }
         }
@@ -262,7 +268,11 @@ impl Session {
     // Handles inbound Logon (MsgType=A). Guards: must be active and in session time.
     // Resets seq nums if ResetSeqNumFlag=Y, verifies, notifies app, and
     // acceptors respond with their own Logon.
-    fn next_logon(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    fn next_logon(
+        &mut self,
+        msg: &mut Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         if !self.is_active {
             return Err(Box::from(SessionError::InvalidStateForMsgType {
                 msg_type: "A".to_string(),
@@ -285,45 +295,57 @@ impl Session {
         }
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
-        self.app.from_admin(&self.id, msg)?;
+        app.on_admin_msg_received(&self.id, msg)?;
         self.state.logon_received = true;
         info!("{} event: Logon received", self.id);
         if !self.state.is_initiator {
             self.state.logon_sent = true;
-            self.generate_logon();
+            self.generate_logon(app);
         }
-        self.app.on_logon(&self.id);
+        app.on_logon(&self.id);
         Ok(())
     }
 
     // Handles inbound Heartbeat (MsgType=0). Verify, seq check, notify app. No response.
-    fn next_heartbeat(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    fn next_heartbeat(
+        &mut self,
+        msg: &mut Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
-        self.app.from_admin(&self.id, msg)?;
+        app.on_admin_msg_received(&self.id, msg)?;
         Ok(())
     }
 
     // Handles inbound TestRequest (MsgType=1). Responds with Heartbeat echoing TestReqID.
-    fn next_test_request(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    fn next_test_request(
+        &mut self,
+        msg: &mut Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
-        self.app.from_admin(&self.id, msg)?;
+        app.on_admin_msg_received(&self.id, msg)?;
         let test_req_id = msg.get_field::<String>(112).ok();
-        self.generate_heartbeat(test_req_id.as_deref());
+        self.generate_heartbeat(test_req_id.as_deref(), app);
         Ok(())
     }
 
     // Handles inbound Logout (MsgType=5). If we didn't initiate the logout,
     // responds with our own Logout. Always disconnects after notifying app.
-    fn next_logout(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
+    fn next_logout(
+        &mut self,
+        msg: &mut Message,
+        app: &mut dyn Application,
+    ) -> Result<(), Box<dyn Error>> {
         self.verify_msg(msg)?;
-        self.app.from_admin(&self.id, msg)?;
+        app.on_admin_msg_received(&self.id, msg)?;
         info!("{} event: Logout received", self.id);
         if !self.state.logout_sent {
-            self.generate_logout(None);
+            self.generate_logout(None, app);
         }
-        self.disconnect();
+        self.disconnect(app);
         // After disconnect so the logout response uses the correct seq num.
         if self.reset_on_logout {
             self.state.reset(Instant::now());
@@ -336,7 +358,7 @@ impl Session {
     //   1. Pre-logon: initiator sends Logon if in session time, disconnects on timeout
     //   2. Post-logon, outside schedule: initiates graceful Logout
     //   3. Post-logon, in schedule: heartbeat escalation (heartbeat → test request → disconnect)
-    pub(crate) fn next_tick(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn next_tick(&mut self, app: &mut dyn Application) -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         if self.responder.is_none() || !self.is_active {
             return Ok(());
@@ -346,10 +368,10 @@ impl Session {
         if !self.state.logon_received {
             if self.schedule.is_session_time() && self.state.is_initiator && !self.state.logon_sent
             {
-                self.generate_logon();
+                self.generate_logon(app);
                 self.state.logon_sent = true;
             } else if self.state.is_logon_timed_out(now) {
-                self.disconnect();
+                self.disconnect(app);
             }
             return Ok(());
         }
@@ -357,22 +379,22 @@ impl Session {
         // logged on but session time ended — initiate graceful logout
         if !self.schedule.is_session_time() {
             if !self.state.logout_sent {
-                self.generate_logout(None);
+                self.generate_logout(None, app);
                 self.state.logout_sent = true;
             } else if self.state.is_logout_timed_out(now) {
-                self.disconnect();
+                self.disconnect(app);
             }
             return Ok(());
         }
 
         // logged on, in session time — heartbeat management
         if self.state.is_timed_out(now) {
-            self.disconnect();
+            self.disconnect(app);
         } else if self.state.is_test_request_needed(now) {
-            self.generate_test_request("test");
+            self.generate_test_request("test", app);
             self.state.test_request_counter += 1;
         } else if self.state.is_heartbeat_needed(now) {
-            self.generate_heartbeat(None);
+            self.generate_heartbeat(None, app);
             self.state.last_sent_time = now;
         }
 
@@ -531,10 +553,10 @@ mod session_tests {
         fn on_logout(&mut self, _session_id: &SessionId) {
             self.calls.borrow_mut().push("on_logout".to_string());
         }
-        fn to_admin(&mut self, _session_id: &SessionId, _message: &mut Message) {
+        fn on_admin_msg_sending(&mut self, _session_id: &SessionId, _message: &mut Message) {
             self.calls.borrow_mut().push("to_admin".to_string());
         }
-        fn from_admin(
+        fn on_admin_msg_received(
             &mut self,
             _session_id: &SessionId,
             _message: &Message,
@@ -542,7 +564,7 @@ mod session_tests {
             self.calls.borrow_mut().push("from_admin".to_string());
             Ok(())
         }
-        fn to_app(
+        fn on_app_msg_sending(
             &mut self,
             _session_id: &SessionId,
             _message: &mut Message,
@@ -550,54 +572,52 @@ mod session_tests {
             self.calls.borrow_mut().push("to_app".to_string());
             Ok(())
         }
-        fn from_app(
+        fn on_app_msg_received(
             &mut self,
             _session_id: &SessionId,
             _message: &Message,
-        ) -> Result<(), AppError> {
+        ) -> Result<Vec<Message>, AppError> {
             self.calls.borrow_mut().push("from_app".to_string());
-            Ok(())
+            Ok(vec![])
         }
     }
 
-    fn make_session(app: Box<dyn Application>) -> (Session, MockState) {
+    fn make_session() -> (Session, MockState) {
         let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
         let state = SessionState::new(30, false, Instant::now());
         let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let mock_state = MockState::new();
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
-        (Session::new(id, state, schedule, Some(Box::new(responder)), dd, app), mock_state)
+        (Session::new(id, state, schedule, Some(Box::new(responder)), dd), mock_state)
     }
 
     #[test]
     fn test_dispatch_to_app_dispatches_admin_to_from_admin() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         let msg = Message::new();
 
-        let app = session.app.as_ref() as *const dyn Application as *const TestApplication;
-
         for msg_type in &["0", "1", "2", "3", "4", "5", "A"] {
-            session.dispatch_to_app(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, &msg, &mut app).unwrap();
         }
 
-        let calls = unsafe { &*app }.calls();
+        let calls = app.calls();
         assert_eq!(calls.len(), 7);
         assert!(calls.iter().all(|c| c == "from_admin"));
     }
 
     #[test]
     fn test_dispatch_to_app_dispatches_app_to_from_app() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         let msg = Message::new();
 
-        let app = session.app.as_ref() as *const dyn Application as *const TestApplication;
-
         for msg_type in &["D", "8", "G", "AE"] {
-            session.dispatch_to_app(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, &msg, &mut app).unwrap();
         }
 
-        let calls = unsafe { &*app }.calls();
+        let calls = app.calls();
         assert_eq!(calls.len(), 4);
         assert!(calls.iter().all(|c| c == "from_app"));
     }
@@ -614,7 +634,7 @@ mod session_tests {
 
     #[test]
     fn test_valid_logon_state_before_logon() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         assert!(session.valid_logon_state("A"));
         assert!(!session.valid_logon_state("0"));
         assert!(!session.valid_logon_state("D"));
@@ -622,7 +642,7 @@ mod session_tests {
 
     #[test]
     fn test_valid_logon_state_after_logon() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         session.state.logon_received = true;
         assert!(session.valid_logon_state("A"));
         assert!(session.valid_logon_state("0"));
@@ -632,7 +652,7 @@ mod session_tests {
 
     #[test]
     fn test_valid_logon_state_during_logout() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         session.state.logon_received = true;
         session.state.logout_sent = true;
         assert!(session.valid_logon_state("5"));
@@ -654,7 +674,7 @@ mod session_tests {
 
     #[test]
     fn test_verify_msg_passes_valid_logon() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         let msg = make_msg("A", "TARGET", "SENDER", 1);
         assert!(session.verify_msg(&msg).is_ok());
     }
@@ -662,7 +682,7 @@ mod session_tests {
     #[test]
     fn test_verify_msg_rejects_begin_string_mismatch() {
         use crate::message::StringField;
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
         msg.header_mut().set_field(StringField::new(8, "FIX.4.4"));
         assert!(session.verify_msg(&msg).is_err());
@@ -670,14 +690,14 @@ mod session_tests {
 
     #[test]
     fn test_verify_msg_rejects_non_logon_before_logon() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         let msg = make_msg("D", "TARGET", "SENDER", 1);
         assert!(session.verify_msg(&msg).is_err());
     }
 
     #[test]
     fn test_verify_msg_rejects_compid_mismatch() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         session.state.logon_received = true;
         let msg = make_msg("D", "WRONG", "SENDER", 1);
         assert!(session.verify_msg(&msg).is_err());
@@ -685,7 +705,7 @@ mod session_tests {
 
     #[test]
     fn test_verify_seq_number_rejects_low_seq_num() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         session.state.next_target_msg_seq_num = 5;
         let msg = make_msg("D", "TARGET", "SENDER", 3);
         assert!(session.verify_seq_number(&msg).is_err());
@@ -693,14 +713,14 @@ mod session_tests {
 
     #[test]
     fn test_verify_seq_number_warns_high_seq_num_but_passes() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         let msg = make_msg("D", "TARGET", "SENDER", 10);
         assert!(session.verify_seq_number(&msg).is_ok());
     }
 
     #[test]
     fn test_verify_seq_number_increments_target_seq_num() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         assert_eq!(session.state.next_target_msg_seq_num, 1);
 
         let msg = make_msg("D", "TARGET", "SENDER", 1);
@@ -710,7 +730,7 @@ mod session_tests {
 
     #[test]
     fn test_verify_msg_resets_test_request_counter() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let (mut session, _) = make_session();
         session.state.logon_received = true;
         session.state.test_request_counter = 3;
 
@@ -721,19 +741,21 @@ mod session_tests {
 
     #[test]
     fn test_next_logon_sets_logon_received() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = true;
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
         assert!(session.state.logon_received);
     }
 
     #[test]
     fn test_next_logon_acceptor_sends_logon_response() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
         session.is_active = true;
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
 
         assert!(session.state.logon_sent);
         let sent = mock_state.sent();
@@ -743,53 +765,53 @@ mod session_tests {
 
     #[test]
     fn test_next_logon_initiator_does_not_send_logon_response() {
-        let (mut session, mock_state) = make_initiator_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_initiator_session();
         session.is_active = true;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
     }
 
     #[test]
     fn test_next_logon_calls_from_admin_and_on_logon() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = true;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert!(calls.contains(&"from_admin".to_string()));
         assert!(calls.contains(&"on_logon".to_string()));
     }
 
     #[test]
     fn test_next_logon_rejects_inactive_session() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = false;
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        assert!(session.next_logon(&mut msg).is_err());
+        assert!(session.next_logon(&mut msg, &mut app).is_err());
         assert!(!session.state.logon_received);
     }
 
     #[test]
     fn test_next_logon_resets_seq_nums_on_reset_flag() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = true;
         session.state.next_target_msg_seq_num = 10;
         session.state.next_sender_msg_seq_num = 15;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
         msg.set_field(StringField::new(141, "Y"));
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
 
         assert!(session.state.logon_received);
-    }
-
-    fn get_test_app(session: &Session) -> &TestApplication {
-        unsafe { &*(session.app.as_ref() as *const dyn Application as *const TestApplication) }
     }
 
     fn sent_message_contains(wire: &str, tag: u32, expected_value: &str) -> bool {
@@ -802,8 +824,9 @@ mod session_tests {
 
     #[test]
     fn test_generate_logon_sends_correct_message() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_logon();
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_logon(&mut app);
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -819,25 +842,28 @@ mod session_tests {
 
     #[test]
     fn test_generate_logon_calls_to_admin() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
-        session.generate_logon();
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
+        session.generate_logon(&mut app);
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert_eq!(calls, vec!["to_admin"]);
     }
 
     #[test]
     fn test_generate_logon_increments_seq_num() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         assert_eq!(session.state.next_sender_msg_seq_num, 1);
-        session.generate_logon();
+        session.generate_logon(&mut app);
         assert_eq!(session.state.next_sender_msg_seq_num, 2);
     }
 
     #[test]
     fn test_generate_logout_with_reason() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_logout(Some("Session ended"));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_logout(Some("Session ended"), &mut app);
 
         let sent = mock_state.sent();
         let wire = &sent[0];
@@ -847,8 +873,9 @@ mod session_tests {
 
     #[test]
     fn test_generate_logout_without_reason() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_logout(None);
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_logout(None, &mut app);
 
         let sent = mock_state.sent();
         let wire = &sent[0];
@@ -858,8 +885,9 @@ mod session_tests {
 
     #[test]
     fn test_generate_heartbeat_without_test_req_id() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_heartbeat(None);
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_heartbeat(None, &mut app);
 
         let sent = mock_state.sent();
         let wire = &sent[0];
@@ -869,8 +897,9 @@ mod session_tests {
 
     #[test]
     fn test_generate_heartbeat_with_test_req_id() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_heartbeat(Some("TEST123"));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_heartbeat(Some("TEST123"), &mut app);
 
         let sent = mock_state.sent();
         let wire = &sent[0];
@@ -880,8 +909,9 @@ mod session_tests {
 
     #[test]
     fn test_generate_test_request() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
-        session.generate_test_request("REQ456");
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
+        session.generate_test_request("REQ456", &mut app);
 
         let sent = mock_state.sent();
         let wire = &sent[0];
@@ -891,13 +921,14 @@ mod session_tests {
 
     #[test]
     fn test_multiple_generates_increment_seq_nums() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
         assert_eq!(session.state.next_sender_msg_seq_num, 1);
 
-        session.generate_logon();
-        session.generate_heartbeat(None);
-        session.generate_test_request("T1");
-        session.generate_logout(None);
+        session.generate_logon(&mut app);
+        session.generate_heartbeat(None, &mut app);
+        session.generate_test_request("T1", &mut app);
+        session.generate_logout(None, &mut app);
 
         assert_eq!(session.state.next_sender_msg_seq_num, 5);
 
@@ -909,8 +940,8 @@ mod session_tests {
         assert!(sent_message_contains(&sent[3], 34, "4"));
     }
 
-    fn make_logged_on_session(app: Box<dyn Application>) -> (Session, MockState) {
-        let (mut session, mock_state) = make_session(app);
+    fn make_logged_on_session() -> (Session, MockState) {
+        let (mut session, mock_state) = make_session();
         session.is_active = true;
         session.state.logon_received = true;
         (session, mock_state)
@@ -920,31 +951,34 @@ mod session_tests {
 
     #[test]
     fn test_next_heartbeat_increments_target_seq_num() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         assert_eq!(session.state.next_target_msg_seq_num, 1);
 
         let mut msg = make_msg("0", "TARGET", "SENDER", 1);
-        session.next_heartbeat(&mut msg).unwrap();
+        session.next_heartbeat(&mut msg, &mut app).unwrap();
         assert_eq!(session.state.next_target_msg_seq_num, 2);
     }
 
     #[test]
     fn test_next_heartbeat_calls_from_admin() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("0", "TARGET", "SENDER", 1);
-        session.next_heartbeat(&mut msg).unwrap();
+        session.next_heartbeat(&mut msg, &mut app).unwrap();
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert_eq!(calls, vec!["from_admin"]);
     }
 
     #[test]
     fn test_next_heartbeat_does_not_send_response() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("0", "TARGET", "SENDER", 1);
-        session.next_heartbeat(&mut msg).unwrap();
+        session.next_heartbeat(&mut msg, &mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
     }
@@ -953,11 +987,12 @@ mod session_tests {
 
     #[test]
     fn test_next_test_request_sends_heartbeat_with_echoed_test_req_id() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("1", "TARGET", "SENDER", 1);
         msg.set_field(StringField::new(112, "TEST123"));
-        session.next_test_request(&mut msg).unwrap();
+        session.next_test_request(&mut msg, &mut app).unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -967,10 +1002,11 @@ mod session_tests {
 
     #[test]
     fn test_next_test_request_without_test_req_id() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("1", "TARGET", "SENDER", 1);
-        session.next_test_request(&mut msg).unwrap();
+        session.next_test_request(&mut msg, &mut app).unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -980,10 +1016,11 @@ mod session_tests {
 
     #[test]
     fn test_next_test_request_increments_target_seq_num() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("1", "TARGET", "SENDER", 1);
-        session.next_test_request(&mut msg).unwrap();
+        session.next_test_request(&mut msg, &mut app).unwrap();
         assert_eq!(session.state.next_target_msg_seq_num, 2);
     }
 
@@ -991,10 +1028,11 @@ mod session_tests {
 
     #[test]
     fn test_next_logout_resets_flags_after_disconnect() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 1);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
         // disconnect() resets all logon/logout flags — session is back to pre-logon state
         assert!(!session.state.logout_received);
         assert!(!session.state.logon_received);
@@ -1004,10 +1042,11 @@ mod session_tests {
 
     #[test]
     fn test_next_logout_sends_response_when_not_initiated() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 1);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -1016,33 +1055,36 @@ mod session_tests {
 
     #[test]
     fn test_next_logout_no_response_when_we_initiated() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         session.state.logout_sent = true;
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 1);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
     }
 
     #[test]
     fn test_next_logout_disconnects() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 1);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
         assert!(mock_state.is_disconnected());
     }
 
     #[test]
     fn test_next_logout_calls_on_logout() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 1);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert!(calls.contains(&"on_logout".to_string()));
     }
 
@@ -1050,38 +1092,39 @@ mod session_tests {
 
     #[test]
     fn test_next_message_app_msg_calls_from_app() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        session.next_message(&mut msg).unwrap();
+        session.next_message(&mut msg, &mut app).unwrap();
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert_eq!(calls, vec!["from_app"]);
     }
 
     #[test]
     fn test_next_message_app_msg_increments_target_seq_num() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        session.next_message(&mut msg).unwrap();
+        session.next_message(&mut msg, &mut app).unwrap();
         assert_eq!(session.state.next_target_msg_seq_num, 2);
     }
 
     // --- next_tick helpers ---
 
-    fn make_initiator_session(app: Box<dyn Application>) -> (Session, MockState) {
+    fn make_initiator_session() -> (Session, MockState) {
         let id = SessionId::new("FIX.4.3", "SENDER", "TARGET");
         let state = SessionState::new(30, true, Instant::now());
         let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let mock_state = MockState::new();
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
-        (Session::new(id, state, schedule, Some(Box::new(responder)), dd, app), mock_state)
+        (Session::new(id, state, schedule, Some(Box::new(responder)), dd), mock_state)
     }
 
     fn make_session_with_schedule(
-        app: Box<dyn Application>,
         is_initiator: bool,
         schedule: SessionSchedule,
     ) -> (Session, MockState) {
@@ -1090,7 +1133,7 @@ mod session_tests {
         let mock_state = MockState::new();
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
-        (Session::new(id, state, schedule, Some(Box::new(responder)), dd, app), mock_state)
+        (Session::new(id, state, schedule, Some(Box::new(responder)), dd), mock_state)
     }
 
     // A schedule that is always outside session time (window already passed today).
@@ -1109,18 +1152,20 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_no_responder_is_noop() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.responder = None;
         session.is_active = true;
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
         // no panic, no messages sent
     }
 
     #[test]
     fn test_next_tick_inactive_is_noop() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
         session.is_active = false;
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
         assert!(mock_state.sent().is_empty());
     }
 
@@ -1128,10 +1173,11 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_initiator_sends_logon_in_session_time() {
-        let (mut session, mock_state) = make_initiator_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_initiator_session();
         session.is_active = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(session.state.logon_sent);
         let sent = mock_state.sent();
@@ -1141,36 +1187,38 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_initiator_does_not_resend_logon() {
-        let (mut session, mock_state) = make_initiator_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_initiator_session();
         session.is_active = true;
         session.state.logon_sent = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
     }
 
     #[test]
     fn test_next_tick_initiator_disconnects_on_logon_timeout() {
-        let (mut session, mock_state) = make_initiator_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_initiator_session();
         session.is_active = true;
         session.state.logon_sent = true;
         // Push last_sent_time far enough back to trigger logon timeout (>10s)
         session.state.last_sent_time = Instant::now() - Duration::from_secs(15);
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.is_disconnected());
     }
 
     #[test]
     fn test_next_tick_initiator_no_logon_outside_session_time() {
+        let mut app = TestApplication::new();
         let schedule = expired_schedule();
-        let (mut session, mock_state) =
-            make_session_with_schedule(Box::new(TestApplication::new()), true, schedule);
+        let (mut session, mock_state) = make_session_with_schedule(true, schedule);
         session.is_active = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(!session.state.logon_sent);
         assert!(mock_state.sent().is_empty());
@@ -1180,10 +1228,11 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_acceptor_pre_logon_is_noop() {
-        let (mut session, mock_state) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_session();
         session.is_active = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
         assert!(!mock_state.is_disconnected());
@@ -1193,13 +1242,13 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_logged_on_outside_schedule_sends_logout() {
+        let mut app = TestApplication::new();
         let schedule = expired_schedule();
-        let (mut session, mock_state) =
-            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        let (mut session, mock_state) = make_session_with_schedule(false, schedule);
         session.is_active = true;
         session.state.logon_received = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(session.state.logout_sent);
         let sent = mock_state.sent();
@@ -1209,30 +1258,30 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_logged_on_outside_schedule_does_not_resend_logout() {
+        let mut app = TestApplication::new();
         let schedule = expired_schedule();
-        let (mut session, mock_state) =
-            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        let (mut session, mock_state) = make_session_with_schedule(false, schedule);
         session.is_active = true;
         session.state.logon_received = true;
         session.state.logout_sent = true;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
     }
 
     #[test]
     fn test_next_tick_logout_timeout_disconnects() {
+        let mut app = TestApplication::new();
         let schedule = expired_schedule();
-        let (mut session, mock_state) =
-            make_session_with_schedule(Box::new(TestApplication::new()), false, schedule);
+        let (mut session, mock_state) = make_session_with_schedule(false, schedule);
         session.is_active = true;
         session.state.logon_received = true;
         session.state.logout_sent = true;
         // Push last_sent_time back to trigger logout timeout (>2s)
         session.state.last_sent_time = Instant::now() - Duration::from_secs(5);
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.is_disconnected());
     }
@@ -1241,13 +1290,14 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_sends_heartbeat_when_needed() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         // Push last_sent_time back past heartbeat interval (30s)
         session.state.last_sent_time = Instant::now() - Duration::from_secs(31);
         // Keep last_received_time recent so test request doesn't trigger
         session.state.last_received_time = Instant::now();
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -1256,12 +1306,13 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_sends_test_request_over_heartbeat() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         // No receive for > 1.5x interval (>45s) triggers test request
         session.state.last_received_time = Instant::now() - Duration::from_secs(46);
         session.state.last_sent_time = Instant::now();
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert_eq!(session.state.test_request_counter, 1);
         let sent = mock_state.sent();
@@ -1271,12 +1322,13 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_disconnects_on_timeout() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         // No receive for > 2x interval (>60s) with counter > 1
         session.state.last_received_time = Instant::now() - Duration::from_secs(61);
         session.state.test_request_counter = 2;
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.is_disconnected());
         assert!(mock_state.sent().is_empty());
@@ -1284,12 +1336,13 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_no_action_when_all_timers_fresh() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         // Both timestamps are recent — nothing should fire
         session.state.last_sent_time = Instant::now();
         session.state.last_received_time = Instant::now();
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         assert!(mock_state.sent().is_empty());
         assert!(!mock_state.is_disconnected());
@@ -1299,20 +1352,22 @@ mod session_tests {
 
     #[test]
     fn test_disconnect_clears_responder() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         assert!(session.responder.is_some());
-        session.disconnect();
+        session.disconnect(&mut app);
         assert!(session.responder.is_none());
     }
 
     #[test]
     fn test_disconnect_resets_all_flags() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         session.state.logon_sent = true;
         session.state.logout_sent = true;
         session.state.logout_received = true;
 
-        session.disconnect();
+        session.disconnect(&mut app);
 
         assert!(!session.state.logon_sent);
         assert!(!session.state.logon_received);
@@ -1322,29 +1377,32 @@ mod session_tests {
 
     #[test]
     fn test_disconnect_calls_responder_disconnect() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
         assert!(!mock_state.is_disconnected());
 
-        session.disconnect();
+        session.disconnect(&mut app);
 
         assert!(mock_state.is_disconnected());
     }
 
     #[test]
     fn test_disconnect_calls_on_logout() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
 
-        session.disconnect();
+        session.disconnect(&mut app);
 
-        let calls = get_test_app(&session).calls();
+        let calls = app.calls();
         assert!(calls.contains(&"on_logout".to_string()));
     }
 
     #[test]
     fn test_disconnect_without_responder_is_safe() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.responder = None;
-        session.disconnect();
+        session.disconnect(&mut app);
         assert!(session.responder.is_none());
     }
 
@@ -1352,12 +1410,13 @@ mod session_tests {
 
     #[test]
     fn test_reset_on_disconnect_resets_seq_nums() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         session.reset_on_disconnect = true;
         session.state.next_sender_msg_seq_num = 10;
         session.state.next_target_msg_seq_num = 8;
 
-        session.disconnect();
+        session.disconnect(&mut app);
 
         assert_eq!(session.state.next_sender_msg_seq_num, 1);
         assert_eq!(session.state.next_target_msg_seq_num, 1);
@@ -1365,11 +1424,12 @@ mod session_tests {
 
     #[test]
     fn test_no_reset_on_disconnect_preserves_seq_nums() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         session.state.next_sender_msg_seq_num = 10;
         session.state.next_target_msg_seq_num = 8;
 
-        session.disconnect();
+        session.disconnect(&mut app);
 
         assert_eq!(session.state.next_sender_msg_seq_num, 10);
         assert_eq!(session.state.next_target_msg_seq_num, 8);
@@ -1377,38 +1437,41 @@ mod session_tests {
 
     #[test]
     fn test_reset_on_logon_resets_seq_nums_before_verify() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = true;
         session.reset_on_logon = true;
         session.state.next_sender_msg_seq_num = 10;
         session.state.next_target_msg_seq_num = 10;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        session.next_logon(&mut msg).unwrap();
+        session.next_logon(&mut msg, &mut app).unwrap();
 
         assert!(session.state.logon_received);
     }
 
     #[test]
     fn test_no_reset_on_logon_rejects_low_seq_num() {
-        let (mut session, _) = make_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_session();
         session.is_active = true;
         session.state.next_target_msg_seq_num = 10;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        assert!(session.next_logon(&mut msg).is_err());
+        assert!(session.next_logon(&mut msg, &mut app).is_err());
         assert!(!session.state.logon_received);
     }
 
     #[test]
     fn test_reset_on_logout_resets_seq_nums() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         session.reset_on_logout = true;
         session.state.next_sender_msg_seq_num = 10;
         session.state.next_target_msg_seq_num = 8;
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 8);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
         assert_eq!(session.state.next_sender_msg_seq_num, 1);
         assert_eq!(session.state.next_target_msg_seq_num, 1);
@@ -1416,12 +1479,13 @@ mod session_tests {
 
     #[test]
     fn test_no_reset_on_logout_preserves_seq_nums() {
-        let (mut session, _) = make_logged_on_session(Box::new(TestApplication::new()));
+        let mut app = TestApplication::new();
+        let (mut session, _) = make_logged_on_session();
         session.state.next_sender_msg_seq_num = 10;
         session.state.next_target_msg_seq_num = 8;
 
         let mut msg = make_msg("5", "TARGET", "SENDER", 8);
-        session.next_logout(&mut msg).unwrap();
+        session.next_logout(&mut msg, &mut app).unwrap();
 
         // disconnect clears flags but not seq nums; logout response uses seq 10
         assert_eq!(session.state.next_sender_msg_seq_num, 11);
@@ -1430,10 +1494,11 @@ mod session_tests {
 
     #[test]
     fn test_next_tick_noop_after_disconnect() {
-        let (mut session, mock_state) = make_logged_on_session(Box::new(TestApplication::new()));
-        session.disconnect();
+        let mut app = TestApplication::new();
+        let (mut session, mock_state) = make_logged_on_session();
+        session.disconnect(&mut app);
 
-        session.next_tick().unwrap();
+        session.next_tick(&mut app).unwrap();
 
         // No messages sent after disconnect — responder is gone
         assert!(mock_state.sent().is_empty());

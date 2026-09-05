@@ -160,7 +160,7 @@ impl SessionConfig {
             .build()
     }
 
-    pub fn to_session(&self, application: Box<dyn Application>) -> Session {
+    pub fn to_session(&self) -> Session {
         let session_id = self.to_session_id();
         let session_state = SessionState::new(
             self.heartbeat_interval.unwrap_or(30),
@@ -185,7 +185,6 @@ impl SessionConfig {
             schedule: session_schedule,
             responder: None,
             data_dict: Arc::new(dictionary),
-            app: application,
         }
     }
 }

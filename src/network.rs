@@ -1,3 +1,4 @@
+use crate::application::Application;
 use crate::session::{Session, SessionId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -6,45 +7,52 @@ use std::time::Duration;
 
 pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
 
+pub(crate) struct SessionEntry {
+    pub(crate) session: Session,
+    pub(crate) app: Box<dyn Application>,
+}
+
+impl SessionEntry {
+    pub fn new(session: Session, app: Box<dyn Application>) -> Self {
+        SessionEntry { session, app }
+    }
+}
+
 /// Immutable, thread-safe registry of all configured sessions.
 ///
 /// Built once at startup via `.collect()` (`FromIterator`) and never modified afterward —
-/// the outer `Arc<HashMap>` is read-only. Individual sessions are independently lockable
-/// (`Arc<Mutex<Session>>`), so one thread dispatching messages to session A doesn't block
-/// another thread running `next_tick` on session B.
+/// the outer `Arc<HashMap>` is read-only. Individual entries are independently lockable
+/// (`Arc<Mutex<SessionEntry>>`), so one thread dispatching messages to session A doesn't
+/// block another thread running `next_tick` on session B.
 ///
 /// `Clone` is cheap — it bumps the `Arc` refcount, not the map contents.
 #[derive(Clone, Default)]
 pub struct SessionMap {
-    sessions: Arc<HashMap<SessionId, Arc<Mutex<Session>>>>,
+    session_entries: Arc<HashMap<SessionId, Arc<Mutex<SessionEntry>>>>,
 }
 
 impl SessionMap {
     pub fn len(&self) -> usize {
-        self.sessions.len()
+        self.session_entries.len()
     }
 
-    pub fn get(&self, session_id: &SessionId) -> Option<Arc<Mutex<Session>>> {
-        self.sessions.get(session_id).cloned()
+    pub fn get(&self, session_id: &SessionId) -> Option<Arc<Mutex<SessionEntry>>> {
+        self.session_entries.get(session_id).cloned()
     }
 
-    pub fn values(&self) -> impl Iterator<Item = Arc<Mutex<Session>>> {
-        self.sessions.values().cloned()
+    pub fn values(&self) -> impl Iterator<Item = Arc<Mutex<SessionEntry>>> {
+        self.session_entries.values().cloned()
     }
-
-    // pub fn insert(&mut self, session_id: &SessionId, session: Arc<Mutex<Session>>) {
-    //     self.sessions.insert(session_id.clone(), session);
-    // }
 }
 
-impl FromIterator<(SessionId, Session)> for SessionMap {
-    fn from_iter<T: IntoIterator<Item = (SessionId, Session)>>(iter: T) -> Self {
+impl FromIterator<(SessionId, SessionEntry)> for SessionMap {
+    fn from_iter<T: IntoIterator<Item = (SessionId, SessionEntry)>>(iter: T) -> Self {
         let mut session_map = HashMap::new();
         for (session_id, session) in iter {
             session_map.insert(session_id, Arc::new(Mutex::new(session)));
         }
         Self {
-            sessions: Arc::new(session_map),
+            session_entries: Arc::new(session_map),
         }
     }
 }
@@ -56,8 +64,9 @@ pub fn start_timer(session_map: SessionMap) -> thread::JoinHandle<()> {
         loop {
             thread::sleep(Duration::from_secs(1));
             for session_arc in session_map.values() {
-                let mut session = session_arc.lock().unwrap();
-                let _ = session.next_tick();
+                let mut entry = session_arc.lock().unwrap();
+                let SessionEntry { session, app } = &mut *entry;
+                let _ = session.next_tick(app.as_mut());
             }
         }
     })
@@ -80,26 +89,19 @@ mod session_map_tests {
         fn disconnect(&self) {}
     }
 
-    fn make_test_session(sender: &str, target: &str) -> (SessionId, Session) {
+    fn make_test_entry(sender: &str, target: &str) -> (SessionId, SessionEntry) {
         let id = SessionId::new("FIX.4.3", sender, target);
         let state = SessionState::new(30, false, Instant::now());
         let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
         let dd = DataDictionary::default();
-        let app = DefaultApplication::new();
-        let session = Session::new(
-            id.clone(),
-            state,
-            schedule,
-            Some(Box::new(StubResponder)),
-            dd,
-            Box::new(app),
-        );
-        (id, session)
+        let session = Session::new(id.clone(), state, schedule, Some(Box::new(StubResponder)), dd);
+        let entry = SessionEntry::new(session, Box::new(DefaultApplication::new()));
+        (id, entry)
     }
 
     #[test]
     fn test_collect_single_session() {
-        let (id, session) = make_test_session("SENDER", "TARGET");
+        let (id, session) = make_test_entry("SENDER", "TARGET");
         let map: SessionMap = vec![(id.clone(), session)].into_iter().collect();
 
         assert!(map.get(&id).is_some());
@@ -107,8 +109,8 @@ mod session_map_tests {
 
     #[test]
     fn test_collect_multiple_sessions() {
-        let (id1, s1) = make_test_session("SENDER1", "TARGET1");
-        let (id2, s2) = make_test_session("SENDER2", "TARGET2");
+        let (id1, s1) = make_test_entry("SENDER1", "TARGET1");
+        let (id2, s2) = make_test_entry("SENDER2", "TARGET2");
         let map: SessionMap = vec![(id1.clone(), s1), (id2.clone(), s2)].into_iter().collect();
 
         assert!(map.get(&id1).is_some());
@@ -117,7 +119,7 @@ mod session_map_tests {
 
     #[test]
     fn test_get_unknown_session_returns_none() {
-        let (id, session) = make_test_session("SENDER", "TARGET");
+        let (id, session) = make_test_entry("SENDER", "TARGET");
         let map: SessionMap = vec![(id, session)].into_iter().collect();
 
         let unknown = SessionId::new("FIX.4.3", "NOBODY", "NOWHERE");
@@ -126,9 +128,9 @@ mod session_map_tests {
 
     #[test]
     fn test_values_returns_all_sessions() {
-        let (id1, s1) = make_test_session("SENDER1", "TARGET1");
-        let (id2, s2) = make_test_session("SENDER2", "TARGET2");
-        let (id3, s3) = make_test_session("SENDER3", "TARGET3");
+        let (id1, s1) = make_test_entry("SENDER1", "TARGET1");
+        let (id2, s2) = make_test_entry("SENDER2", "TARGET2");
+        let (id3, s3) = make_test_entry("SENDER3", "TARGET3");
         let map: SessionMap = vec![(id1, s1), (id2, s2), (id3, s3)].into_iter().collect();
 
         let count = map.values().count();
@@ -137,7 +139,7 @@ mod session_map_tests {
 
     #[test]
     fn test_clone_shares_same_sessions() {
-        let (id, session) = make_test_session("SENDER", "TARGET");
+        let (id, session) = make_test_entry("SENDER", "TARGET");
         let map: SessionMap = vec![(id.clone(), session)].into_iter().collect();
         let cloned_map = map.clone();
 
