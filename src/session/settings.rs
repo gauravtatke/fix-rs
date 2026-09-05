@@ -162,8 +162,18 @@ impl SessionConfig {
 
     pub fn to_session(&self, application: Box<dyn Application>) -> Session {
         let session_id = self.to_session_id();
-        let session_state = SessionState::new(self.heartbeat_interval.unwrap_or(30), self.connection_type == ConnectionType::Initiator, Instant::now());
-        let session_schedule = SessionSchedule::new(self.start_time, self.start_day, self.end_time, self.end_day, self.timezone);
+        let session_state = SessionState::new(
+            self.heartbeat_interval.unwrap_or(30),
+            self.connection_type == ConnectionType::Initiator,
+            Instant::now(),
+        );
+        let session_schedule = SessionSchedule::new(
+            self.start_time,
+            self.start_day,
+            self.end_time,
+            self.end_day,
+            self.timezone,
+        );
         let dictionary = DataDictionary::from_xml(&self.data_dictionary);
         Session {
             id: session_id,

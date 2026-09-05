@@ -28,7 +28,7 @@ impl SessionMap {
         self.sessions.get(session_id).cloned()
     }
 
-    pub fn values(&self) -> impl Iterator<Item=Arc<Mutex<Session>>> {
+    pub fn values(&self) -> impl Iterator<Item = Arc<Mutex<Session>>> {
         self.sessions.values().cloned()
     }
 
@@ -38,7 +38,7 @@ impl SessionMap {
 }
 
 impl FromIterator<(SessionId, Session)> for SessionMap {
-    fn from_iter<T: IntoIterator<Item=(SessionId, Session)>>(iter: T) -> Self {
+    fn from_iter<T: IntoIterator<Item = (SessionId, Session)>>(iter: T) -> Self {
         let mut session_map = HashMap::new();
         for (session_id, session) in iter {
             session_map.insert(session_id, Arc::new(Mutex::new(session)));

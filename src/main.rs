@@ -26,16 +26,23 @@ fn main() {
     let properties = SessionProperties::from_str(&settings_str).unwrap();
     // log::info!("{:#?}", properties);
     // creating session map of all acceptor sessions, silently dropping initiator
-    let session_map: SessionMap = properties.sessions()
+    let session_map: SessionMap = properties
+        .sessions()
         .iter()
         .filter(|(id, config)| config.connection_type() == ConnectionType::Acceptor)
         .map(|(id, config)| {
             return (id.clone(), config.to_session(Box::new(DefaultApplication::new())));
         })
         .collect();
-    let socket_addrs = properties.sessions()
+    let socket_addrs = properties
+        .sessions()
         .values()
-        .map(|config| SocketAddr::new(SOCKET_ACCEPT_HOST_IP.parse::<IpAddr>().unwrap(), config.socket_accept_port().unwrap()))
+        .map(|config| {
+            SocketAddr::new(
+                SOCKET_ACCEPT_HOST_IP.parse::<IpAddr>().unwrap(),
+                config.socket_accept_port().unwrap(),
+            )
+        })
         .collect::<HashSet<SocketAddr>>();
     log::info!("Created {} session(s)", session_map.len());
     let timer_handle = network::start_timer(session_map.clone());
