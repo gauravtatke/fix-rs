@@ -113,6 +113,7 @@ struct FixProperties {
 pub struct SessionConfig {
     // identity (required)
     begin_string: String,
+    #[getset(get_copy = "pub")]
     connection_type: ConnectionType,
     sender_comp_id: String,
     sender_sub_id: Option<String>,      // optional, no default
@@ -122,7 +123,9 @@ pub struct SessionConfig {
     target_location_id: Option<String>, // optional, no default
     session_qualifier: Option<String>,  // optional, no default
     // host & port (required per connection_type, validated in TryFrom)
+    #[getset(get_copy = "pub")]
     socket_accept_port: Option<u16>,
+    #[getset(get_copy = "pub")]
     socket_connect_port: Option<u16>,
     socket_connect_host: Option<String>,
     heartbeat_interval: Option<u32>,
@@ -145,7 +148,7 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    fn to_session_id(&self) -> SessionId {
+    pub fn to_session_id(&self) -> SessionId {
         let builder =
             SessionIdBuilder::new(&self.begin_string, &self.sender_comp_id, &self.target_comp_id);
         builder
@@ -155,6 +158,25 @@ impl SessionConfig {
             .target_location_id(self.target_location_id.as_deref())
             .session_qualifier(self.session_qualifier.as_deref())
             .build()
+    }
+
+    pub fn to_session(&self, application: Box<dyn Application>) -> Session {
+        let session_id = self.to_session_id();
+        let session_state = SessionState::new(self.heartbeat_interval.unwrap_or(30), self.connection_type == ConnectionType::Initiator, Instant::now());
+        let session_schedule = SessionSchedule::new(self.start_time, self.start_day, self.end_time, self.end_day, self.timezone);
+        let dictionary = DataDictionary::from_xml(&self.data_dictionary);
+        Session {
+            id: session_id,
+            is_active: true, // at the start, turn this ON. ready to accept
+            reset_on_logon: self.reset_on_logon,
+            reset_on_logout: self.reset_on_logout,
+            reset_on_disconnect: self.reset_on_disconnect,
+            state: session_state,
+            schedule: session_schedule,
+            responder: None,
+            data_dict: Arc::new(dictionary),
+            app: application,
+        }
     }
 }
 
@@ -338,7 +360,10 @@ impl SessionProperties {
         let mut sessions = HashMap::new();
         if let Some(session_tables) = parsed_toml.get("Session").and_then(|v| v.as_array()) {
             for (i, table) in session_tables.iter().enumerate() {
+                // get the default clone
                 let mut cloned_table = default_table.clone();
+                // extend will overwrite the properties of the session table
+                // now clone table has default values if not present in session table and session specific properties.
                 cloned_table.extend(
                     table
                         .as_table()

@@ -390,7 +390,7 @@ impl Display for Message {
 // tag boundary, not a substring of some other tag/value. Tag 8 (BeginString) is exempt
 // because it is always the literal first bytes of the message, with no leading SOH to
 // require.
-fn extract_field_value<'a>(tag: &str, s: &'a str) -> &'a str {
+fn extract_field_value<'a>(tag: &str, s: &'a str) -> Option<&'a str> {
     let pat_prefix = match tag {
         "8" => "",
         _ => std::str::from_utf8(&[SOH as u8]).unwrap(),
@@ -401,9 +401,34 @@ fn extract_field_value<'a>(tag: &str, s: &'a str) -> &'a str {
         // ignore the first SOH prefix, if any, and start from tag
         let end_pos = s[field_start_pos..].find(SOH).unwrap();
         let start_pos = s[field_start_pos..].find('=').unwrap();
-        return &s[field_start_pos + start_pos + 1..field_start_pos + end_pos];
+        return Some(&s[field_start_pos + start_pos + 1..field_start_pos + end_pos]);
     }
-    ""
+    None
+}
+
+pub fn session_id_from_raw(s: &str) -> SessionId {
+    let begin_str = extract_field_value("8", s).unwrap();
+    let sender_comp = extract_field_value("49", s).unwrap();
+    let target_comp = extract_field_value("56", s).unwrap();
+    SessionIdBuilder::new(begin_str, sender_comp, target_comp)
+        .sender_sub_id(extract_field_value("50", s))
+        .sender_location_id(extract_field_value("142", s))
+        .target_sub_id(extract_field_value("57", s))
+        .target_location_id(extract_field_value("143", s))
+        .build()
+}
+
+pub fn reverse_session_id_from_raw(s: &str) -> SessionId {
+    // sender values from message is put into target & vice-versa
+    let begin_str = extract_field_value("8", s).unwrap();
+    let sender_comp = extract_field_value("56", s).unwrap(); // incoming target
+    let target_comp = extract_field_value("49", s).unwrap(); // incoming sender
+    SessionIdBuilder::new(begin_str, sender_comp, target_comp)
+        .sender_sub_id(extract_field_value("57", s))
+        .sender_location_id(extract_field_value("143", s))
+        .target_sub_id(extract_field_value("50", s))
+        .target_location_id(extract_field_value("142", s))
+        .build()
 }
 
 // Consumes the flat, wire-ordered queue of fields into a structured `Message`, in the
@@ -472,117 +497,6 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Mes
     // recursion just for these checks.
     validate_field_values(&message, dd)?;
     Ok(message)
-}
-
-fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessResult<()> {
-    for field in message
-        .header()
-        .iter()
-        .into_iter()
-        .chain(message.body().iter().into_iter())
-        .chain(message.trailer().iter().into_iter())
-    {
-        validate_tag_value_for_type(field.tag(), field.value(), dd)?;
-        validate_tag_for_value_range(field.tag(), field.value(), dd)?;
-    }
-    Ok(())
-}
-
-fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessResult<()> {
-    if dd.is_msg_field(msg_type, tag) {
-        return Ok(());
-    } else if dd.get_field_type(tag).is_some() {
-        // this field exist, since the field_type is defined. But may be not for this message type
-        return Err(SessionRejectError::tag_not_defined_for_msg());
-    }
-    Err(SessionRejectError::undefined_tag_err())
-}
-
-fn validate_tag_for_value_range(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
-    match dd.get_field_values(tag) {
-        Some(valueSet) => {
-            if valueSet.contains(value) {
-                return Ok(());
-            }
-            Err(SessionRejectError::value_out_of_range_err())
-        }
-        None => Ok(()),
-    }
-}
-
-fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
-    match dd.get_field_type(tag) {
-        Some(fix_type) => {
-            // Grouped by which Rust primitive the FIX spec's "Data Types" section (Vol 1)
-            // says each category is built from, not by FIX category name — several
-            // categories share the same underlying parse rule.
-            let parsed_correctly = match fix_type {
-                // "int field (see definition of int above)" for all four of these.
-                FixType::Int
-                | FixType::Length
-                | FixType::NumInGroup
-                | FixType::Seqnum
-                | FixType::Tagnum => value.parse::<i64>().is_ok(),
-                // "float field (see definition of float above)" for all five of these.
-                // f64, not f32: spec requires accommodating up to 15 significant digits,
-                // which f32 (~7 significant decimal digits) can't reliably hold.
-                FixType::Float
-                | FixType::Amt
-                | FixType::Percentage
-                | FixType::Price
-                | FixType::PriceOffset
-                | FixType::Qty => value.parse::<f64>().is_ok(),
-                FixType::Char => value.chars().count() == 1,
-                // Boolean is a char restricted to exactly 'Y'/'N' per the spec — not
-                // Rust's bool parsing, which accepts "true"/"false", neither valid here.
-                FixType::Boolean => value == "Y" || value == "N",
-                // String-shaped categories (each has its own date/ISO-code sub-grammar,
-                // e.g. UtcTimestamp's YYYYMMDD-HH:MM:SS[.sss]) — not validated here, out
-                // of scope for this pass per TASKS.md's "numeric/Boolean, etc." wording.
-                FixType::Data
-                | FixType::Str
-                | FixType::Country
-                | FixType::Currency
-                | FixType::Exchange
-                | FixType::LocalMktDate
-                | FixType::MonthYear
-                | FixType::MultipleValueString
-                | FixType::UtcDate
-                | FixType::UtcTimeOnly
-                | FixType::UtcTimestamp
-                | FixType::Unknown => true,
-            };
-            if parsed_correctly {
-                Ok(())
-            } else {
-                Err(SessionRejectError::incorrect_data_format_err())
-            }
-        }
-        // Same as the earlier tag-membership check: by the time this runs, the tag's
-        // membership has already been validated upstream, so get_field_type returning
-        // None here shouldn't actually be reachable in practice.
-        None => Err(SessionRejectError::undefined_tag_err()),
-    }
-}
-
-fn validate_required_tag_missing(
-    msg_type: &str,
-    field_map: &FieldMap,
-    dd: &DataDictionary,
-) -> SessResult<()> {
-    let required_fields = dd.get_msg_required_field(msg_type);
-    match required_fields {
-        Some(req_fields) => {
-            let current_fields: Vec<u32> =
-                field_map.iter().into_iter().map(|s: &StringField| s.tag()).collect();
-            let all_pressent = req_fields.iter().all(|f| current_fields.contains(f));
-            if all_pressent {
-                return Ok(());
-            }
-            Err(SessionRejectError::required_tag_missing_err())
-        }
-        None => Ok(()),
-    }
 }
 
 // Parses one repeating group (e.g. `268=2` NoMDEntries followed by two MDEntry
@@ -802,6 +716,117 @@ fn parse_trailer(
         trailer.set_field(fld);
     }
     Ok(())
+}
+
+fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessResult<()> {
+    for field in message
+        .header()
+        .iter()
+        .into_iter()
+        .chain(message.body().iter().into_iter())
+        .chain(message.trailer().iter().into_iter())
+    {
+        validate_tag_value_for_type(field.tag(), field.value(), dd)?;
+        validate_tag_for_value_range(field.tag(), field.value(), dd)?;
+    }
+    Ok(())
+}
+
+fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessResult<()> {
+    if dd.is_msg_field(msg_type, tag) {
+        return Ok(());
+    } else if dd.get_field_type(tag).is_some() {
+        // this field exist, since the field_type is defined. But may be not for this message type
+        return Err(SessionRejectError::tag_not_defined_for_msg());
+    }
+    Err(SessionRejectError::undefined_tag_err())
+}
+
+fn validate_tag_for_value_range(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
+    match dd.get_field_values(tag) {
+        Some(value_set) => {
+            if value_set.contains(value) {
+                return Ok(());
+            }
+            Err(SessionRejectError::value_out_of_range_err())
+        }
+        None => Ok(()),
+    }
+}
+
+fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
+    match dd.get_field_type(tag) {
+        Some(fix_type) => {
+            // Grouped by which Rust primitive the FIX spec's "Data Types" section (Vol 1)
+            // says each category is built from, not by FIX category name — several
+            // categories share the same underlying parse rule.
+            let parsed_correctly = match fix_type {
+                // "int field (see definition of int above)" for all four of these.
+                FixType::Int
+                | FixType::Length
+                | FixType::NumInGroup
+                | FixType::Seqnum
+                | FixType::Tagnum => value.parse::<i64>().is_ok(),
+                // "float field (see definition of float above)" for all five of these.
+                // f64, not f32: spec requires accommodating up to 15 significant digits,
+                // which f32 (~7 significant decimal digits) can't reliably hold.
+                FixType::Float
+                | FixType::Amt
+                | FixType::Percentage
+                | FixType::Price
+                | FixType::PriceOffset
+                | FixType::Qty => value.parse::<f64>().is_ok(),
+                FixType::Char => value.chars().count() == 1,
+                // Boolean is a char restricted to exactly 'Y'/'N' per the spec — not
+                // Rust's bool parsing, which accepts "true"/"false", neither valid here.
+                FixType::Boolean => value == "Y" || value == "N",
+                // String-shaped categories (each has its own date/ISO-code sub-grammar,
+                // e.g. UtcTimestamp's YYYYMMDD-HH:MM:SS[.sss]) — not validated here, out
+                // of scope for this pass per TASKS.md's "numeric/Boolean, etc." wording.
+                FixType::Data
+                | FixType::Str
+                | FixType::Country
+                | FixType::Currency
+                | FixType::Exchange
+                | FixType::LocalMktDate
+                | FixType::MonthYear
+                | FixType::MultipleValueString
+                | FixType::UtcDate
+                | FixType::UtcTimeOnly
+                | FixType::UtcTimestamp
+                | FixType::Unknown => true,
+            };
+            if parsed_correctly {
+                Ok(())
+            } else {
+                Err(SessionRejectError::incorrect_data_format_err())
+            }
+        }
+        // Same as the earlier tag-membership check: by the time this runs, the tag's
+        // membership has already been validated upstream, so get_field_type returning
+        // None here shouldn't actually be reachable in practice.
+        None => Err(SessionRejectError::undefined_tag_err()),
+    }
+}
+
+fn validate_required_tag_missing(
+    msg_type: &str,
+    field_map: &FieldMap,
+    dd: &DataDictionary,
+) -> SessResult<()> {
+    let required_fields = dd.get_msg_required_field(msg_type);
+    match required_fields {
+        Some(req_fields) => {
+            let current_fields: Vec<u32> =
+                field_map.iter().into_iter().map(|s: &StringField| s.tag()).collect();
+            let all_pressent = req_fields.iter().all(|f| current_fields.contains(f));
+            if all_pressent {
+                return Ok(());
+            }
+            Err(SessionRejectError::required_tag_missing_err())
+        }
+        None => Ok(()),
+    }
 }
 
 // pub const SAMPLE_MSG: &str = "8=FIX.4.2|9=251|35=D|49=AFUNDMGR|56=ABROKER|34=2|52=2003061501:14:49|11=12345|1=111111|63=0|64=20030621|21=3|110=1000|111=50000|55=IBM|48=459200101|22=1|54=1|60=2003061501:14:49|38=5000|40=1|44=15.75|15=USD|59=0|10=127|";

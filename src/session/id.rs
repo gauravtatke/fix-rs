@@ -1,4 +1,5 @@
 use getset::Getters;
+use std::fmt;
 
 #[derive(Debug, Clone, Eq, Getters)]
 #[getset(get = "pub")]
@@ -27,6 +28,12 @@ impl SessionId {
             .target_location_id(self.sender_location_id.as_deref())
             .session_qualifier(self.session_qualifier.as_deref())
             .build()
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.id)
     }
 }
 

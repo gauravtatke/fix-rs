@@ -1,111 +1,86 @@
-use crate::io::*;
-use crate::message::SOH;
-use std::net::SocketAddr;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc::Sender as TioSender;
+use crate::io::fix_message_reader::FixMessageReader;
+use crate::io::tcp_responder::TcpResponder;
+use crate::message::{self, Message};
+use crate::network::SessionMap;
+use log::info;
+use std::error::Error;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::thread;
 
-#[derive(Debug)]
+/// Listens on a single bind address and spawns one thread per inbound TCP connection.
+/// Multiple sessions can share the same bind address — the first message (Logon) on
+/// each connection determines which session owns it.
 pub struct IoAcceptor {
     bind_addr: SocketAddr,
-    socket_to_app_send: TioSender<String>, // for sending message to application
-
-    _app_to_socket_send: TioBroadcastSender<String>, // used by acceptor to recv data from app
-                                                     // app_to_socket_send: TioSender<String>,           // used by app code to send data to this
+    session_map: SessionMap,
 }
 
 impl IoAcceptor {
-    pub fn create(
-        bind_addr: SocketAddr,
-        to_send: TioSender<String>,
-    ) -> (Self, TioBroadcastSender<String>) {
-        let self_bind_addr = bind_addr.clone();
-        // dropping the receiving end
-        let (tx, _) = broadcast::channel::<String>(32);
-        let acceptor = IoAcceptor {
-            bind_addr: bind_addr,
-            socket_to_app_send: to_send,
-            _app_to_socket_send: tx.clone(),
-            // app_to_socket_send: tx,
-        };
-        (acceptor, tx)
+    pub fn new(addr: SocketAddr, session_map: SessionMap) -> IoAcceptor {
+        Self {
+            bind_addr: addr,
+            session_map,
+        }
     }
 
-    pub fn start(&self) {
-        let bind_addr = self.bind_addr.clone();
-        let socket_to_app_send = self.socket_to_app_send.clone();
-        let app_to_socket_send = self._app_to_socket_send.clone();
-        tokio::spawn(async move {
-            loop {
-                let listener = match TcpListener::bind(bind_addr).await {
-                    Ok(listener) => {
-                        println!("listening on {}", bind_addr);
-                        listener
-                    }
-                    Err(e) => {
-                        println!("Error in bind: {:?}", e);
-                        continue;
-                    }
-                };
-                let (stream, _) = match listener.accept().await {
-                    Ok((stream, remote_addr)) => {
-                        println!("accepted connection from {}", remote_addr);
-                        (stream, remote_addr)
-                    }
-                    Err(e) => {
-                        println!("Error in accepting connection: {:?}", e);
-                        continue;
-                    }
-                };
-                let (owned_read, owned_write) = stream.into_split();
-                start_socket_listener_task(owned_read, socket_to_app_send.clone());
-                start_app_listner_task(owned_write, app_to_socket_send.subscribe());
-            }
-        });
+    /// Binds a `TcpListener` and blocks forever accepting connections.
+    /// Each accepted connection is handed to `handle_connection` on its own thread.
+    pub fn start(&self) -> std::io::Result<()> {
+        let listener = TcpListener::bind(self.bind_addr)?;
+        for stream in listener.incoming() {
+            let stream = stream?;
+            let session_map = self.session_map.clone();
+            let _ = thread::spawn(move || {
+                let _ = handle_connection(stream, session_map);
+            });
+        }
+        Ok(())
     }
 }
 
-fn start_socket_listener_task(read_half: OwnedReadHalf, to_app: TioSender<String>) {
-    tokio::spawn(async move {
-        let mut buf: Vec<u8> = Vec::with_capacity(1024);
-        let mut buf_reader = BufReader::new(read_half);
+/// Per-connection lifecycle: identify the session from the first (Logon) message,
+/// wire the responder, then loop reading and dispatching until the peer disconnects.
+///
+/// `stream` is split via `try_clone` — the original handle goes to `TcpResponder`
+/// (writes), the clone goes to `FixMessageReader` (reads). The session mutex is
+/// locked only for the dispatch of each message, never across a blocking read.
+fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), Box<dyn Error>> {
+    let peer_addr = stream.peer_addr()?;
+    info!("Connection accepted from {}", peer_addr);
+    let read_clone = stream.try_clone()?;
+    let mut fix_msg_reader = FixMessageReader::new(read_clone);
+
+    // First message must be Logon — used to identify which session this connection belongs to.
+    let first_msg_str = fix_msg_reader.read_message()?;
+    let reverse_id = message::reverse_session_id_from_raw(&first_msg_str);
+    if let Some(s_arc) = session_map.get(&reverse_id) {
+        info!("{} incoming: {}", reverse_id, wire_display(&first_msg_str));
+        {
+            let mut session = s_arc.lock().unwrap();
+            session.set_responder(Box::new(TcpResponder::new(stream)));
+            let mut first_msg = Message::from_str(&first_msg_str, session.dictionary())?;
+            session.next_message(&mut first_msg)?;
+        }
         loop {
-            read_message(&mut buf_reader, &mut buf).await;
-            let raw_msg = String::from_utf8_lossy(&buf[..buf.len()]).to_string();
-            to_app.send(raw_msg).await.unwrap();
-            buf.clear();
+            // Lock released before blocking read — other threads (timer, outbound sends)
+            // can still access the session while we wait for the next message.
+            let msg_str = match fix_msg_reader.read_message() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
+            info!("{} incoming: {}", reverse_id, wire_display(&msg_str));
+            let mut session = s_arc.lock().unwrap();
+            let mut msg = Message::from_str(&msg_str, session.dictionary())?;
+            session.next_message(&mut msg)?;
         }
-    });
-}
-
-fn start_app_listner_task(
-    mut write_half: OwnedWriteHalf,
-    mut from_app: TioBroadcastReceiver<String>,
-) {
-    tokio::spawn(async move {
-        println!("starting internal msg receiv");
-        // if there is message to be sent out to remote socket then read and send
-        while let Ok(msg) = from_app.recv().await {
-            println!("sending {}", &msg);
-            let _res = write_half.write_all(msg.as_bytes()).await.unwrap();
-            println!("sent {}", &msg);
-        }
-    });
-}
-
-async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R, buf: &mut Vec<u8>) {
-    loop {
-        let bytes_read = reader.read_until(SOH as u8, buf).await.unwrap();
-        // println!("bytes received: {:?}", &buf);
-        let slice_start = buf.len() - bytes_read;
-        let slice_end = buf.len();
-        // last read data
-        let byte_slice = &buf[slice_start..slice_end];
-        if byte_slice.starts_with(&[49, 48, 61]) {
-            // b"10="
-            // checksum tag found, break
-            break;
-        }
+        info!("{} event: Connection closed ({})", reverse_id, peer_addr);
+        s_arc.lock().unwrap().disconnect();
+    } else {
+        info!("No session found for {}, dropping connection from {}", reverse_id, peer_addr);
     }
+    Ok(())
+}
+
+fn wire_display(raw: &str) -> String {
+    raw.replace('\x01', "|")
 }

@@ -224,12 +224,67 @@ trait for handing messages to/from user code. Reference: `session_context/qfj-se
 callbacks fire at the right points, timer logic generates heartbeats and test requests on schedule. All testable without
 real sockets.
 
-## M5 — Sync networking (sketch)
+## M5 — Sync networking
 
-Replaces the disposable Tokio prototype in `network.rs`/`io/` with `std::net::TcpStream` + `std::thread`. Likely
-sub-tasks: (a) one blocking read+process thread per session, (b) a shared timer thread for heartbeat/test-request
-interval checks (mirrors QuickFIX/J's single shared timer), (c) a `Mutex`-guarded writer half of the socket since both
-the per-session thread and the timer thread need to write, (d) acceptor side, (e) initiator side.
+Replaces the disposable Tokio prototype in `network.rs`/`io/` with `std::net::TcpStream` + `std::thread`.
+
+- [x] **5.1 — Delete Tokio prototype code.** Old async acceptor, broadcast channels, and task-spawning code removed.
+- [x] **5.2 — `FixMessageReader`.** `src/io/fix_message_reader.rs`: `FixMessageReader<R: Read>` wraps `BufReader`,
+  reads SOH-delimited FIX bytes until checksum tag `10=XXX\x01`. 4 tests.
+- [x] **5.3 — `TcpResponder`.** `src/io/tcp_responder.rs`: `Responder` impl wrapping `Mutex<TcpStream>`. 5 tests.
+- [x] **5.4 — `SessionMap`.** `src/network.rs`: `Arc<HashMap<SessionId, Arc<Mutex<Session>>>>`, built via
+  `FromIterator`, immutable after construction. 6 tests.
+- [x] **5.5 — `IoAcceptor`.** `src/io/acceptor.rs`: binds `TcpListener`, spawns reader thread per connection,
+  dispatches via `reverse_session_id` lookup. Supporting changes: `Session::set_responder()`,
+  `session_id_from_raw()`/`reverse_session_id_from_raw()` in `message.rs`.
+- [x] **5.6 — Timer thread.** `src/network.rs`: `start_timer()` spawns background thread, sleep 1s → tick all sessions.
+- [x] **5.7 — Wire `main.rs` + integration test with QFJ Banzai.**
+  - `SessionConfig::to_session()` constructs Session from config.
+  - `connection_type()` and `socket_accept_port()` getters exposed on `SessionConfig`.
+  - `main.rs` wired: parse config → build `SessionMap` → start timer → spawn one `IoAcceptor` thread per bind address →
+    join all.
+  - `generate_logon()` fixed to include `EncryptMethod=0` (tag 98) — Banzai rejected Logon without it.
+  - `Display` impl added for `SessionId`.
+  - `SessionMap::len()` added.
+  - Integration-tested against QFJ Banzai (initiator): Logon handshake succeeds, heartbeat exchange runs cleanly with
+    sequence numbers in lockstep.
+
+- [x] **5.8 — Disconnect cleanup.**
+  When `handle_connection`'s read loop breaks (EOF or error), lock the session and clean up:
+  clear the responder (`self.responder = None`), reset logon/logout flags (`logon_sent`,
+  `logon_received`, `logout_sent`, `logout_received` → false), and call `app.on_logout()`.
+  This stops the timer from sending heartbeats into a dead socket and leaves the session in a
+  state where a new connection can re-logon cleanly.
+  - `Session::disconnect()` method centralizes teardown: calls `responder.disconnect()`, sets
+    responder to `None`, resets all logon/logout flags, calls `app.on_logout()`.
+  - `next_logout` and all `next_tick` disconnect paths now route through `disconnect()`.
+  - `handle_connection` in `acceptor.rs` calls `session.disconnect()` after the read loop breaks.
+  - Test infrastructure refactored: `MockResponder` in `session_tests` now uses a shared
+    `MockState` (`Arc<Mutex>`) pattern — state survives after `Session` drops the responder on
+    disconnect, eliminating the unsafe `get_mock_responder` pointer cast.
+  - 6 new disconnect tests added, all existing tests updated. 166 tests passing.
+
+- [x] **5.9 — Apply reset flags.**
+  *Depends on 5.8.* Act on the `reset_on_disconnect`, `reset_on_logon`, and `reset_on_logout`
+  config flags that are already stored in `Session` but never used:
+    - `reset_on_disconnect`: in the disconnect cleanup path (5.8), if true → `state.reset()`
+      (zeroes seq nums back to 1).
+    - `reset_on_logon`: in `next_logon`, before processing the inbound Logon → `state.reset()`.
+      For acceptors this fires on receiving a Logon; for initiators it would fire before sending.
+    - `reset_on_logout`: in `next_logout`, after processing the inbound Logout → `state.reset()`.
+  These are operational choices agreed between counterparties (not part of the FIX spec itself).
+  When all three are false (default), seq nums persist across reconnections — which requires
+  ResendRequest support (deferred to v1.2+). For v1, setting `reset_on_logon = true` in
+  `FixCfg.toml` is the practical workaround. Done when: unit tests verify each flag triggers
+  `state.reset()` at the right point, and Banzai reconnect with `reset_on_logon = true` starts
+  from seq 1 on both sides.
+
+- [x] **5.10 — Cleanup.** Tokio dependency already removed from `Cargo.toml` and `src/io/mod.rs`
+  (cleaned up during 5.1). No remaining references in the codebase.
+
+**M5 exit criteria**: Acceptor binds, accepts TCP connections, completes Logon handshake, exchanges heartbeats with a
+real QFJ initiator. Reconnections handled cleanly (disconnect detected, session state reset per config flags).
+Initiator support deferred to a later milestone.
 
 ## M6 — Close out v1 (sketch)
 

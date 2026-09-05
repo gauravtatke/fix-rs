@@ -15,7 +15,7 @@ use crate::session::*;
 // Inbound (counterparty → engine → application):
 //   from_admin — admin message received; can reject logon (RejectLogon)
 //   from_app   — app message received; can reject (AppError)
-pub trait Application {
+pub trait Application: Send {
     fn on_create(&mut self, session_id: &SessionId);
     fn on_logon(&mut self, session_id: &SessionId);
     fn on_logout(&mut self, session_id: &SessionId);
