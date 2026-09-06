@@ -11,7 +11,7 @@ pub use settings::*;
 use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
 use crate::message::{Message, StringField};
-use crate::quickfix_errors::SessionError;
+use crate::quickfix_errors::{SendError, SessionError};
 use crate::session::schedule::SessionSchedule;
 use log::{info, warn};
 use state::SessionState;
@@ -132,7 +132,15 @@ impl Session {
     // serializes and pushes through the responder. DonotSend is a normal "skip"
     // — the message is dropped and the sequence number is left untouched — not
     // an error, so it never tears down the session.
-    pub(crate) fn send_app_message(&mut self, mut msg: Message) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn send_app_message(&mut self, mut msg: Message) -> Result<(), SendError> {
+        // Mirror QFJ sendRaw: app messages only go out on a logged-on session
+        // with a live connection. Guarding here is what makes external-thread
+        // senders (a market-data feed calling SessionMap::send) safe — without
+        // it, a race against a not-yet-connected or just-disconnected session
+        // would panic on send_raw's `responder.unwrap()`.
+        if self.responder.is_none() || !self.state.logon_received {
+            return Err(SendError::NotLoggedOn);
+        }
         self.initialize_header(&mut msg);
         if self.app.on_app_msg_sending(&self.id, &mut msg).is_err() {
             info!("{} outgoing app message vetoed (DonotSend)", self.id);
@@ -1631,5 +1639,33 @@ mod session_tests {
 
         assert!(mock_state.sent().is_empty());
         assert_eq!(session.state.next_sender_msg_seq_num, seq_before);
+    }
+
+    // QFJ-style outbound market-data push: a feed thread that holds ONLY a
+    // SessionMap clone (no session or app reference) streams a snapshot on its
+    // own thread, whenever data is available. This is the fix-rs analogue of
+    // Session.sendToTarget, and the reason app-in-session needs no back-reference
+    // for unsolicited sends — the producer drives, via the registry + lock.
+    #[test]
+    fn test_session_map_send_pushes_from_external_thread() {
+        use crate::network::SessionMap;
+
+        let (session, mock_state) = make_logged_on_session();
+        let id = session.id.clone();
+        let map: SessionMap = vec![(id.clone(), session)].into_iter().collect();
+
+        let feed_map = map.clone();
+        let feed_id = id.clone();
+        std::thread::spawn(move || {
+            let mut md = Message::new();
+            md.header_mut().set_field(StringField::new(35, "W")); // MarketDataSnapshot
+            feed_map.send(&feed_id, md).unwrap();
+        })
+        .join()
+        .unwrap();
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "W"));
     }
 }

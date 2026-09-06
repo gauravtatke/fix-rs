@@ -272,3 +272,14 @@ pub enum AppError {
     #[error("Field value does not parse to the expected value")]
     IncorrectDataFormat,
 }
+
+// Failure modes for an outbound app-message send driven from outside the engine
+// (the fix-rs analogue of QFJ's Session.sendToTarget returning false /
+// throwing SessionNotFound).
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error("No session found for the given SessionId")]
+    SessionNotFound,
+    #[error("Session is not logged on; message not sent")]
+    NotLoggedOn,
+}
