@@ -1537,7 +1537,11 @@ mod session_tests {
 
     impl ScriptedApp {
         fn new(feed: VecDeque<Message>, respond: bool, veto: bool) -> Self {
-            Self { feed, respond, veto }
+            Self {
+                feed,
+                respond,
+                veto,
+            }
         }
     }
 
@@ -1552,10 +1556,18 @@ mod session_tests {
         fn on_logon(&mut self, _s: &SessionId) {}
         fn on_logout(&mut self, _s: &SessionId) {}
         fn on_admin_msg_sending(&mut self, _s: &SessionId, _m: &mut Message) {}
-        fn on_admin_msg_received(&mut self, _s: &SessionId, _m: &Message) -> Result<(), RejectLogon> {
+        fn on_admin_msg_received(
+            &mut self,
+            _s: &SessionId,
+            _m: &Message,
+        ) -> Result<(), RejectLogon> {
             Ok(())
         }
-        fn on_app_msg_sending(&mut self, _s: &SessionId, _m: &mut Message) -> Result<(), DonotSend> {
+        fn on_app_msg_sending(
+            &mut self,
+            _s: &SessionId,
+            _m: &mut Message,
+        ) -> Result<(), DonotSend> {
             if self.veto { Err(DonotSend) } else { Ok(()) }
         }
         fn on_app_msg_received(

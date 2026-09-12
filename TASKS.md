@@ -288,12 +288,20 @@ support deferred to a later milestone.
 
 ## M6 — Outbound app messages + close out v1
 
-Wire application-level outbound messages end-to-end. Requires an architectural refactor:
-extract `Box<dyn Application>` from Session into a sibling `SessionEntry` struct, using Rust's split-borrow pattern so
-Session and Application can be mutably accessed independently from a single lock. M3 (typed message codegen) is
-deferred — v1 uses the raw `Message` API.
+Wire application-level outbound messages end-to-end. M3 (typed message codegen) is deferred — v1 uses the raw `Message`
+API.
 
-See `session_context/2026-09-05-outbound-design.md` for the full design rationale.
+**Design pivot (2026-09-06):** two approaches were explored for breaking the Session↔Application bidirectional problem:
+- **Option A — SessionEntry:** pull `Box<dyn Application>` out of Session into a sibling `SessionEntry { session, app }`
+  and use split borrows to touch both from one lock.
+- **Option B — app-in-session (CHOSEN):** keep `app: Box<dyn Application>` as a field of `Session`. This is *not* a cycle,
+  because `on_app_msg_received` returns `Vec<Message>` — the app returns the messages it wants sent and the engine sends
+  them, so there is no `app → session` edge. No `SessionEntry`, no split-borrow ceremony.
+
+Option B won on maintainer ergonomics (simpler to reason about and extend; app-developer experience is identical either
+way; performance is a wash). Option A was built first and is preserved on branch `explore/session-entry-outbound-msg`
+for reference. See `session_context/2026-09-05-outbound-design.md` (Addendum + "Decision (2026-09-06)") for the full
+rationale.
 
 - [x] **6.1 — Rename Application trait methods.**
   Rename for clarity (QFJ's `from`/`to` convention is non-obvious):
@@ -312,51 +320,123 @@ See `session_context/2026-09-05-outbound-design.md` for the full design rational
   `TestApplication` in tests (same). In `dispatch_to_app`, collect the returned `Vec` but don't send yet — just drop it.
   This is a seam for 6.4. Done when: `cargo test` green, return type updated everywhere.
 
-- [x] **6.3 — Extract Application from Session into SessionEntry.**
-  *Depends on 6.2.* The big structural change:
-    - Remove `app: Box<dyn Application>` field from `Session` struct.
-    - Remove `app` parameter from `Session::new()`.
-    - Add `app: &mut dyn Application` parameter to all Session methods that use it:
-      `next_message`, `next_logon`, `next_logout`, `next_heartbeat`, `next_test_request`,
-      `next_tick`, `disconnect`, `dispatch_to_app`, `generate_logon`, `generate_logout`,
-      `generate_heartbeat`, `generate_test_request`.
-    - Create `SessionEntry { session: Session, app: Box<dyn Application> }`.
-    - Update `SessionMap` to hold `Arc<Mutex<SessionEntry>>` instead of `Arc<Mutex<Session>>`.
-    - Update `FromIterator` for `SessionMap`.
-    - Update `handle_connection` in `src/io/acceptor.rs`: lock gives `&mut SessionEntry`, use split borrows
-      (`entry.session.method(&mut msg, &mut *entry.app)`).
-    - Update `start_timer` in `src/network.rs`: same split-borrow pattern for `next_tick`.
-    - Update `SessionConfig::to_session` in `src/session/settings.rs`: returns `Session`
-      only (no app). Caller wraps with `SessionEntry`.
-    - Update `main.rs`: build `SessionEntry` per session, collect into `SessionMap`.
-    - Update all tests: construct Session and app separately, pass `&mut app` into method calls. `TestApplication` is
-      now a local variable — no more unsafe pointer casts via
-      `get_test_app`. Done when: `cargo test` green, `Session` struct has no `app` field, all interaction with
-      Application goes through the `app` parameter.
+- [x] **6.3 — (Superseded by the Option B pivot.) Extract Application into SessionEntry.**
+  *Was done, then reverted.* The SessionEntry extraction (remove `app` field, thread `app: &mut dyn Application` through
+  ~12 methods, `SessionMap<Arc<Mutex<SessionEntry>>>`, split-borrow at call sites) was implemented and is preserved on
+  branch `explore/session-entry-outbound-msg`. We then chose **Option B (app-in-session)** instead, so on `dev` the app
+  is back as a `Session` field and there is no `SessionEntry`. What actually replaced this task:
+    - `Session` owns `app: Box<dyn Application>` again; methods use `self.app` (no `app` parameter).
+    - `SessionMap` holds `Arc<Mutex<Session>>`; `SessionEntry` deleted; acceptor/timer lose the destructure.
+    - `SessionConfig::to_session(app)` takes the app and stores it on the Session.
+    - Tests use a shared `AppSpy` handle (the codebase's existing `MockState` pattern) since the app moves into Session.
 
-- [ ] **6.4 — Add `send_app_message` + wire outbound responses.**
-  *Depends on 6.3.* New public method `Session::send_app_message(&mut self, msg: Message,
-  app: &mut dyn Application)`: calls `initialize_header`, calls `app.on_app_msg_sending`
-  (can cancel via `DonotSend`), calls `send_raw`. Update `dispatch_to_app` to iterate the
-  `Vec<Message>` returned by `on_app_msg_received` and call `send_app_message` for each. Done when: tests verify that
-  messages returned from `on_app_msg_received` are serialized and captured by MockResponder with correct headers
-  (BeginString, CompIDs, MsgSeqNum).
+- [x] **6.4 — Add `send_app_message` + wire outbound responses.**
+  New method `Session::send_app_message(&mut self, msg: Message) -> Result<(), SendError>` (app is `self.app`, not a
+  parameter): guards on responder-present + logged-on (mirrors QFJ `sendRaw`'s `isLoggedOn`), calls `initialize_header`,
+  calls `self.app.on_app_msg_sending` (`DonotSend` = silent skip, **not** an error/disconnect), calls `send_raw`.
+  `dispatch_to_app` drains the `Vec<Message>` from `on_app_msg_received` and sends each. Covered by
+  `test_request_response_send_via_return_value` (V→W returned and captured) and `test_donotsend_skips_without_error_or_seqnum_bump`.
+  *Follow-up:* strengthen the response-path test to assert stamped headers (BeginString/CompIDs/MsgSeqNum), per the
+  original "done when".
 
-- [ ] **6.5 — Write MarketDataApp sample application.**
-  *Depends on 6.4.* New `src/sample_app.rs` (or similar): struct `MarketDataApp` implementing
-  `Application`. `on_app_msg_received` handles MsgType `V` (MarketDataRequest) → builds and returns a `W`
-  (MarketDataSnapshotFullRefresh) with echoed MDReqID (tag 262) and dummy market data. All other callbacks are no-ops.
-  Wire into `main.rs` replacing
-  `DefaultApplication`. Done when: `cargo build` clean, `main.rs` starts the acceptor with `MarketDataApp`.
+- [x] **6.4b — (Bonus, not originally scoped.) External / streaming outbound send path.**
+  Added while studying how QFJ streams market data (`session_context/qfj-outbound-market-data.md`): the push model for
+  unsolicited sends (a market-data feed sending whenever data is available, not on a poll).
+    - `SessionMap::send(&self, sid, msg) -> Result<(), SendError>` — the `Session.sendToTarget` analogue: registry
+      lookup + per-session lock + `send_app_message`. Callable from any thread holding a `SessionMap` clone.
+    - `SendError { SessionNotFound, NotLoggedOn }` in `quickfix_errors.rs`.
+    - `Application::poll_outbound` (default empty) + timer wiring — a low-rate seam only; **not** the market-data path.
+    - Tests: external-thread push (`test_session_map_send_pushes_from_external_thread`), `NotLoggedOn`/`SessionNotFound`
+      guards, `poll_outbound` streaming.
+    - Rule to remember: the per-session `Mutex` is not reentrant, so never call `SessionMap::send` for a session's own id
+      from inside that session's callback (deadlock) — use the `Vec<Message>` return path there.
 
-- [ ] **6.6 — Integration test with QFJ Banzai.**
-  *Depends on 6.5.* End-to-end against a QFJ Banzai initiator:
-    1. Logon handshake completes (already working from M5)
-    2. Banzai sends MarketDataRequest (35=V)
-    3. fix-rs acceptor responds with MarketDataSnapshotFullRefresh (35=W)
-    4. Heartbeat exchange continues normally
-    5. Logout cleanly This is the v1 "done" gate. Done when: the above sequence runs without errors on both sides.
+- [x] **6.5 — Sample application (`src/sample_app.rs`).**
+  `SampleApp` implements `Application`. `on_app_msg_received` handles two inbound app types:
+    - `V` (MarketDataRequest) → `W` (MarketDataSnapshotFullRefresh) echoing MDReqID (262) + a `NoMDEntries` (268)
+      group with dummy bid/offer entries.
+    - `D` (NewOrderSingle) → two ExecutionReports (35=8): a New ack (`150=0/39=0`, LeavesQty=OrderQty) followed by a
+      full fill (`150=F/39=2`, LeavesQty=0, CumQty=qty, LastPx/LastQty), echoing ClOrdID/Side/Symbol.
+    - all other types → `Ok(vec![])`.
+  Inbound field reads use `?` + `AppError::FieldNotFound { tag }` (no panics on malformed peer messages). Wired into
+  `main.rs` (replaces `DefaultApplication`). 7 unit tests. *Note:* the task originally scoped only V→W, but Banzai is an
+  order-entry client (no MarketData UI), so `D`→`8` was added as the flow an actual QFJ counterparty can drive; V→W is
+  kept and unit-tested for a future MarketData-capable simulator.
 
-**M6 exit criteria**: Application-level messages flow end-to-end between a real QFJ initiator and the fix-rs acceptor.
-Session doesn't own Application. No ownership cycles. Architecture supports future unsolicited sends without structural
-changes.
+- [x] **6.6 — Integration test with QFJ Banzai.**
+  End-to-end against a QFJ Banzai initiator (BANZAI→EXEC, FIX.4.3, port 9879):
+    1. Logon handshake completes.
+    2. Banzai sends `NewOrderSingle (35=D)` from its order-entry UI.
+    3. fix-rs acceptor responds with two `ExecutionReport (35=8)` — New ack then full fill.
+    4. Banzai's order row flips to Filled and an execution appears in its Execution blotter.
+    5. Heartbeat exchange continues normally.
+  *(V→W was not exercised live — Banzai has no MarketData client; it is covered by unit tests instead.)*
+
+**M6 exit criteria**: **MET.** Application-level messages flow end-to-end between a real QFJ initiator and the fix-rs
+acceptor (`D`→`8` order/execution round trip, verified in Banzai's UI). No ownership cycle — the app never references
+the session; it returns messages and the engine sends them (Option B). Architecture supports unsolicited/streaming
+sends via `SessionMap::send` (6.4b).
+
+**v1 COMPLETE** — M1, M2, M4, M5, M6 done (M3 typed-codegen deferred by design; 1.6 SOH-in-Data stretch open).
+
+## M7 — Automatic session-level error responses (post-v1 / v1.1)
+
+**Why this exists.** As of v1, the engine *detects* every inbound error but never *responds* on the wire. In
+`handle_connection`, both `Message::from_str(...)?` (parse/validation errors — `SessionRejectError`) and
+`session.next_message(...)?` (session errors — `SessionError`; and app errors — `AppError`) propagate via `?`, which
+ends the connection thread — the TCP connection is **silently dropped**. No `Reject (35=3)`, no `BusinessMessageReject
+(35=j)`, no `Logout (35=5)` with a reason ever goes out. This was a deliberate v1 simplification (see task 4.7, which
+skipped Reject generation). Our tests only assert the error is *returned/detected*, never that a corrective FIX message
+is emitted — because the engine emits none.
+
+**Scope boundary.** App-level rejects (a broken counterparty contract) are the application builder's responsibility —
+the app returns its own reject/response via the `Vec<Message>` from `on_app_msg_received`. This milestone is only about
+the errors the **engine must handle automatically**, before/without the app ever seeing the message: parse/validation
+failures and session-level failures.
+
+**Correct FIX 4.3 behavior by error class** (Vol 1/2):
+
+| Error class (current type) | Correct response | Today |
+|---|---|---|
+| Invalid field: bad type, value out of range, required tag missing, tag out of order (`SessionRejectError`) | **Reject (35=3)** with `RefSeqNum(45)`, `SessionRejectReason(373)`, opt `RefTagID(371)`; increment target seq; keep connection | drops connection |
+| Bad checksum / body length (`SessionRejectError`) | **Silently drop** the message (garbled → RefSeqNum untrusted); do NOT Reject; keep connection | drops connection |
+| CompID mismatch (`SessionError`) | **Logout (35=5)** with text, then disconnect | disconnects, no Logout sent |
+| MsgSeqNum too low, no PossDup (`SessionError`) | **Logout** + disconnect (fatal) | disconnects, no Logout sent |
+| MsgSeqNum too high | **ResendRequest (35=2)** — deferred to a later milestone (needs message store/resend) | — |
+| App-level (`AppError`) | app's responsibility (return a reject message), or engine **BusinessMessageReject (35=j)** as a fallback | drops connection |
+
+**The architectural change.** Errors currently propagate *up and out* of the session. To respond, the session must
+*catch* the error and translate it into an outbound message, then continue (recoverable) or disconnect (fatal) — instead
+of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal** classification.
+
+- [ ] **7.1 — `generate_reject` builder.**
+  `Session::generate_reject(ref_seq_num, reason: SessionRejectReason, ref_tag: Option<u32>)` — sibling of the existing
+  admin builders. Stamps `35=3` + tags 45/373 (+ 371 when known), runs through `initialize_header`/`send_raw`. The
+  `SessionRejectReason` enum (made `pub` in task 1.2) maps 1:1 to tag 373 values. Done when: a MockResponder test
+  captures a well-formed `35=3` with the right 45/373.
+
+- [ ] **7.2 — Classify errors: recoverable vs fatal.**
+  Decide, per `SessionRejectError`/`SessionError` variant, whether it yields a Reject-and-continue, a Logout-and-
+  disconnect, or a silent-drop (checksum/body-length). Capture the mapping in one place (a function or match) so it's
+  auditable. Done when: the classification is documented and unit-tested variant-by-variant.
+
+- [ ] **7.3 — Wire error → response in the dispatch path.**
+  Restructure so parse + session errors are caught at the session (not `?`-ed to `handle_connection`): recoverable →
+  `generate_reject` + increment target seq + continue the read loop; fatal → `generate_logout(reason)` + `disconnect`;
+  checksum/body-length → drop the message, keep the connection. `handle_connection` stops treating every error as a
+  connection-killer. Done when: feeding a bad message via `next_message` (or the parse layer) leaves the session alive
+  and emits the correct message.
+
+- [ ] **7.4 — (Optional) `generate_business_reject` (35=j).**
+  Engine-level fallback for `AppError` when the app returns an error rather than its own reject message. Decide the
+  boundary vs. app responsibility. Done when: an `AppError` from `on_app_msg_received` produces a `35=j` (or is
+  explicitly left to the app, documented).
+
+- [ ] **7.5 — Tests + Banzai integration.**
+  Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). Live check:
+  send a malformed/invalid order from Banzai and confirm the Reject/Logout appears in Banzai's log and the connection
+  behaves correctly (stays up for a Reject, tears down for a Logout).
+
+**M7 exit criteria**: inbound messages that fail engine-level validation produce the correct FIX response
+(Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is unit-tested and
+verified against Banzai. Too-high seq (ResendRequest) and full resend remain deferred.

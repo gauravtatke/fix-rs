@@ -8,11 +8,12 @@ mod io;
 mod message;
 mod network;
 mod quickfix_errors;
+mod sample_app;
 mod session;
 
-use crate::application::DefaultApplication;
 use crate::io::acceptor::IoAcceptor;
 use crate::network::{SOCKET_ACCEPT_HOST_IP, SessionMap};
+use crate::sample_app::SampleApp;
 use crate::session::{ConnectionType, SessionProperties};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -31,7 +32,7 @@ fn main() {
         .iter()
         .filter(|(id, config)| config.connection_type() == ConnectionType::Acceptor)
         .map(|(id, config)| {
-            let session = config.to_session(Box::new(DefaultApplication::new()));
+            let session = config.to_session(Box::new(SampleApp::new()));
             (id.clone(), session)
         })
         .collect();

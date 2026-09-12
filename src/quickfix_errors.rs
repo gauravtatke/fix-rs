@@ -267,8 +267,8 @@ pub struct RejectLogon {
 pub enum AppError {
     #[error("Unsupported message type")]
     UnsupportedMessageType,
-    #[error("Required field is missing")]
-    FieldNotFound,
+    #[error("Required field is missing: {tag}")]
+    FieldNotFound { tag: u32 },
     #[error("Field value does not parse to the expected value")]
     IncorrectDataFormat,
 }

@@ -91,7 +91,7 @@ pub struct FieldMap {
 
 impl FieldMap {
     #[inline]
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
