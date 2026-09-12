@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use crate::data_dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::fields::*;
-use crate::quickfix_errors::{FieldError, SessionRejectReason};
+use crate::fix_errors::{FieldError, SessionRejectReason};
 use crate::session::{SessionId, SessionIdBuilder};
 
 type SessionResult<T> = Result<T, SessionRejectReason>;
@@ -890,7 +890,7 @@ mod message_test {
     use super::*;
     #[cfg(test)]
     use crate::data_dictionary::*;
-    use crate::quickfix_errors::SessionRejectReason;
+    use crate::fix_errors::SessionRejectReason;
     use assert_matches::*;
     use lazy_static::*;
 

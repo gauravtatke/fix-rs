@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 
 use crate::message::*;
-use crate::quickfix_errors::{AppError, DonotSend, RejectLogon};
+use crate::fix_errors::{AppError, DonotSend, RejectLogon};
 use crate::session::*;
 
 // Naming: on_<admin|app>_msg_<sending|received>.

@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::str::FromStr;
 
-use crate::quickfix_errors::*;
+use crate::fix_errors::*;
 
 #[derive(Debug, Clone, Copy)]
 pub enum FixType {

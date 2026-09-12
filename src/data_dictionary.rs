@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::iter::Iterator;
 use std::{fmt, fs, path::Path, str::FromStr};
 
-use crate::quickfix_errors::*;
+use crate::fix_errors::*;
 use getset::{CopyGetters, Getters};
 use indexmap::IndexSet;
 use roxmltree::{Document, Node};

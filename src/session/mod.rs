@@ -11,7 +11,7 @@ pub use settings::*;
 use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
 use crate::message::{Message, StringField};
-use crate::quickfix_errors::{SendError, SessionError, SessionRejectReason};
+use crate::fix_errors::{SendError, SessionError, SessionRejectReason};
 use crate::session::schedule::SessionSchedule;
 use log::{info, warn};
 use state::SessionState;
@@ -557,7 +557,7 @@ mod responder_tests {
 mod session_tests {
     use super::*;
     use crate::application::Application;
-    use crate::quickfix_errors::{AppError, DonotSend, RejectLogon};
+    use crate::fix_errors::{AppError, DonotSend, RejectLogon};
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::Duration;

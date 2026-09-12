@@ -7,7 +7,7 @@ mod data_dictionary;
 mod io;
 mod message;
 mod network;
-mod quickfix_errors;
+mod fix_errors;
 mod sample_app;
 mod session;
 
