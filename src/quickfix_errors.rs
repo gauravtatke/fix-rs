@@ -1,178 +1,133 @@
 use std::num::ParseIntError;
 
-#[derive(Debug, thiserror::Error)]
-#[error("Session Level Reject Reason - {:?}", .kind)]
-pub struct SessionRejectError {
-    kind: SessionRejectReason,
-    // tag: Option<String>,
-    // value: Option<String>,
-    // pub source: Option<Box<dyn Error>>,
-}
-
-impl SessionRejectError {
-    pub fn kind(&self) -> SessionRejectReason {
-        self.kind
-    }
-
-    pub fn invalid_tag_err() -> Self {
-        // tag not parsed properly
-        SessionRejectError {
-            kind: SessionRejectReason::InvalidTag,
-        }
-    }
-
-    pub fn required_tag_missing_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::RequiredTagMissing,
-        }
-    }
-
-    pub fn undefined_tag_err() -> Self {
-        // tag not defined in Xml
-        SessionRejectError {
-            kind: SessionRejectReason::UndefinedTag,
-        }
-    }
-
-    pub fn tag_without_value_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::TagSpecifiedWithoutValue,
-        }
-    }
-
-    pub fn value_out_of_range_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::ValueOutOfRange,
-        }
-    }
-
-    pub fn incorrect_data_format_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::IncorrectDataFormatForValue,
-        }
-    }
-
-    pub fn decryption_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::DecryptionProblem,
-        }
-    }
-
-    pub fn signature_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::SignatureProblem,
-        }
-    }
-
-    pub fn comp_id_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::CompIdProblem,
-        }
-    }
-
-    pub fn sending_time_accuracy_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::SendingTimeAccuracyProblem,
-        }
-    }
-
-    pub fn invalid_msg_type_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::InvalidMessageType,
-        }
-    }
-
-    pub fn invalid_body_len_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::InvalidBodyLength,
-        }
-    }
-
-    pub fn invalid_checksum() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::InvalidChecksum,
-        }
-    }
-
-    pub fn tag_not_defined_for_msg() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::TagNotDefinedForMsgType,
-        }
-    }
-
-    pub fn xml_validation_err() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::XmlValidationError,
-        }
-    }
-
-    pub fn tag_appear_more_than_once() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::TagAppearsMoreThanOnce,
-        }
-    }
-
-    pub fn tag_specified_out_of_order() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::TagSpecifiedOutOfOrder,
-        }
-    }
-
-    pub fn repeating_grp_out_of_order() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::RepeatingGroupsOutOfOrder,
-        }
-    }
-
-    pub fn incorrect_num_in_grp_count() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup,
-        }
-    }
-
-    pub fn non_data_field_contains_soh() -> Self {
-        SessionRejectError {
-            kind: SessionRejectReason::NonDataFieldIncludeSOHChar,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+// FIX-level reject reasons raised during message parsing/validation. This enum
+// IS the error type (it derives `Error`) — each variant carries exactly the
+// context it needs: the offending `tag` for field-level problems, a free-form
+// `msg` for the catch-all cases, and nothing for whole-message problems.
+//
+// `InvalidBodyLength`/`InvalidChecksum` are *garbled-message* markers, not
+// Reject(35=3) reasons — a garbled message can't be trusted enough to reference
+// in a Reject, so the FIX-correct handling is to drop it. They have no tag-373
+// wire code (see `code`).
+//
+// No `Copy` because `Other`/`InvalidUnsupportedAppVersion` own a `String`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SessionRejectReason {
-    // #[error("Invalid tag")]
-    InvalidTag,
-    // #[error("Required tag missing")]
-    RequiredTagMissing,
-    // #[error("Undefined tag")]
-    UndefinedTag,
-    // #[error("Tag not defined for message, tag")]
-    TagNotDefinedForMsgType,
-    // #[error("No value for tag")]
-    TagSpecifiedWithoutValue,
-    // #[error("Value out of range for tag")]
-    ValueOutOfRange,
-    // #[error("Incorrect data format")]
-    IncorrectDataFormatForValue,
-    // #[error("Decryption problem")]
+    #[error("Invalid tag number: {tag}")]
+    InvalidTag { tag: u32 },
+    #[error("Required tag missing: {tag}")]
+    RequiredTagMissing { tag: u32 },
+    #[error("Tag {tag} not defined for this message type")]
+    TagNotDefinedForMsgType { tag: u32 },
+    #[error("Undefined tag: {tag}")]
+    UndefinedTag { tag: u32 },
+    #[error("Tag {tag} specified without a value")]
+    TagSpecifiedWithoutValue { tag: u32 },
+    #[error("Value out of range for tag {tag}")]
+    ValueOutOfRange { tag: u32 },
+    #[error("Incorrect data format for tag {tag}")]
+    IncorrectDataFormatForValue { tag: u32 },
+    #[error("Decryption problem")]
     DecryptionProblem,
-    // #[error("Signature problem")]
+    #[error("Signature problem")]
     SignatureProblem,
-    // #[error("Compid problem")]
+    #[error("CompID problem")]
     CompIdProblem,
-    // #[error("Sending time accuracy problem")]
+    #[error("SendingTime accuracy problem")]
     SendingTimeAccuracyProblem,
-    // #[error("Invalid message type")]
+    #[error("Invalid message type")]
     InvalidMessageType,
+    #[error("XML validation error")]
     XmlValidationError,
-    TagAppearsMoreThanOnce,
-    TagSpecifiedOutOfOrder,
-    RepeatingGroupsOutOfOrder,
-    IncorrectNumInGroupCountForRepeatingGroup,
-    NonDataFieldIncludeSOHChar,
-    // #[error("Invalid body length")]
+    #[error("Tag {tag} appears more than once")]
+    TagAppearsMoreThanOnce { tag: u32 },
+    #[error("Tag {tag} specified out of required order")]
+    TagSpecifiedOutOfOrder { tag: u32 },
+    #[error("Repeating group fields out of order near tag {tag}")]
+    RepeatingGroupsOutOfOrder { tag: u32 },
+    #[error("Incorrect NumInGroup count for repeating group (tag {tag})")]
+    IncorrectNumInGroupCountForRepeatingGroup { tag: u32 },
+    #[error("Non-data field {tag} contains an SOH delimiter")]
+    NonDataFieldIncludeSOHChar { tag: u32 },
+    #[error("Invalid or unsupported application version: {msg}")]
+    InvalidUnsupportedAppVersion { msg: String },
+    #[error("{msg}")]
+    Other { msg: String },
+    #[error("Invalid body length")]
     InvalidBodyLength,
-    // #[error("Invalid checksum")]
+    #[error("Invalid checksum")]
     InvalidChecksum,
+}
+
+impl SessionRejectReason {
+    /// The FIX 4.3 SessionRejectReason (tag 373) wire code for this reason.
+    ///
+    /// Mapping is by name, not enum position. `Other` uses 99 (a real "Other"
+    /// code); `InvalidUnsupportedAppVersion` uses 18 (a FIXT/4.4+ code, harmless
+    /// on 4.3 since it isn't produced there).
+    ///
+    /// `InvalidBodyLength`/`InvalidChecksum` have no tag-373 code — they are
+    /// garbled-message markers that get dropped, never rejected — so they map to
+    /// a sentinel (`u32::MAX`) that should never reach the wire. The match is
+    /// left exhaustive (no `_` arm) on purpose: adding a new reason will fail to
+    /// compile until its code is decided here.
+    pub fn code(&self) -> u32 {
+        match self {
+            SessionRejectReason::InvalidTag { .. } => 0,
+            SessionRejectReason::RequiredTagMissing { .. } => 1,
+            SessionRejectReason::TagNotDefinedForMsgType { .. } => 2,
+            SessionRejectReason::UndefinedTag { .. } => 3,
+            SessionRejectReason::TagSpecifiedWithoutValue { .. } => 4,
+            SessionRejectReason::ValueOutOfRange { .. } => 5,
+            SessionRejectReason::IncorrectDataFormatForValue { .. } => 6,
+            SessionRejectReason::DecryptionProblem => 7,
+            SessionRejectReason::SignatureProblem => 8,
+            SessionRejectReason::CompIdProblem => 9,
+            SessionRejectReason::SendingTimeAccuracyProblem => 10,
+            SessionRejectReason::InvalidMessageType => 11,
+            SessionRejectReason::XmlValidationError => 12,
+            SessionRejectReason::TagAppearsMoreThanOnce { .. } => 13,
+            SessionRejectReason::TagSpecifiedOutOfOrder { .. } => 14,
+            SessionRejectReason::RepeatingGroupsOutOfOrder { .. } => 15,
+            SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup { .. } => 16,
+            SessionRejectReason::NonDataFieldIncludeSOHChar { .. } => 17,
+            SessionRejectReason::InvalidUnsupportedAppVersion { .. } => 18,
+            SessionRejectReason::Other { .. } => 99,
+            SessionRejectReason::InvalidBodyLength | SessionRejectReason::InvalidChecksum => {
+                u32::MAX
+            }
+        }
+    }
+
+    /// The offending tag, for a Reject's RefTagID (371) — `None` for reasons
+    /// that aren't about a specific tag.
+    pub fn ref_tag(&self) -> Option<u32> {
+        match self {
+            SessionRejectReason::InvalidTag { tag }
+            | SessionRejectReason::RequiredTagMissing { tag }
+            | SessionRejectReason::TagNotDefinedForMsgType { tag }
+            | SessionRejectReason::UndefinedTag { tag }
+            | SessionRejectReason::TagSpecifiedWithoutValue { tag }
+            | SessionRejectReason::ValueOutOfRange { tag }
+            | SessionRejectReason::IncorrectDataFormatForValue { tag }
+            | SessionRejectReason::TagAppearsMoreThanOnce { tag }
+            | SessionRejectReason::TagSpecifiedOutOfOrder { tag }
+            | SessionRejectReason::RepeatingGroupsOutOfOrder { tag }
+            | SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup { tag }
+            | SessionRejectReason::NonDataFieldIncludeSOHChar { tag } => Some(*tag),
+            _ => None,
+        }
+    }
+
+    /// Free-form text for a Reject's Text (58) — `None` unless the reason
+    /// carries a message.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            SessionRejectReason::InvalidUnsupportedAppVersion { msg }
+            | SessionRejectReason::Other { msg } => Some(msg.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +187,7 @@ pub enum FieldError {
     InvalidFormat,
 }
 
-// Session-level errors raised by verify_msg — distinct from SessionRejectError,
+// Session-level errors raised by verify_msg — distinct from SessionRejectReason,
 // which covers FIX-level Reject(3) reasons during message parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {

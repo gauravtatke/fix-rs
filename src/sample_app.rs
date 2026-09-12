@@ -291,32 +291,40 @@ mod sample_app_tests {
         msg
     }
 
-    // A NewOrderSingle produces exactly one ExecutionReport (35=8) that echoes
-    // ClOrdID (so Banzai can match the order in its table), Side, and Symbol,
-    // and carries the required New-ack fields.
+    // A NewOrderSingle produces two ExecutionReports (35=8): a New ack, then a
+    // full fill. The ack (index 0) echoes ClOrdID/Side/Symbol with New status
+    // and LeavesQty = OrderQty; the fill (index 1) reports the trade so the
+    // client's blotter shows an execution (LeavesQty=0, CumQty=qty).
     #[test]
-    fn test_d_order_returns_exec_report() {
+    fn test_d_order_returns_ack_then_fill() {
         let mut app = SampleApp::new();
         let order = new_order_single("ORD-1", "1", "AAPL", "100");
 
         let responses = app.on_app_msg_received(&sid(), &order).unwrap();
+        assert_eq!(responses.len(), 2);
 
-        assert_eq!(responses.len(), 1);
-        let er = &responses[0];
-        assert_eq!(er.get_msg_type().unwrap(), "8");
-        // echoes for correlation / display
-        assert_eq!(er.get_field::<String>(11).unwrap(), "ORD-1"); // ClOrdID
-        assert_eq!(er.get_field::<String>(54).unwrap(), "1"); // Side
-        assert_eq!(er.get_field::<String>(55).unwrap(), "AAPL"); // Symbol
-        // required ExecutionReport fields (New ack)
-        assert_eq!(er.get_field::<String>(150).unwrap(), "0"); // ExecType = New
-        assert_eq!(er.get_field::<String>(39).unwrap(), "0"); // OrdStatus = New
-        assert_eq!(er.get_field::<String>(151).unwrap(), "100"); // LeavesQty = OrderQty
-        assert_eq!(er.get_field::<String>(14).unwrap(), "0"); // CumQty
-        assert_eq!(er.get_field::<String>(6).unwrap(), "0"); // AvgPx
-        // OrderID / ExecID present (value is generated, not pinned here)
-        assert!(er.get_field::<String>(37).is_ok()); // OrderID
-        assert!(er.get_field::<String>(17).is_ok()); // ExecID
+        // --- index 0: New ack ---
+        let ack = &responses[0];
+        assert_eq!(ack.get_msg_type().unwrap(), "8");
+        assert_eq!(ack.get_field::<String>(11).unwrap(), "ORD-1"); // ClOrdID echoed
+        assert_eq!(ack.get_field::<String>(54).unwrap(), "1"); // Side
+        assert_eq!(ack.get_field::<String>(55).unwrap(), "AAPL"); // Symbol
+        assert_eq!(ack.get_field::<String>(150).unwrap(), "0"); // ExecType = New
+        assert_eq!(ack.get_field::<String>(39).unwrap(), "0"); // OrdStatus = New
+        assert_eq!(ack.get_field::<String>(151).unwrap(), "100"); // LeavesQty = OrderQty
+        assert_eq!(ack.get_field::<String>(14).unwrap(), "0"); // CumQty
+        assert!(ack.get_field::<String>(37).is_ok()); // OrderID present
+        assert!(ack.get_field::<String>(17).is_ok()); // ExecID present
+
+        // --- index 1: full fill ---
+        let fill = &responses[1];
+        assert_eq!(fill.get_msg_type().unwrap(), "8");
+        assert_eq!(fill.get_field::<String>(11).unwrap(), "ORD-1"); // same order
+        assert_eq!(fill.get_field::<String>(150).unwrap(), "F"); // ExecType = Trade
+        assert_eq!(fill.get_field::<String>(39).unwrap(), "2"); // OrdStatus = Filled
+        assert_eq!(fill.get_field::<String>(151).unwrap(), "0"); // LeavesQty = 0
+        assert_eq!(fill.get_field::<String>(14).unwrap(), "100"); // CumQty = OrderQty
+        assert_eq!(fill.get_field::<String>(32).unwrap(), "100"); // LastQty = fill size
     }
 
     // A NewOrderSingle missing a field the handler needs is rejected with a

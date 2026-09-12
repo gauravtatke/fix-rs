@@ -7,10 +7,10 @@ use std::str::FromStr;
 
 use crate::data_dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::fields::*;
-use crate::quickfix_errors::{FieldError, SessionRejectError};
+use crate::quickfix_errors::{FieldError, SessionRejectReason};
 use crate::session::{SessionId, SessionIdBuilder};
 
-type SessResult<T> = Result<T, SessionRejectError>;
+type SessionResult<T> = Result<T, SessionRejectReason>;
 
 /*
 derive a macro which will create impl fns for each of the items in this enum
@@ -326,21 +326,29 @@ impl Message {
     //    what the second pass needs — see `from_vec`).
     // 2. Structure: `from_vec` walks that queue and sorts fields into header/body/trailer
     //    (and nested groups) according to the dictionary.
-    pub fn from_str(s: &str, dd: &DataDictionary) -> SessResult<Self> {
+    pub fn from_str(s: &str, dd: &DataDictionary) -> SessionResult<Self> {
         let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
         for field in s.split_terminator(SOH) {
             let (tag, value) = match field.split_once('=') {
                 Some((t, v)) => {
                     let parse_result = t.parse::<u32>();
                     if parse_result.is_err() {
-                        return Err(SessionRejectError::invalid_tag_err());
+                        return Err(SessionRejectReason::Other {
+                            msg: field.to_string(),
+                        });
                     }
                     if v.is_empty() {
-                        return Err(SessionRejectError::tag_without_value_err());
+                        return Err(SessionRejectReason::TagSpecifiedWithoutValue {
+                            tag: parse_result.unwrap(),
+                        });
                     }
                     (parse_result.unwrap(), v)
                 }
-                None => return Err(SessionRejectError::invalid_tag_err()),
+                None => {
+                    return Err(SessionRejectReason::Other {
+                        msg: field.to_string(),
+                    });
+                }
             };
             vdeq.push_back(StringField::new(tag, value));
         }
@@ -437,27 +445,37 @@ pub fn reverse_session_id_from_raw(s: &str) -> SessionId {
 // pops fields off the *front* of the queue for as long as they belong to its section,
 // then leaves whatever's left (starting with the first field it doesn't recognize) for
 // the next call. That's why they take `&mut VecDeque` rather than returning a remainder.
-fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Message> {
+fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<Message> {
     let mut message = Message::new();
     // Too few fields to possibly hold BeginString/BodyLength/MsgType as v[0]/v[1]/v[2] —
     // bail before any indexing below, which would otherwise panic on out-of-bounds access
     // for a short/malformed message instead of rejecting it cleanly.
-    if v.len() < 3 {
-        return Err(SessionRejectError::tag_specified_out_of_order());
-    }
-    // validate the first 3 fields and the last one
-    if v[0].tag() != BeginString::field()
-        || v[1].tag() != BodyLength::field()
-        || v[2].tag() != MsgType::field()
-        || v[v.len() - 1].tag() != CheckSum::field()
+    if v.len() < 3
+        || (
+            // validate the first 3 fields and the last one
+            v[0].tag() != BeginString::field()
+                || v[1].tag() != BodyLength::field()
+                || v[2].tag() != MsgType::field()
+                || v[v.len() - 1].tag() != CheckSum::field()
+        )
     {
-        return Err(SessionRejectError::tag_specified_out_of_order());
+        return Err(SessionRejectReason::Other {
+            msg: "field 8|9|35 are not correct".to_string(),
+        });
     }
+    // // validate the first 3 fields and the last one
+    // if v[0].tag() != BeginString::field()
+    //     || v[1].tag() != BodyLength::field()
+    //     || v[2].tag() != MsgType::field()
+    //     || v[v.len() - 1].tag() != CheckSum::field()
+    // {
+    //     return Err(SessionRejectError::other_err("field 8|9|35 are not correct"));
+    // }
     let body_len_field = &v[1];
     let expected_body_len = body_len_field
         .value()
         .parse::<u32>()
-        .map_err(|_| SessionRejectError::invalid_body_len_err())?;
+        .map_err(|_| SessionRejectReason::InvalidBodyLength)?;
     // Body length excludes BeginString(8)/BodyLength(9)/CheckSum(10) — same rule as
     // Message::calc_body_len, just computed over the raw incoming fields instead of an
     // already-built Message's header/body/trailer.
@@ -467,12 +485,10 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Mes
         .map(|sfield| sfield.to_string().as_bytes().len())
         .sum();
     if actual_body_len as u32 != expected_body_len {
-        return Err(SessionRejectError::invalid_body_len_err());
+        return Err(SessionRejectReason::InvalidBodyLength);
     }
-    let expected_checksum = v[v.len() - 1]
-        .value()
-        .parse::<u32>()
-        .map_err(|_| SessionRejectError::invalid_checksum())?;
+    let expected_checksum =
+        v[v.len() - 1].value().parse::<u32>().map_err(|_| SessionRejectReason::InvalidChecksum)?;
     let actual_total_bytes_sum: u32 = v
         .iter()
         .filter(|sfield| sfield.tag() != 10)
@@ -481,7 +497,7 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessResult<Mes
         .sum();
     let actual_check_sum = actual_total_bytes_sum % 256;
     if actual_check_sum != expected_checksum {
-        return Err(SessionRejectError::invalid_checksum());
+        return Err(SessionRejectReason::InvalidChecksum);
     }
     parse_header(&mut v, message.header_mut(), dd)?;
     validate_required_tag_missing(HEADER_ID, message.header(), dd)?;
@@ -514,10 +530,10 @@ fn parse_group(
     fld: &StringField,
     fmap: &mut FieldMap,
     dd: &DataDictionary,
-) -> SessResult<()> {
+) -> SessionResult<()> {
     let rg = dd
         .get_msg_group(msg_type, fld.tag())
-        .ok_or_else(SessionRejectError::tag_not_defined_for_msg)?;
+        .ok_or_else(|| SessionRejectReason::TagNotDefinedForMsgType { tag: fld.tag() })?;
     // Groups can nest (a group whose instances themselves contain a group), so each group
     // gets its own little DataDictionary scoped to just its own fields/sub-groups.
     let rg_dd = rg.data_dictionary();
@@ -528,7 +544,11 @@ fn parse_group(
     let group_count_tag = fld.tag();
     let declared_count = match fld.value().parse::<u32>() {
         Ok(c) => c,
-        Err(e) => return Err(SessionRejectError::incorrect_data_format_err()),
+        Err(e) => {
+            return Err(SessionRejectReason::IncorrectDataFormatForValue {
+                tag: group_count_tag,
+            });
+        }
     };
     let delimiter = rg.delimiter();
     // Pre-allocates `declared_count` empty FieldMap slots up front; the loop below fills
@@ -559,7 +579,9 @@ fn parse_group(
             if actual_count > declared_count as usize {
                 // We've seen more instances than the count field declared.
                 // incorrect NumInGroups
-                return Err(SessionRejectError::incorrect_num_in_grp_count());
+                return Err(SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup {
+                    tag: group_count_tag,
+                });
             }
             // resetting previous offset
             previous_offset = 0;
@@ -576,7 +598,7 @@ fn parse_group(
             // A nested group's count field, appearing partway through the current instance.
             if actual_count == 0 {
                 // delimiter not found but other tag is encountered
-                return Err(SessionRejectError::required_tag_missing_err());
+                return Err(SessionRejectReason::RequiredTagMissing { tag: delimiter });
             }
             let group_instance = &mut group[actual_count - 1];
             parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
@@ -596,7 +618,7 @@ fn parse_group(
             // parse_body/an outer parse_group) to check in its own context instead.
             if actual_count == 0 {
                 // means first field not found i.e. delimiter
-                return Err(SessionRejectError::required_tag_missing_err());
+                return Err(SessionRejectReason::RequiredTagMissing { tag: delimiter });
             }
             // verify the order of fields, 1-based rank
             let offset = field_order.iter().position(|f| *f == next_field.tag()).unwrap() + 1;
@@ -604,7 +626,9 @@ fn parse_group(
                 // in groups, fields have an order. if a next_field (under-process) ranks is less than last offset
                 // means the field is out of order. for e.g. if the order [W, Z] and we have already gotten
                 // Z (previous_offset = 2), and then we get W whose offset/rank is 1 in order then its out of order
-                return Err(SessionRejectError::repeating_grp_out_of_order());
+                return Err(SessionRejectReason::RepeatingGroupsOutOfOrder {
+                    tag: next_field.tag(),
+                });
             }
             let group_instance = &mut group[actual_count - 1];
             group_instance.set_field(next_field);
@@ -623,7 +647,9 @@ fn parse_group(
     // catches a declared count that's too *high* (too-low was already caught above).
     if actual_count != declared_count as usize {
         // means actual repeating groups are less then declared count
-        return Err(SessionRejectError::incorrect_num_in_grp_count());
+        return Err(SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup {
+            tag: group_count_tag,
+        });
     }
     // at here, the group's parsing is complete, check if any required tag is missing for each instance
     for count in 0..declared_count as usize {
@@ -641,7 +667,7 @@ fn parse_header(
     v: &mut VecDeque<StringField>,
     header: &mut FieldMap,
     dd: &DataDictionary,
-) -> SessResult<()> {
+) -> SessionResult<()> {
     // Spec rule: BeginString(8), BodyLength(9), MsgType(35) must be the literal first three
     // fields of every message, in this order — already checked in from_vec (which also
     // needs it to safely index into the first-three/last fields for body-length/checksum
@@ -670,12 +696,12 @@ fn parse_body(
     v: &mut VecDeque<StringField>,
     msg: &mut Message,
     dd: &DataDictionary,
-) -> SessResult<()> {
+) -> SessionResult<()> {
     // MsgType (35) was already parsed into the header by parse_header; read it back out to
     // know which message-type-specific dictionary rules apply to everything below.
     let msg_type = match msg.get_msg_type() {
         Ok(s) => s,
-        Err(_) => return Err(SessionRejectError::required_tag_missing_err()),
+        Err(_) => return Err(SessionRejectReason::RequiredTagMissing { tag: 35 }),
     };
     while let Some(fld) = v.pop_front() {
         if dd.is_header_field(fld.tag()) {
@@ -684,7 +710,7 @@ fn parse_body(
             // consumed all of them), so seeing one here is a genuine ordering violation, not
             // just "not part of the body" (contrast with the trailer case just below, which is
             // a normal, expected end-of-body signal).
-            return Err(SessionRejectError::tag_specified_out_of_order());
+            return Err(SessionRejectReason::TagSpecifiedOutOfOrder { tag: fld.tag() });
         }
         if dd.is_trailer_field(fld.tag()) {
             v.push_front(fld);
@@ -708,17 +734,17 @@ fn parse_trailer(
     v: &mut VecDeque<StringField>,
     trailer: &mut FieldMap,
     dd: &DataDictionary,
-) -> SessResult<()> {
+) -> SessionResult<()> {
     while let Some(fld) = v.pop_front() {
         if !dd.is_trailer_field(fld.tag()) {
-            return Err(SessionRejectError::tag_specified_out_of_order());
+            return Err(SessionRejectReason::TagSpecifiedOutOfOrder { tag: fld.tag() });
         }
         trailer.set_field(fld);
     }
     Ok(())
 }
 
-fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessResult<()> {
+fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResult<()> {
     for field in message
         .header()
         .iter()
@@ -732,29 +758,33 @@ fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessResult<(
     Ok(())
 }
 
-fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessResult<()> {
+fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
     if dd.is_msg_field(msg_type, tag) {
         return Ok(());
     } else if dd.get_field_type(tag).is_some() {
         // this field exist, since the field_type is defined. But may be not for this message type
-        return Err(SessionRejectError::tag_not_defined_for_msg());
+        return Err(SessionRejectReason::TagNotDefinedForMsgType { tag });
     }
-    Err(SessionRejectError::undefined_tag_err())
+    Err(SessionRejectReason::UndefinedTag { tag })
 }
 
-fn validate_tag_for_value_range(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
+fn validate_tag_for_value_range(
+    tag: Tag,
+    value: &String,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
     match dd.get_field_values(tag) {
         Some(value_set) => {
             if value_set.contains(value) {
                 return Ok(());
             }
-            Err(SessionRejectError::value_out_of_range_err())
+            Err(SessionRejectReason::ValueOutOfRange { tag })
         }
         None => Ok(()),
     }
 }
 
-fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessResult<()> {
+fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessionResult<()> {
     match dd.get_field_type(tag) {
         Some(fix_type) => {
             // Grouped by which Rust primitive the FIX spec's "Data Types" section (Vol 1)
@@ -799,13 +829,13 @@ fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) ->
             if parsed_correctly {
                 Ok(())
             } else {
-                Err(SessionRejectError::incorrect_data_format_err())
+                Err(SessionRejectReason::IncorrectDataFormatForValue { tag })
             }
         }
         // Same as the earlier tag-membership check: by the time this runs, the tag's
         // membership has already been validated upstream, so get_field_type returning
         // None here shouldn't actually be reachable in practice.
-        None => Err(SessionRejectError::undefined_tag_err()),
+        None => Err(SessionRejectReason::UndefinedTag { tag }),
     }
 }
 
@@ -813,17 +843,18 @@ fn validate_required_tag_missing(
     msg_type: &str,
     field_map: &FieldMap,
     dd: &DataDictionary,
-) -> SessResult<()> {
+) -> SessionResult<()> {
     let required_fields = dd.get_msg_required_field(msg_type);
     match required_fields {
         Some(req_fields) => {
             let current_fields: Vec<u32> =
                 field_map.iter().into_iter().map(|s: &StringField| s.tag()).collect();
-            let all_pressent = req_fields.iter().all(|f| current_fields.contains(f));
-            if all_pressent {
-                return Ok(());
+            for f in req_fields.iter() {
+                if !current_fields.contains(f) {
+                    return Err(SessionRejectReason::RequiredTagMissing { tag: *f });
+                }
             }
-            Err(SessionRejectError::required_tag_missing_err())
+            Ok(())
         }
         None => Ok(()),
     }
@@ -995,7 +1026,7 @@ mod message_test {
         let mass_quote = "8=FIX.4.3|9=101|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|295=1|299=QEID1|10=173";
         let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::RequiredTagMissing);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::RequiredTagMissing { .. });
     }
 
     #[test]
@@ -1015,8 +1046,8 @@ mod message_test {
         let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
         assert!(msg.is_err());
         assert_matches!(
-            msg.unwrap_err().kind(),
-            SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup
+            msg.unwrap_err(),
+            SessionRejectReason::IncorrectNumInGroupCountForRepeatingGroup { .. }
         );
     }
 
@@ -1030,7 +1061,7 @@ mod message_test {
             "8=FIX.4.3|9=60|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|10=217";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::RequiredTagMissing);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::RequiredTagMissing { .. });
     }
 
     #[test]
@@ -1054,7 +1085,7 @@ mod message_test {
         let test_request = "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::UndefinedTag);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::UndefinedTag { .. });
     }
 
     #[test]
@@ -1066,7 +1097,7 @@ mod message_test {
         let test_request = "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::TagNotDefinedForMsgType);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::TagNotDefinedForMsgType { .. });
     }
 
     #[test]
@@ -1076,7 +1107,7 @@ mod message_test {
         let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::ValueOutOfRange);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::ValueOutOfRange { .. });
     }
 
     #[test]
@@ -1086,7 +1117,7 @@ mod message_test {
         let logon = "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::IncorrectDataFormatForValue);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::IncorrectDataFormatForValue { .. });
     }
 
     #[test]
@@ -1097,7 +1128,7 @@ mod message_test {
         let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::InvalidChecksum);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::InvalidChecksum);
     }
 
     #[test]
@@ -1108,7 +1139,7 @@ mod message_test {
         let logon = "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err().kind(), SessionRejectReason::InvalidBodyLength);
+        assert_matches!(msg.unwrap_err(), SessionRejectReason::InvalidBodyLength);
     }
 
     fn msg_test_soh_in_data_field() {}

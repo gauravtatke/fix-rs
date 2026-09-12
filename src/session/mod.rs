@@ -11,7 +11,7 @@ pub use settings::*;
 use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
 use crate::message::{Message, StringField};
-use crate::quickfix_errors::{SendError, SessionError};
+use crate::quickfix_errors::{SendError, SessionError, SessionRejectReason};
 use crate::session::schedule::SessionSchedule;
 use log::{info, warn};
 use state::SessionState;
@@ -260,6 +260,22 @@ impl Session {
         msg.header_mut().set_field(StringField::new(35, "0"));
         if let Some(test_reqid) = test_req_id {
             msg.set_field(StringField::new(112, test_reqid));
+        }
+        self.initialize_header(&mut msg);
+        self.app.on_admin_msg_sending(&self.id, &mut msg);
+        self.send_raw(&mut msg);
+    }
+
+    fn generate_reject(&mut self, ref_seq_num: u32, reason: SessionRejectReason) {
+        let mut msg = Message::new();
+        msg.header_mut().set_field(StringField::new(35, "3"));
+        msg.set_field(StringField::new(45, ref_seq_num.to_string().as_str()));
+        msg.set_field(StringField::new(373, reason.code().to_string().as_str()));
+        if let Some(err_msg) = reason.text() {
+            msg.set_field(StringField::new(58, err_msg));
+        }
+        if let Some(tag) = reason.ref_tag() {
+            msg.set_field(StringField::new(371, tag.to_string().as_str()));
         }
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
