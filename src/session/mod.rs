@@ -107,26 +107,6 @@ impl Session {
         true
     }
 
-    // Routes a verified inbound message to the appropriate Application callback.
-    // Admin messages (MsgType 0-5, A) → on_admin_msg_received; all others → on_app_msg_received.
-    //
-    // The app-message callback RETURNS the responses it wants sent. Because the
-    // returned Vec is owned, the borrow of `self.app` ends the moment the call
-    // returns — which frees `self` for the `send_app_message` loop below. This
-    // is the whole trick: the app never reaches back into the session, so there
-    // is no cycle and no borrow conflict, even though the app lives inside self.
-    fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), Box<dyn Error>> {
-        if is_admin_msg_type(msg_type) {
-            self.app.on_admin_msg_received(&self.id, msg)?;
-        } else {
-            let responses = self.app.on_app_msg_received(&self.id, msg)?;
-            for resp in responses {
-                self.send_app_message(resp)?;
-            }
-        }
-        Ok(())
-    }
-
     // The single outbound path for application messages. Stamps the standard
     // header, gives the app a final peek (which may veto with DonotSend), then
     // serializes and pushes through the responder. DonotSend is a normal "skip"
@@ -150,6 +130,16 @@ impl Session {
         Ok(())
     }
 
+    // Inbound-side handler for a well-formed-but-invalid message: send a Reject
+    // and advance the *target* sequence number, since the offending message was
+    // received (and consumed) even though it was rejected. The target-seq bump
+    // lives here — inbound bookkeeping, mirroring verify_seq_number — rather than
+    // in generate_reject, which stays a pure outbound builder like its siblings.
+    pub(crate) fn reject_message(&mut self, seq_num: u32, reason: SessionRejectReason) {
+        self.generate_reject(seq_num, reason);
+        self.state.incr_next_target_msg_seq_num();
+    }
+
     // Timer-driven outbound seam for messages the app sends on its own
     // initiative (e.g. a streaming market-data feed) with no inbound trigger.
     // The engine polls the app each tick; the app drains whatever it has queued
@@ -162,37 +152,6 @@ impl Session {
         let outbound = self.app.poll_outbound(&self.id);
         for msg in outbound {
             self.send_app_message(msg)?;
-        }
-        Ok(())
-    }
-
-    // Validates BeginString, logon state, and CompID match.
-    // Does not check sequence numbers or dispatch to Application callbacks.
-    fn verify_msg(&mut self, msg: &Message) -> Result<(), Box<dyn Error>> {
-        let begin_string = msg.header().get_field::<String>(8)?;
-        if self.id.begin_string() != &begin_string {
-            return Err(Box::from(SessionError::BeginStringMismatch {
-                expected: self.id.begin_string().clone(),
-                received: begin_string,
-            }));
-        }
-        let msg_type = msg.get_msg_type()?;
-        self.state.last_received_time = Instant::now();
-        self.state.test_request_counter = 0;
-        if !self.valid_logon_state(msg_type.as_str()) {
-            return Err(Box::from(SessionError::InvalidStateForMsgType {
-                msg_type: msg_type.clone(),
-            }));
-        }
-        let sender_compid = msg.header().get_field::<String>(49)?;
-        let target_compid = msg.header().get_field::<String>(56)?;
-        if !self.id.sender_comp_id().eq(&target_compid)
-            || !self.id.target_comp_id().eq(&sender_compid)
-        {
-            return Err(Box::from(SessionError::CompIdMismatch {
-                expected_sender: self.id.sender_comp_id().clone(),
-                expected_target: self.id.target_comp_id().clone(),
-            }));
         }
         Ok(())
     }
@@ -266,6 +225,11 @@ impl Session {
         self.send_raw(&mut msg);
     }
 
+    // Builds and sends a session-level Reject (MsgType=3) referencing the
+    // offending message via RefSeqNum(45), with SessionRejectReason(373) and,
+    // when the reason carries them, Text(58) and RefTagID(371). Pure outbound
+    // builder — same shape as the other generate_* methods (send_raw handles the
+    // sender seq num); target-seq bookkeeping is the caller's job (reject_message).
     fn generate_reject(&mut self, ref_seq_num: u32, reason: SessionRejectReason) {
         let mut msg = Message::new();
         msg.header_mut().set_field(StringField::new(35, "3"));
@@ -292,6 +256,60 @@ impl Session {
         self.send_raw(&mut msg);
     }
 
+    /*****************************************************/
+    /******** ALL INBOUND MESSAGE PROCESSING METHODS *****/
+    /*****************************************************/
+
+    // Routes a verified inbound message to the appropriate Application callback.
+    // Admin messages (MsgType 0-5, A) → on_admin_msg_received; all others → on_app_msg_received.
+    //
+    // The app-message callback RETURNS the responses it wants sent. Because the
+    // returned Vec is owned, the borrow of `self.app` ends the moment the call
+    // returns — which frees `self` for the `send_app_message` loop below. This
+    // is the whole trick: the app never reaches back into the session, so there
+    // is no cycle and no borrow conflict, even though the app lives inside self.
+    fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), Box<dyn Error>> {
+        if is_admin_msg_type(msg_type) {
+            self.app.on_admin_msg_received(&self.id, msg)?;
+        } else {
+            let responses = self.app.on_app_msg_received(&self.id, msg)?;
+            for resp in responses {
+                self.send_app_message(resp)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Validates BeginString, logon state, and CompID match.
+    // Does not check sequence numbers or dispatch to Application callbacks.
+    fn verify_msg(&mut self, msg: &Message) -> Result<(), Box<dyn Error>> {
+        let begin_string = msg.header().get_field::<String>(8)?;
+        if self.id.begin_string() != &begin_string {
+            return Err(Box::from(SessionError::BeginStringMismatch {
+                expected: self.id.begin_string().clone(),
+                received: begin_string,
+            }));
+        }
+        let msg_type = msg.get_msg_type()?;
+        self.state.last_received_time = Instant::now();
+        self.state.test_request_counter = 0;
+        if !self.valid_logon_state(msg_type.as_str()) {
+            return Err(Box::from(SessionError::InvalidStateForMsgType {
+                msg_type: msg_type.clone(),
+            }));
+        }
+        let sender_compid = msg.header().get_field::<String>(49)?;
+        let target_compid = msg.header().get_field::<String>(56)?;
+        if !self.id.sender_comp_id().eq(&target_compid)
+            || !self.id.target_comp_id().eq(&sender_compid)
+        {
+            return Err(Box::from(SessionError::CompIdMismatch {
+                expected_sender: self.id.sender_comp_id().clone(),
+                expected_target: self.id.target_comp_id().clone(),
+            }));
+        }
+        Ok(())
+    }
     // Inbound dispatch: extracts MsgType, routes to per-type handler.
     // App-level messages fall through to verify → seq check → dispatch_to_app.
     pub(crate) fn next_message(&mut self, msg: &mut Message) -> Result<(), Box<dyn Error>> {
@@ -925,6 +943,78 @@ mod session_tests {
         assert_eq!(session.state.next_sender_msg_seq_num, 1);
         session.generate_logon();
         assert_eq!(session.state.next_sender_msg_seq_num, 2);
+    }
+
+    // --- generate_reject / reject_message ---
+
+    #[test]
+    fn test_generate_reject_sends_correct_message() {
+        let (mut session, mock_state) = make_session();
+        // A field-level reason carries a tag → RefTagID(371) should appear;
+        // ValueOutOfRange's tag-373 code is 5.
+        session.generate_reject(7, SessionRejectReason::ValueOutOfRange { tag: 55 });
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        let wire = &sent[0];
+        assert!(sent_message_contains(wire, 35, "3")); // MsgType = Reject
+        assert!(sent_message_contains(wire, 45, "7")); // RefSeqNum = offending seq
+        assert!(sent_message_contains(wire, 373, "5")); // SessionRejectReason
+        assert!(sent_message_contains(wire, 371, "55")); // RefTagID
+        // standard header still stamped by initialize_header
+        assert!(sent_message_contains(wire, 8, "FIX.4.3"));
+        assert!(sent_message_contains(wire, 49, "SENDER"));
+        assert!(sent_message_contains(wire, 56, "TARGET"));
+    }
+
+    #[test]
+    fn test_generate_reject_message_bearing_reason_sets_text_no_reftag() {
+        let (mut session, mock_state) = make_session();
+        // `Other` carries a message (→ Text 58) and no tag (→ no RefTagID 371).
+        session.generate_reject(
+            3,
+            SessionRejectReason::Other {
+                msg: "bad thing".into(),
+            },
+        );
+
+        let sent = mock_state.sent();
+        let wire = &sent[0];
+        assert!(sent_message_contains(wire, 35, "3"));
+        assert!(sent_message_contains(wire, 373, "99")); // Other → 99
+        assert!(sent_message_contains(wire, 58, "bad thing")); // Text
+        assert!(!wire.contains("\x01371=")); // no RefTagID
+    }
+
+    #[test]
+    fn test_generate_reject_increments_only_sender_seq() {
+        // generate_reject is a pure outbound builder: send_raw bumps the sender
+        // seq, but it must NOT touch the target seq (that's reject_message's job).
+        let (mut session, _) = make_session();
+        assert_eq!(session.state.next_sender_msg_seq_num, 1);
+        assert_eq!(session.state.next_target_msg_seq_num, 1);
+
+        session.generate_reject(1, SessionRejectReason::InvalidMessageType);
+
+        assert_eq!(session.state.next_sender_msg_seq_num, 2);
+        assert_eq!(session.state.next_target_msg_seq_num, 1); // unchanged
+    }
+
+    #[test]
+    fn test_reject_message_sends_reject_and_advances_target_seq() {
+        // reject_message = generate_reject + advance the target seq (the message
+        // was received and consumed even though rejected).
+        let (mut session, mock_state) = make_session();
+        assert_eq!(session.state.next_target_msg_seq_num, 1);
+
+        session.reject_message(1, SessionRejectReason::UndefinedTag { tag: 9999 });
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "3"));
+        assert!(sent_message_contains(&sent[0], 373, "3")); // UndefinedTag → 3
+        assert!(sent_message_contains(&sent[0], 371, "9999")); // RefTagID
+        assert_eq!(session.state.next_target_msg_seq_num, 2); // advanced
     }
 
     #[test]

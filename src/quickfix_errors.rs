@@ -128,6 +128,76 @@ impl SessionRejectReason {
             _ => None,
         }
     }
+
+    /// Whether this reason marks a *garbled* message (bad body length or
+    /// checksum) that must be dropped rather than rejected. The parse-side
+    /// classification for 7.3: `is_garbled()` → drop the message and keep the
+    /// connection; anything else → send a Reject(35=3).
+    pub fn is_garbled(&self) -> bool {
+        matches!(
+            self,
+            SessionRejectReason::InvalidBodyLength | SessionRejectReason::InvalidChecksum
+        )
+    }
+}
+
+#[cfg(test)]
+mod session_reject_reason_tests {
+    use super::SessionRejectReason;
+
+    #[test]
+    fn test_is_garbled_true_for_bodylength_and_checksum() {
+        assert!(SessionRejectReason::InvalidBodyLength.is_garbled());
+        assert!(SessionRejectReason::InvalidChecksum.is_garbled());
+    }
+
+    #[test]
+    fn test_is_garbled_false_for_reject_reasons() {
+        // A representative field-level reason and a message-level one — neither
+        // is garbled, both should be rejected (not dropped).
+        assert!(!SessionRejectReason::ValueOutOfRange { tag: 55 }.is_garbled());
+        assert!(!SessionRejectReason::InvalidMessageType.is_garbled());
+        assert!(!SessionRejectReason::Other { msg: "boom".into() }.is_garbled());
+    }
+
+    #[test]
+    fn test_code_maps_reason_to_tag373_wire_value() {
+        // Spot-check the by-name mapping, including the two whose enum position
+        // differs from their wire code (UndefinedTag=3, TagNotDefinedForMsgType=2).
+        assert_eq!(SessionRejectReason::InvalidTag { tag: 1 }.code(), 0);
+        assert_eq!(SessionRejectReason::TagNotDefinedForMsgType { tag: 44 }.code(), 2);
+        assert_eq!(SessionRejectReason::UndefinedTag { tag: 99 }.code(), 3);
+        assert_eq!(SessionRejectReason::ValueOutOfRange { tag: 98 }.code(), 5);
+        assert_eq!(SessionRejectReason::Other { msg: "x".into() }.code(), 99);
+    }
+
+    #[test]
+    fn test_garbled_reasons_have_sentinel_code() {
+        // These never reach the wire (they're dropped), so code() is a sentinel.
+        assert_eq!(SessionRejectReason::InvalidBodyLength.code(), u32::MAX);
+        assert_eq!(SessionRejectReason::InvalidChecksum.code(), u32::MAX);
+    }
+
+    #[test]
+    fn test_ref_tag_present_for_field_reasons_absent_otherwise() {
+        assert_eq!(SessionRejectReason::RequiredTagMissing { tag: 35 }.ref_tag(), Some(35));
+        assert_eq!(SessionRejectReason::UndefinedTag { tag: 99 }.ref_tag(), Some(99));
+        // reasons not about a specific tag carry no RefTagID
+        assert_eq!(SessionRejectReason::SignatureProblem.ref_tag(), None);
+        assert_eq!(SessionRejectReason::Other { msg: "x".into() }.ref_tag(), None);
+    }
+
+    #[test]
+    fn test_text_present_only_for_message_bearing_reasons() {
+        assert_eq!(SessionRejectReason::Other { msg: "bad".into() }.text(), Some("bad"));
+        assert_eq!(
+            SessionRejectReason::InvalidUnsupportedAppVersion { msg: "v9".into() }.text(),
+            Some("v9")
+        );
+        // tag-bearing / bare reasons have no Text
+        assert_eq!(SessionRejectReason::ValueOutOfRange { tag: 55 }.text(), None);
+        assert_eq!(SessionRejectReason::InvalidChecksum.text(), None);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

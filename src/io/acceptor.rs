@@ -2,7 +2,7 @@ use crate::io::fix_message_reader::FixMessageReader;
 use crate::io::tcp_responder::TcpResponder;
 use crate::message::{self, Message};
 use crate::network::SessionMap;
-use log::info;
+use log::{info, warn};
 use std::error::Error;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -58,20 +58,39 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
         {
             let mut session = s_arc.lock().unwrap();
             session.set_responder(Box::new(TcpResponder::new(stream)));
-            let mut first_msg = Message::from_str(&first_msg_str, session.dictionary())?;
-            session.next_message(&mut first_msg)?;
+            let mut first_msg_result = Message::from_str(&first_msg_str, session.dictionary());
+            match first_msg_result {
+                Ok(mut first_msg) => session.next_message(&mut first_msg)?,
+                Err(reason) => {
+                    session.disconnect();
+                    return Err(From::from(reason));
+                }
+            }
         }
-        loop {
-            // Lock released before blocking read — other threads (timer, outbound sends)
-            // can still access the session while we wait for the next message.
-            let msg_str = match fix_msg_reader.read_message() {
-                Ok(msg) => msg,
-                Err(_) => break,
-            };
+        while let Ok(msg_str) = fix_msg_reader.read_message() {
             info!("{} incoming: {}", reverse_id, wire_display(&msg_str));
             let mut session = s_arc.lock().unwrap();
-            let mut msg = Message::from_str(&msg_str, session.dictionary())?;
-            session.next_message(&mut msg)?;
+            match Message::from_str(&msg_str, session.dictionary()) {
+                Ok(mut msg) => {
+                    session.next_message(&mut msg)?;
+                }
+                Err(reason) if reason.is_garbled() => {
+                    // Garbled (bad body length / checksum): drop it — a garbled
+                    // message can't be trusted enough to reference in a Reject.
+                    warn!("{} dropping garbled message: {}", reverse_id, reason);
+                    continue;
+                }
+                Err(reason) => {
+                    // Well-formed but invalid: Reject it (RefSeqNum from the raw
+                    // message) and keep the connection alive.
+                    let seq_num = message::seq_num_from_raw(&msg_str)
+                        .and_then(|sq| sq.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    info!("{} rejecting invalid message: {}", reverse_id, reason);
+                    session.reject_message(seq_num, reason);
+                    continue;
+                }
+            }
         }
         info!("{} event: Connection closed ({})", reverse_id, peer_addr);
         let mut session = s_arc.lock().unwrap();

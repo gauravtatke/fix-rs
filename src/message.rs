@@ -414,7 +414,7 @@ fn extract_field_value<'a>(tag: &str, s: &'a str) -> Option<&'a str> {
     None
 }
 
-pub fn session_id_from_raw(s: &str) -> SessionId {
+pub(crate) fn session_id_from_raw(s: &str) -> SessionId {
     let begin_str = extract_field_value("8", s).unwrap();
     let sender_comp = extract_field_value("49", s).unwrap();
     let target_comp = extract_field_value("56", s).unwrap();
@@ -426,7 +426,7 @@ pub fn session_id_from_raw(s: &str) -> SessionId {
         .build()
 }
 
-pub fn reverse_session_id_from_raw(s: &str) -> SessionId {
+pub(crate) fn reverse_session_id_from_raw(s: &str) -> SessionId {
     // sender values from message is put into target & vice-versa
     let begin_str = extract_field_value("8", s).unwrap();
     let sender_comp = extract_field_value("56", s).unwrap(); // incoming target
@@ -437,6 +437,14 @@ pub fn reverse_session_id_from_raw(s: &str) -> SessionId {
         .target_sub_id(extract_field_value("50", s))
         .target_location_id(extract_field_value("142", s))
         .build()
+}
+
+// Pulls MsgSeqNum(34) straight out of the raw wire string, without a full parse.
+// Used to fill a Reject's RefSeqNum(45) when parsing failed (so no `Message`
+// exists) — returns `None` if the tag is absent (e.g. a message too malformed to
+// contain it). Mirrors session_id_from_raw's use of extract_field_value.
+pub(crate) fn seq_num_from_raw(s: &str) -> Option<&str> {
+    extract_field_value("34", s)
 }
 
 // Consumes the flat, wire-ordered queue of fields into a structured `Message`, in the
@@ -894,6 +902,21 @@ mod message_test {
     fn soh_replaced_str(s: &str) -> String {
         let mut buff = [0u8; 1];
         s.replace('|', SOH.encode_utf8(&mut buff))
+    }
+
+    #[test]
+    fn test_seq_num_from_raw_extracts_msgseqnum() {
+        // Pulls MsgSeqNum(34) from a raw string without a full parse. The "9" in
+        // "49=..." must not false-match tag 34's neighbourhood.
+        let raw = soh_replaced_str(MSG_STR);
+        assert_eq!(seq_num_from_raw(&raw), Some("0"));
+    }
+
+    #[test]
+    fn test_seq_num_from_raw_absent_returns_none() {
+        // A (malformed) message with no tag 34 at all.
+        let raw = soh_replaced_str("8=FIX.4.3|35=A|49=BANZAI|56=FIXIMULATOR|10=000|");
+        assert_eq!(seq_num_from_raw(&raw), None);
     }
 
     #[test]
