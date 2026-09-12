@@ -409,23 +409,66 @@ failures and session-level failures.
 *catch* the error and translate it into an outbound message, then continue (recoverable) or disconnect (fatal) — instead
 of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal** classification.
 
-- [ ] **7.1 — `generate_reject` builder.**
-  `Session::generate_reject(ref_seq_num, reason: SessionRejectReason, ref_tag: Option<u32>)` — sibling of the existing
-  admin builders. Stamps `35=3` + tags 45/373 (+ 371 when known), runs through `initialize_header`/`send_raw`. The
-  `SessionRejectReason` enum (made `pub` in task 1.2) maps 1:1 to tag 373 values. Done when: a MockResponder test
-  captures a well-formed `35=3` with the right 45/373.
+- [x] **7.1 — `generate_reject` builder + error classification.**
+  `Session::generate_reject(ref_seq_num, reason: SessionRejectReason)` — sibling of the existing admin builders. Stamps
+  `35=3` + tags 45/373 (+ 371/58 when known), runs through `initialize_header`/`send_raw`. `SessionRejectReason` is now
+  the error type itself (a data-carrying enum deriving `thiserror::Error`), with `code()` (tag 373), `ref_tag()` (371),
+  `text()` (58), and `is_garbled()` — the recoverable-vs-fatal classification for the parse side (garbled → drop, else →
+  reject). Session-side classification is inlined at the point of use in 7.3 rather than a separate `is_fatal()`, since
+  `SessionError` is nearly all-fatal. Done: `13e7d05`.
 
-- [ ] **7.2 — Classify errors: recoverable vs fatal.**
-  Decide, per `SessionRejectError`/`SessionError` variant, whether it yields a Reject-and-continue, a Logout-and-
-  disconnect, or a silent-drop (checksum/body-length). Capture the mapping in one place (a function or match) so it's
-  auditable. Done when: the classification is documented and unit-tested variant-by-variant.
+- [x] **7.2 — Parse-side error → response.**
+  In the acceptor read loop, a bad `Message::from_str`: garbled (`is_garbled()`) → `warn` + drop + keep reading;
+  well-formed-but-invalid → `reject_message` (RefSeqNum from raw via `seq_num_from_raw`, `initialize_header` +
+  `on_admin_msg_sending` + `send_raw`, target-seq advanced) + keep reading. First message bad → `disconnect` (a Reject is
+  post-logon). Done: `0cfcdab`.
 
-- [ ] **7.3 — Wire error → response in the dispatch path.**
-  Restructure so parse + session errors are caught at the session (not `?`-ed to `handle_connection`): recoverable →
-  `generate_reject` + increment target seq + continue the read loop; fatal → `generate_logout(reason)` + `disconnect`;
-  checksum/body-length → drop the message, keep the connection. `handle_connection` stops treating every error as a
-  connection-killer. Done when: feeding a bad message via `next_message` (or the parse layer) leaves the session alive
-  and emits the correct message.
+- [ ] **7.3 — Session-error side: catch, classify, respond (was the "un-box `next_message`" step).**
+  Today `next_message` returns `Result<(), Box<dyn Error>>` and the acceptor `?`-es it, so any session error still kills
+  the connection with nothing on the wire. Split into:
+
+  Note on ordering: getting into 7.3 showed the dependency runs opposite to a naive "classify
+  first" reading — you can't classify a `SessionError` in `next_message` until *every* inbound path
+  converges to one typed result, and the `next_*` helpers + `dispatch_to_app` still `?` two
+  app-callback error types (`RejectLogon`, `AppError`). So 7.3 mirrors 7.3a's rhythm: **converge the
+  types first (7.3b, no behavior change), then classify + act (7.3c, the wire behavior).** See
+  `session_context/error-conversion-map_err-vs-from.md` for the `#[from]` vs `map_err` reasoning.
+
+  - [x] **7.3a — Un-box the verify layer (types only, no behavior change).**
+    `verify_msg` / `verify_seq_number` return `Result<(), SessionError>` instead of `Box<dyn Error>`;
+    map the internal `get_field` `FieldError`s → `SessionError::MissingHeaderField { tag }` via
+    per-call `map_err` (NOT a blanket `From` — translation, not propagation). `tag` was added to
+    `FieldError` (self-describing). No need to match on the `FieldError` variant in the session
+    (4/5 verify fields are `String`, whose parse is `Infallible` → only `TagNotFound` reachable).
+    Done: 197 tests green.
+
+  - [ ] **7.3b — Converge the inbound chain to one typed result (types only, no behavior change).**
+    Make `next_*`, `dispatch_to_app`, and `next_message` return `Result<(), SessionError>` (drop the
+    `Box`). Fold the two app-callback errors in:
+    - `RejectLogon` → `SessionError` via `#[from]` (the self-contained, propagation case — e.g. a
+      `LogonRejected(#[from] RejectLogon)` variant); `on_admin_msg_received(...)?` then auto-converts.
+    - `AppError` → a **throwaway** `App(#[from] AppError)` variant so it propagates as a `SessionError`
+      and the acceptor still `?`s it → connection still drops exactly as today (zero behavior change).
+      The real handling (log-and-keep-alive stopgap, then 35=j) lands in 7.3c/7.4; delete this variant
+      then. (Chosen over handling `AppError` locally now, to keep 7.3b strictly type-only.)
+    Also convert the three `return Err(Box::from(SessionError::...))` in `next_logon` to plain
+    `return Err(...)`. Done when: it compiles and 197 tests stay green (behavior identical — bad
+    message still drops the connection).
+
+  - [ ] **7.3c — Classify + act + control signal (the wire behavior).**
+    `next_message` (or a thin wrapper) catches the `SessionError`, applies recoverable-vs-fatal + the
+    pre-logon gate (before `logon_received`, everything is fatal → disconnect, since Reject is
+    post-logon), and acts: `MissingHeaderField` → `reject_message` (recoverable, keep reading); fatal
+    (BeginStringMismatch, CompIdMismatch, SeqNumTooLow, InvalidStateForMsgType, OutOfSessionTime) +
+    `LogonRejected` → `generate_logout(reason)` + `disconnect`; `App` → stopgap log + keep the
+    connection (do NOT disconnect; real fix is 7.4), and drop the throwaway `App` variant in favor of
+    handling `AppError` at `dispatch_to_app`. `next_message` returns a control signal (e.g.
+    `ControlFlow`) so the acceptor's two `?` calls become a `match` (keep looping vs break) and all FIX
+    policy stays in `Session`. Watch the seq-num double-advance: `verify_seq_number` bumps target seq
+    on its OK path, `reject_message` bumps it itself — trace each error's origin relative to the bump.
+    Done when: a bad post-logon field → Reject + connection survives + seq advanced once; a fatal error
+    → Logout + disconnect; a rejected logon tears down cleanly; an `AppError` no longer drops the
+    connection.
 
 - [ ] **7.4 — (Optional) `generate_business_reject` (35=j).**
   Engine-level fallback for `AppError` when the app returns an error rather than its own reject message. Decide the

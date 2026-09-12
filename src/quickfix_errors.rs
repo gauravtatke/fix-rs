@@ -251,14 +251,20 @@ pub enum ConfigParseError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FieldError {
-    #[error("Tag not found")]
-    TagNotFound,
-    #[error("Could not parse field value into the requested type")]
-    InvalidFormat,
+    #[error("Tag not found: {tag}")]
+    TagNotFound { tag: u32 },
+    #[error("Could not parse field value into the requested type: {tag}")]
+    InvalidFormat { tag: u32 },
 }
 
-// Session-level errors raised by verify_msg — distinct from SessionRejectReason,
-// which covers FIX-level Reject(3) reasons during message parsing.
+// The single, typed error for the whole inbound-processing path (next_message and
+// its helpers). Every fallible step converges here so next_message can classify
+// recoverable-vs-fatal in one place (7.3c) instead of erasing types into Box<dyn
+// Error>. Distinct from SessionRejectReason, which covers FIX-level Reject(3)
+// reasons produced during message *parsing* (before a Message exists).
+//
+// The first block are native session-verification failures; the last three are
+// foreign errors folded in via #[from] so `?` converts them automatically:
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("BeginString mismatch: expected {expected} got {received}")]
@@ -276,6 +282,22 @@ pub enum SessionError {
     MissingHeaderField { tag: u32 },
     #[error("Not in session time")]
     OutOfSessionTime,
+    // App vetoed the logon in on_admin_msg_received. Self-contained (carries its
+    // own reason) → #[from] is the right tool. Classifies as fatal in 7.3c
+    // (generate_logout + disconnect).
+    #[error(transparent)]
+    LogonRejected(#[from] RejectLogon),
+    // App-level error from on_app_msg_received. TRANSITIONAL: folded in here only
+    // so 7.3b stays behavior-neutral (still propagates → still drops the
+    // connection). 7.3c handles AppError at dispatch_to_app (log + keep alive)
+    // and deletes this variant; the real 35=j response is 7.4.
+    #[error(transparent)]
+    AppErr(#[from] AppError),
+    // send_app_message failed while replying on THIS session (the pipe broke
+    // mid-response). SessionNotFound can't occur here (no registry lookup) and
+    // NotLoggedOn only in a disconnect race → classifies as fatal (disconnect).
+    #[error(transparent)]
+    SendErr(#[from] SendError),
 }
 
 #[derive(Debug, thiserror::Error)]

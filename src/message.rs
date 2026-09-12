@@ -108,9 +108,9 @@ impl FieldMap {
 
     pub fn get_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         if let Some(field) = self.fields.get(&tag) {
-            return field.value.parse::<T>().map_err(|_| FieldError::InvalidFormat);
+            return field.value.parse::<T>().map_err(|_| FieldError::InvalidFormat { tag });
         }
-        Err(FieldError::TagNotFound)
+        Err(FieldError::TagNotFound { tag })
     }
 
     pub fn set_group(&mut self, tag: Tag, value: u32, rep_grp_delimiter: Tag) -> &mut Group {
@@ -146,7 +146,7 @@ impl FieldMap {
     }
 }
 
-impl std::fmt::Display for FieldMap {
+impl Display for FieldMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = String::from_iter(self.iter().into_iter().map(|sfield| sfield.to_string()));
         write!(f, "{}", s)
