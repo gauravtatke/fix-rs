@@ -6,12 +6,17 @@ build = "build/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# Clippy lint configuration. `all` (clippy's default group: correctness, suspicious,
-# style, complexity, perf) is set to warn. Applies to every target of this package
-# (lib, bins, tests, build script). Add stricter groups (pedantic/nursery) or tune
-# individual lints here later, e.g. `pedantic = "warn"` or `some_lint = "allow"`.
+# Clippy lint configuration (package-wide, all targets). correctness = deny (these
+# are real bugs — fail the lint), the other default groups = warn. Together these
+# five groups are clippy::all; they're disjoint (each lint is in exactly one group),
+# so listing them needs no `priority`. pedantic/nursery/cargo/restriction stay at
+# their default (allow) — opt in later if wanted.
 [lints.clippy]
-all = "warn"
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
 
 [dependencies]
 roxmltree = "0.21.1"

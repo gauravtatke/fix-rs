@@ -1,7 +1,7 @@
 use crate::message::SOH;
 use std::io::{self, BufRead, BufReader, Read};
 
-const CHECKSUM_PREFIX: &[u8; 3] = &[b'1', b'0', b'='];
+const CHECKSUM_PREFIX: &[u8; 3] = b"10=";
 
 /// Reads complete FIX messages from a byte stream by accumulating SOH-delimited
 /// fields until the checksum tag (`10=`) is found. Generic over `Read` so it works

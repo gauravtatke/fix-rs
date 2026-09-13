@@ -109,7 +109,7 @@ fn establish_session(session: &mut Session, stream: TcpStream, raw: &str) -> Con
 }
 
 fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> {
-    match Message::from_str(&msg_str, session.data_dict()) {
+    match Message::from_str(msg_str, session.data_dict()) {
         Ok(mut msg) => {
             // next_message has already applied any FIX response (Reject /
             // Logout + disconnect) internally; we only read its signal.
@@ -125,7 +125,7 @@ fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> 
         Err(reason) => {
             // Well-formed but invalid: Reject it (RefSeqNum from the raw
             // message) and keep the connection alive.
-            let seq_num = message::seq_num_from_raw(&msg_str)
+            let seq_num = message::seq_num_from_raw(msg_str)
                 .and_then(|sq| sq.parse::<u32>().ok())
                 .unwrap_or(0);
             info!("{} rejecting invalid message: {}", session.id(), reason);

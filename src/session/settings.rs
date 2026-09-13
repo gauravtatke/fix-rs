@@ -544,7 +544,7 @@ mod session_setting_tests {
         assert_eq!(s1.connection_type, ConnectionType::Acceptor);
         assert_eq!(s1.begin_string, "FIX.4.3");
         assert_eq!(s1.socket_accept_port, Some(10114));
-        assert_eq!(s1.reset_on_logon, false);
+        assert!(!s1.reset_on_logon);
 
         // session 2: overrides port and reset_on_logon
         let s2 = props.sessions.get("FIX.4.3:SENDER_2->TARGET_2").unwrap();
@@ -553,7 +553,7 @@ mod session_setting_tests {
         assert_eq!(s2.connection_type, ConnectionType::Acceptor);
         assert_eq!(s2.begin_string, "FIX.4.3");
         assert_eq!(s2.socket_accept_port, Some(10115));
-        assert_eq!(s2.reset_on_logon, true);
+        assert!(s2.reset_on_logon);
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod session_setting_tests {
         assert_eq!(props.sessions.len(), 1);
 
         let sid = "FIX.4.3:SENDER/sender_sub/sender_loc->TARGET/target_sub/target_loc:qual1";
-        let s = props.sessions.get(sid).expect(&format!("session not found for key: {}", sid));
+        let s = props.sessions.get(sid).unwrap_or_else(|| panic!("session not found for key: {}", sid));
 
         assert_eq!(s.begin_string, "FIX.4.3");
         assert_eq!(s.connection_type, ConnectionType::Acceptor);
@@ -737,9 +737,9 @@ mod session_setting_tests {
         assert_eq!(s.session_qualifier.as_deref(), Some("qual1"));
         assert_eq!(s.heartbeat_interval, Some(30));
         assert_eq!(s.data_dictionary, PathBuf::from("resources/FIX43.xml"));
-        assert_eq!(s.reset_on_logon, true);
-        assert_eq!(s.reset_on_disconnect, true);
-        assert_eq!(s.reset_on_logout, true);
+        assert!(s.reset_on_logon);
+        assert!(s.reset_on_disconnect);
+        assert!(s.reset_on_logout);
         assert_eq!(s.timezone, chrono_tz::US::Eastern);
         assert_eq!(s.socket_accept_port, Some(10114));
         assert_eq!(s.start_day, Some(Weekday::Mon));

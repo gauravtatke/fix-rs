@@ -13,7 +13,7 @@ use crate::data_dictionary::DataDictionary;
 use crate::fix_errors::{SendError, SessionError, SessionRejectReason};
 use crate::message::{Message, StringField};
 use crate::session::schedule::SessionSchedule;
-use getset::{CopyGetters, Getters, Setters};
+use getset::{Getters, Setters};
 use log::{error, info, warn};
 use state::SessionState;
 use std::error::Error;
@@ -837,7 +837,7 @@ mod session_tests {
 
     #[test]
     fn test_valid_logon_state_before_logon() {
-        let (mut session, _) = make_session();
+        let (session, _) = make_session();
         assert!(session.valid_logon_state("A"));
         assert!(!session.valid_logon_state("0"));
         assert!(!session.valid_logon_state("D"));

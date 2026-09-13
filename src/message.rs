@@ -277,7 +277,7 @@ impl Message {
         {
             if sfield.tag() != 10 {
                 for byt in sfield.to_string().as_bytes() {
-                    byte_sum = byte_sum + *byt as u32;
+                    byte_sum += *byt as u32;
                 }
             }
         }
@@ -297,7 +297,7 @@ impl Message {
             .chain(self.trailer.iter())
             .filter_map(|sfield| {
                 if sfield.tag() != 8 && sfield.tag() != 9 && sfield.tag() != 10 {
-                    Some(sfield.to_string().as_bytes().len())
+                    Some(sfield.to_string().len())
                 } else {
                     None
                 }
@@ -490,7 +490,7 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<
     let actual_body_len: usize = v
         .iter()
         .filter(|sfield| sfield.tag() != 8 && sfield.tag() != 9 && sfield.tag() != 10)
-        .map(|sfield| sfield.to_string().as_bytes().len())
+        .map(|sfield| sfield.to_string().len())
         .sum();
     if actual_body_len as u32 != expected_body_len {
         return Err(SessionRejectReason::InvalidBodyLength);
@@ -662,7 +662,7 @@ fn parse_group(
     // at here, the group's parsing is complete, check if any required tag is missing for each instance
     for count in 0..declared_count as usize {
         let group_instance = &group[count];
-        validate_required_tag_missing(msg_type, &group_instance, rg_dd)?
+        validate_required_tag_missing(msg_type, group_instance, rg_dd)?
     }
     Ok(())
 }
@@ -757,8 +757,8 @@ fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResul
         .header()
         .iter()
         .into_iter()
-        .chain(message.body().iter().into_iter())
-        .chain(message.trailer().iter().into_iter())
+        .chain(message.body().iter())
+        .chain(message.trailer().iter())
     {
         validate_tag_value_for_type(field.tag(), field.value(), dd)?;
         validate_tag_for_value_range(field.tag(), field.value(), dd)?;

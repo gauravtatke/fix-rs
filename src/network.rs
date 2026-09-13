@@ -81,7 +81,7 @@ pub fn start_timer(session_map: SessionMap) -> thread::JoinHandle<()> {
             thread::sleep(Duration::from_secs(1));
             for session_arc in session_map.values() {
                 let mut session = session_arc.lock().unwrap();
-                let _ = session.next_tick();
+                session.next_tick();
                 let _ = session.poll_outbound();
             }
         }

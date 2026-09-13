@@ -423,9 +423,9 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   `on_admin_msg_sending` + `send_raw`, target-seq advanced) + keep reading. First message bad → `disconnect` (a Reject is
   post-logon). Done: `0cfcdab`.
 
-- [ ] **7.3 — Session-error side: catch, classify, respond (was the "un-box `next_message`" step).**
+- [x] **7.3 — Session-error side: catch, classify, respond (was the "un-box `next_message`" step).**
   Today `next_message` returns `Result<(), Box<dyn Error>>` and the acceptor `?`-es it, so any session error still kills
-  the connection with nothing on the wire. Split into:
+  the connection with nothing on the wire. Split into (all done; committed across 7a2f8e3 / 059e62c / 7.3c commit):
 
   Note on ordering: getting into 7.3 showed the dependency runs opposite to a naive "classify
   first" reading — you can't classify a `SessionError` in `next_message` until *every* inbound path
@@ -442,7 +442,7 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
     (4/5 verify fields are `String`, whose parse is `Infallible` → only `TagNotFound` reachable).
     Done: 197 tests green.
 
-  - [ ] **7.3b — Converge the inbound chain to one typed result (types only, no behavior change).**
+  - [x] **7.3b — Converge the inbound chain to one typed result (types only, no behavior change).**
     Make `next_*`, `dispatch_to_app`, and `next_message` return `Result<(), SessionError>` (drop the
     `Box`). Fold the two app-callback errors in:
     - `RejectLogon` → `SessionError` via `#[from]` (the self-contained, propagation case — e.g. a
@@ -455,7 +455,7 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
     `return Err(...)`. Done when: it compiles and 197 tests stay green (behavior identical — bad
     message still drops the connection).
 
-  - [ ] **7.3c — Classify + act + control signal (the wire behavior).**
+  - [x] **7.3c — Classify + act + control signal (the wire behavior).**
     `next_message` (or a thin wrapper) catches the `SessionError`, applies recoverable-vs-fatal + the
     pre-logon gate (before `logon_received`, everything is fatal → disconnect, since Reject is
     post-logon), and acts: `MissingHeaderField` → `reject_message` (recoverable, keep reading); fatal
@@ -475,11 +475,27 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   boundary vs. app responsibility. Done when: an `AppError` from `on_app_msg_received` produces a `35=j` (or is
   explicitly left to the app, documented).
 
-- [ ] **7.5 — Tests + Banzai integration.**
-  Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). Live check:
-  send a malformed/invalid order from Banzai and confirm the Reject/Logout appears in Banzai's log and the connection
-  behaves correctly (stays up for a Reject, tears down for a Logout).
+- [ ] **7.5 — Tests.**
+  Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). The 7.3c
+  classifier already has unit coverage (recoverable Reject / fatal Logout+disconnect / pre-logon gate / AppError
+  no-teardown, 4 tests). Add a dedicated `LogonRejected → Logout+disconnect` case (currently only indirectly covered by
+  the pre-logon gate test), and 35=j coverage once 7.4 lands.
+
+  **Blocker for live/interop testing (see 7.6): Banzai cannot inject malformed or invalid messages** — it's an
+  order-entry GUI with no way to script a broken/out-of-order/garbled message, so the Reject/Logout paths can't be
+  exercised end-to-end against it. Banzai only validated the happy-path order round trip (M6). The malformed-input paths
+  therefore need a different harness.
+
+- [ ] **7.6 — Protocol test harness / simulator (NEW — needed for M7 and beyond).**
+  We need a way to drive the engine with arbitrary raw wire input (malformed, out-of-order, garbled, wrong CompID/
+  BeginString, bad seq num) and assert the exact response, since Banzai can't. Two candidate layers (likely both):
+  (a) in-process integration tests that construct a `Session` + `MockResponder` and feed raw strings through the
+  inbound path (no socket — cheap, deterministic); (b) a small scripted TCP simulator that connects to the acceptor and
+  runs send/expect scripts (true end-to-end, catches the acceptor/IO seam the unit tests can't).
+  Study how QuickFIX/J does this first — its acceptance-test (AT) `.def` script engine and unit `SessionTest` patterns
+  are the reference. Strategy + coverage points documented in
+  `session_context/qfj-testing-strategy.md`. Decide fix-rs's approach from that.
 
 **M7 exit criteria**: inbound messages that fail engine-level validation produce the correct FIX response
-(Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is unit-tested and
-verified against Banzai. Too-high seq (ResendRequest) and full resend remain deferred.
+(Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is covered by
+automated tests (unit + a harness per 7.6). Too-high seq (ResendRequest) and full resend remain deferred.

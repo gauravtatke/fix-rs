@@ -210,7 +210,7 @@ impl DataDictionary {
     }
 
     fn set_field_for(&mut self, msg_type: &str, fnum: u32, required: bool) -> DResult<()> {
-        let msg_fields = self.msg_fields.entry(msg_type.to_string()).or_insert_with(HashSet::new);
+        let msg_fields = self.msg_fields.entry(msg_type.to_string()).or_default();
         if msg_fields.contains(&fnum) {
             return Err(XmlError::DuplicateField(format!(
                 "field {} in message {}",
@@ -221,7 +221,7 @@ impl DataDictionary {
         if required {
             self.msg_required_fields
                 .entry(msg_type.to_owned())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(fnum);
         }
         Ok(())
@@ -471,10 +471,10 @@ impl FromStr for DataDictionary {
         let component_map: NodeMap = get_component_nodes_by_name(component_node)?;
 
         let header_node = lookup_node(HEADER_ID, &doc)?;
-        dd.add_xml_message(&HEADER_ID, &header_node, &component_map, &doc)?;
+        dd.add_xml_message(HEADER_ID, &header_node, &component_map, &doc)?;
 
         let trailer_node = lookup_node(TRAILER_ID, &doc)?;
-        dd.add_xml_message(&TRAILER_ID, &trailer_node, &component_map, &doc)?;
+        dd.add_xml_message(TRAILER_ID, &trailer_node, &component_map, &doc)?;
 
         let messages = lookup_node("messages", &doc)?;
         dd.add_all_xml_messages(&messages, &component_map, &doc)?;
@@ -749,14 +749,14 @@ mod dictionary_tests {
                     && get_attribute("msgtype", node).unwrap().eq(msg_type)
             })
             .unwrap();
-        let msg_fields = msg_node
+        
+        msg_node
             .children()
             .filter(|node| node.is_element() && node.has_tag_name("field"))
             .map(|node| {
                 (get_name_attr(&node).unwrap().to_string(), get_required_attr(&node).unwrap())
             })
-            .collect();
-        msg_fields
+            .collect()
     }
 
     fn assert_msg(msg_type: &str, dd: &DataDictionary, flds: &[u32], req_flds: Option<&[u32]>) {
@@ -1095,7 +1095,7 @@ mod dictionary_tests {
 
             assert!(dd.category.contains_key(&msg_type));
             assert!(dd.msg_fields.contains_key(&msg_type));
-            assert!(dd.msg_required_fields.contains_key(&msg_type), "msgtype {}", &msg_type);
+            assert!(dd.msg_required_fields.contains_key(&msg_type), "msgtype {}", msg_type);
         }
     }
 
@@ -1113,16 +1113,16 @@ mod dictionary_tests {
                 assert!(
                     dd.is_msg_field(&msg_type, number),
                     "msg {}, name {}, number {}",
-                    &msg_type,
-                    &name,
+                    msg_type,
+                    name,
                     number
                 );
                 if required {
                     assert!(
                         dd.is_msg_req_field(&msg_type, number),
                         "reqd: msg {}, name {}, number {}",
-                        &msg_type,
-                        &name,
+                        msg_type,
+                        name,
                         number
                     );
                 }
@@ -1509,9 +1509,9 @@ mod dictionary_tests {
         let group6_info = dd.get_msg_group("E", 96).unwrap();
         let grp6_dd = group6_info.data_dictionary();
         // verify group7
-        assert_group("E", 97, &grp6_dd, &[41], Some(&[41]), 41, &[41]);
+        assert_group("E", 97, grp6_dd, &[41], Some(&[41]), 41, &[41]);
         // verify group3
-        assert_group("E", 93, &grp6_dd, &[31, 32], None, 31, &[31, 32]);
+        assert_group("E", 93, grp6_dd, &[31, 32], None, 31, &[31, 32]);
     }
 
     #[test]
@@ -1540,9 +1540,9 @@ mod dictionary_tests {
         let group6_info = dd.get_msg_group("E", 96).unwrap();
         let grp6_dd = group6_info.data_dictionary();
         // verify group7
-        assert_group("E", 97, &grp6_dd, &[41], Some(&[41]), 41, &[41]);
+        assert_group("E", 97, grp6_dd, &[41], Some(&[41]), 41, &[41]);
         // verify group3
-        assert_group("E", 93, &grp6_dd, &[31, 32], None, 31, &[31, 32]);
+        assert_group("E", 93, grp6_dd, &[31, 32], None, 31, &[31, 32]);
     }
 
     #[test]
@@ -1614,14 +1614,14 @@ mod dictionary_tests {
         let group6_info = dd.get_msg_group("E", 96).unwrap();
         let group6_dd = group6_info.data_dictionary();
         //verify group2 (group of the comp "CompWithOnlyReqGroup")
-        assert_group("E", 92, &group6_dd, &[21, 22], Some(&[22]), 21, &[21, 22]);
+        assert_group("E", 92, group6_dd, &[21, 22], Some(&[22]), 21, &[21, 22]);
         // verify group7 (subgroup of group6)
-        assert_group("E", 97, &group6_dd, &[41, 1, 2, 91], None, 41, &[41, 1, 2, 91]);
+        assert_group("E", 97, group6_dd, &[41, 1, 2, 91], None, 41, &[41, 1, 2, 91]);
         let group7_info = group6_dd.get_msg_group("E", 97).unwrap();
         let group7_dd = group7_info.data_dictionary();
         // verify group1 (group of CompWithFieldsAndNonReqGroup)
-        assert_group("E", 91, &group7_dd, &[11, 12], None, 11, &[11, 12]);
+        assert_group("E", 91, group7_dd, &[11, 12], None, 11, &[11, 12]);
         // verify group3
-        assert_group("E", 93, &group6_dd, &[31, 32], Some(&[31]), 31, &[31, 32]);
+        assert_group("E", 93, group6_dd, &[31, 32], Some(&[31]), 31, &[31, 32]);
     }
 }
