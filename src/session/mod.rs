@@ -10,16 +10,20 @@ pub use settings::*;
 
 use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
-use crate::message::{Message, StringField};
 use crate::fix_errors::{SendError, SessionError, SessionRejectReason};
+use crate::message::{Message, StringField};
 use crate::session::schedule::SessionSchedule;
-use log::{info, warn};
+use getset::{CopyGetters, Getters, Setters};
+use log::{error, info, warn};
 use state::SessionState;
 use std::error::Error;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[derive(Getters, Setters)]
 pub struct Session {
+    #[getset(get = "pub")]
     id: SessionId,
     is_active: bool,
     // Config flags that control *when* Session calls state.reset() —
@@ -30,7 +34,9 @@ pub struct Session {
     reset_on_disconnect: bool,
     state: SessionState,
     schedule: SessionSchedule,
+    #[getset(set = "pub")]
     responder: Option<Box<dyn Responder>>,
+    #[getset(get = "pub")]
     data_dict: Arc<DataDictionary>,
     // The session OWNS its application. There is no back-edge: the app never
     // holds a reference to the session. Inbound callbacks *return* the messages
@@ -66,13 +72,13 @@ impl Session {
         }
     }
 
-    pub fn set_responder(&mut self, responder: Box<dyn Responder>) {
-        self.responder = Some(responder);
-    }
-
-    pub fn dictionary(&self) -> &DataDictionary {
-        &self.data_dict
-    }
+    // pub fn set_responder(&mut self, responder: Box<dyn Responder>) {
+    //     self.responder = Some(responder);
+    // }
+    //
+    // pub fn dictionary(&self) -> &DataDictionary {
+    //     &self.data_dict
+    // }
 
     // Before logon, only Logon messages are valid. During logout (sent but
     // not received), only Logout and SequenceReset are accepted.
@@ -89,25 +95,30 @@ impl Session {
     /*****************************************************/
     /******** ALL OUTBOUND MESSAGE PROCESSING METHODS *****/
     /*****************************************************/
-    // Tears down the connection and resets session to pre-logon state.
-    // Called when the reader thread detects EOF/error (peer disconnected).
+    // Tears down the connection and resets session to pre-logon state: drops the
+    // responder, clears the logon/logout flags, notifies the app (on_logout), and
+    // optionally resets sequence numbers. IDEMPOTENT — the whole teardown is gated
+    // on the responder still being present, so calling it again on an
+    // already-disconnected session is a no-op (on_logout fires exactly once). This
+    // matters because several paths can converge on it: the acceptor on EOF/error
+    // or a fatal message, next_tick on a timeout, and next_logout on graceful logout.
     pub fn disconnect(&mut self) {
         if let Some(ref responder) = self.responder {
             responder.disconnect();
+            self.state.logon_sent = false;
+            self.state.logon_received = false;
+            self.state.logout_sent = false;
+            self.state.logout_received = false;
+            info!("{} event: Disconnected", self.id);
+            // Disjoint-field borrow: &mut self.app alongside &self.id is fine — the
+            // compiler sees they don't overlap. No app parameter needed.
+            self.app.on_logout(&self.id);
+            // Seq num reset goes last — flags and on_logout must fire regardless.
+            if self.reset_on_disconnect {
+                self.state.reset(Instant::now());
+            }
         }
         self.responder = None;
-        self.state.logon_sent = false;
-        self.state.logon_received = false;
-        self.state.logout_sent = false;
-        self.state.logout_received = false;
-        info!("{} event: Disconnected", self.id);
-        // Disjoint-field borrow: &mut self.app alongside &self.id is fine — the
-        // compiler sees they don't overlap. No app parameter needed.
-        self.app.on_logout(&self.id);
-        // Seq num reset goes last — flags and on_logout must fire regardless.
-        if self.reset_on_disconnect {
-            self.state.reset(Instant::now());
-        }
     }
 
     // The single outbound path for application messages. Stamps the standard
@@ -273,11 +284,32 @@ impl Session {
     // is no cycle and no borrow conflict, even though the app lives inside self.
     fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), SessionError> {
         if is_admin_msg_type(msg_type) {
+            // A RejectLogon from the admin callback (app vetoed the logon) is
+            // session-fatal, so it still propagates via `?` — next_message
+            // classifies it into a Logout + disconnect. Only app-message errors
+            // are handled locally below.
             self.app.on_admin_msg_received(&self.id, msg)?;
         } else {
-            let responses = self.app.on_app_msg_received(&self.id, msg)?;
-            for resp in responses {
-                self.send_app_message(resp)?;
+            // An error from on_app_msg_received is an APPLICATION-level problem
+            // (the counterparty's business message broke the app's contract), not
+            // a reason to tear down a healthy FIX session. So we catch it here and
+            // keep the connection up instead of `?`-propagating it — otherwise a
+            // single bad order would drop the whole session. The correct wire
+            // response is a BusinessMessageReject (35=j); until that lands (7.4)
+            // we only log.
+            //
+            // send_app_message keeps its `?`: a SendError means our own outbound
+            // pipe is broken, which IS session-fatal and must propagate.
+            match self.app.on_app_msg_received(&self.id, msg) {
+                Ok(responses) => {
+                    for resp in responses {
+                        self.send_app_message(resp)?;
+                    }
+                }
+                Err(e) => {
+                    // TODO(7.4): reply with BusinessMessageReject (35=j) instead of only logging.
+                    error!("{}", e);
+                }
             }
         }
         Ok(())
@@ -346,9 +378,11 @@ impl Session {
         Ok(())
     }
 
-    // Inbound dispatch: extracts MsgType, routes to per-type handler.
-    // App-level messages fall through to verify → seq check → dispatch_to_app.
-    pub(crate) fn next_message(&mut self, msg: &mut Message) -> Result<(), SessionError> {
+    // Pure routing layer: extracts MsgType and dispatches to the per-type handler,
+    // producing a typed SessionError on failure. Carries NO response policy — it just
+    // `?`-propagates errors up to next_message, which classifies and acts on them.
+    // App-level messages fall through to verify -> seq check -> dispatch_to_app.
+    fn route_message(&mut self, msg: &mut Message) -> Result<(), SessionError> {
         let msg_type =
             msg.get_msg_type().map_err(|_| SessionError::MissingHeaderField { tag: 35 })?;
         match msg_type.as_str() {
@@ -362,6 +396,63 @@ impl Session {
                 self.dispatch_to_app(&msg_type, msg)?;
                 Ok(())
             }
+        }
+    }
+
+    // Classify an inbound failure into a FIX response + a read-loop signal.
+    fn on_inbound_error(&mut self, msg: &Message, err: SessionError) -> ControlFlow<()> {
+        // A Reject(35=3) is a post-logon concept — there's no session to reject
+        // within before logon. So any pre-logon failure is fatal: tear down rather
+        // than reject. (This also subsumes the old "bad first message -> disconnect".)
+        if !self.state.logon_received {
+            warn!("{} pre-logon error, disconnecting: {}", self.id, err);
+            self.disconnect();
+            return ControlFlow::Break(());
+        }
+
+        // Match by reference so `err` survives for the Logout text in the fatal arm.
+        // No `_` arm on purpose: a new SessionError variant must be classified here
+        // deliberately, not silently inherit a default (mirrors `code()` in 7.1).
+        match &err {
+            // Recoverable: a required field was missing/unparseable. Reject and keep
+            // the connection. reject_message also advances the target seq (the bad
+            // message was still consumed); verify_seq_number never ran on this path,
+            // so the seq is bumped exactly once.
+            SessionError::MissingHeaderField { tag } => {
+                let seq = msg.header().get_field::<u32>(34).unwrap_or(0);
+                // Log the reason at the session layer for troubleshooting — the
+                // outgoing Reject only carries the tag-373 code, not this text.
+                warn!("{} rejecting message: {}", self.id, err);
+                self.reject_message(seq, SessionRejectReason::RequiredTagMissing { tag: *tag });
+                ControlFlow::Continue(())
+            }
+            // Fatal: unrecoverable session-level breakage. Log out with the reason as
+            // Text(58) so the counterparty sees why, then disconnect.
+            SessionError::BeginStringMismatch { .. }
+            | SessionError::CompIdMismatch { .. }
+            | SessionError::SeqNumTooLow { .. }
+            | SessionError::InvalidStateForMsgType { .. }
+            | SessionError::OutOfSessionTime
+            | SessionError::LogonRejected(_)
+            | SessionError::SendErr(_) => {
+                // Readable reason for troubleshooting (the Logout only carries it as
+                // Text(58) on the wire).
+                warn!("{} fatal session error, logging out: {}", self.id, err);
+                self.generate_logout(Some(&err.to_string()));
+                self.disconnect();
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    // Inbound entry point. Routes the message, then translates any failure into the
+    // correct FIX response and a control signal for the read loop. All the
+    // recoverable-vs-fatal *policy* lives here so the acceptor stays dumb: it only
+    // learns "keep reading" (Continue) or "this session is done" (Break).
+    pub(crate) fn next_message(&mut self, msg: &mut Message) -> ControlFlow<()> {
+        match self.route_message(msg) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(err) => self.on_inbound_error(msg, err),
         }
     }
 
@@ -559,6 +650,7 @@ mod session_tests {
     use crate::application::Application;
     use crate::fix_errors::{AppError, DonotSend, RejectLogon};
     use std::collections::VecDeque;
+    use std::ops::ControlFlow;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1259,7 +1351,7 @@ mod session_tests {
         let (mut session, _, app) = make_logged_on_session_spy();
 
         let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        session.next_message(&mut msg).unwrap();
+        assert_eq!(session.next_message(&mut msg), ControlFlow::Continue(()));
 
         let calls = app.calls();
         assert_eq!(calls, vec!["from_app"]);
@@ -1270,8 +1362,136 @@ mod session_tests {
         let (mut session, _) = make_logged_on_session();
 
         let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        session.next_message(&mut msg).unwrap();
+        assert_eq!(session.next_message(&mut msg), ControlFlow::Continue(()));
         assert_eq!(session.state.next_target_msg_seq_num, 2);
+    }
+
+    // --- 7.3c: next_message classify + act (ControlFlow) ---
+    //
+    // Contract these encode (build the classifier to satisfy them):
+    //   next_message(&mut self, &mut Message) -> ControlFlow<()>
+    //     Continue(()) => keep reading (processed OK, or a recoverable Reject was sent)
+    //     Break(())    => session torn down (fatal error, or any pre-logon error)
+    //   post-logon MissingHeaderField -> Reject(35=3) w/ RequiredTagMissing, keep alive
+    //   post-logon fatal (CompIdMismatch, ...) -> Logout(35=5) + disconnect
+    //   pre-logon ANY error            -> disconnect, NO Reject (Reject is post-logon)
+    //   AppError (from on_app_msg_received) -> swallowed in dispatch_to_app, no teardown
+
+    // App whose on_app_msg_received always fails — exercises the AppError path.
+    struct FailingApp;
+    impl Application for FailingApp {
+        fn on_create(&mut self, _s: &SessionId) {}
+        fn on_logon(&mut self, _s: &SessionId) {}
+        fn on_logout(&mut self, _s: &SessionId) {}
+        fn on_admin_msg_sending(&mut self, _s: &SessionId, _m: &mut Message) {}
+        fn on_admin_msg_received(
+            &mut self,
+            _s: &SessionId,
+            _m: &Message,
+        ) -> Result<(), RejectLogon> {
+            Ok(())
+        }
+        fn on_app_msg_sending(
+            &mut self,
+            _s: &SessionId,
+            _m: &mut Message,
+        ) -> Result<(), DonotSend> {
+            Ok(())
+        }
+        fn on_app_msg_received(
+            &mut self,
+            _s: &SessionId,
+            _m: &Message,
+        ) -> Result<Vec<Message>, AppError> {
+            Err(AppError::UnsupportedMessageType)
+        }
+    }
+
+    // An otherwise-well-formed header message of `msg_type` with one header tag omitted.
+    fn make_msg_missing(msg_type: &str, missing_tag: u32) -> Message {
+        use crate::message::StringField;
+        let mut msg = Message::new();
+        for (tag, val) in [
+            (8u32, "FIX.4.3"),
+            (35, msg_type),
+            (49, "TARGET"),
+            (56, "SENDER"),
+        ] {
+            if tag != missing_tag {
+                msg.header_mut().set_field(StringField::new(tag, val));
+            }
+        }
+        msg.header_mut().set_field(StringField::new(34, "1"));
+        msg
+    }
+
+    // Recoverable: a post-logon app message missing a required header field is
+    // Rejected on the wire and the connection stays up. Target seq advances once.
+    #[test]
+    fn test_next_message_recoverable_field_error_rejects_and_continues() {
+        let (mut session, mock_state) = make_logged_on_session();
+        let mut msg = make_msg_missing("D", 49); // NewOrderSingle missing SenderCompID
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Continue(()));
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "3")); // Reject
+        assert!(sent_message_contains(&sent[0], 45, "1")); // RefSeqNum
+        assert!(sent_message_contains(&sent[0], 373, "1")); // RequiredTagMissing
+        assert!(sent_message_contains(&sent[0], 371, "49")); // RefTagID
+        assert!(!mock_state.is_disconnected());
+        assert_eq!(session.state.next_target_msg_seq_num, 2); // advanced exactly once
+    }
+
+    // Fatal: a post-logon CompID mismatch triggers a Logout and disconnect.
+    #[test]
+    fn test_next_message_fatal_error_logs_out_and_disconnects() {
+        let (mut session, mock_state) = make_logged_on_session();
+        let mut msg = make_msg("D", "WRONG", "SENDER", 1); // bad SenderCompID
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5")); // Logout
+        assert!(mock_state.is_disconnected());
+    }
+
+    // Pre-logon gate: an error that would be a recoverable Reject post-logon must
+    // instead disconnect (a Reject is a post-logon concept), with nothing rejected.
+    #[test]
+    fn test_next_message_pre_logon_error_disconnects_without_reject() {
+        let (mut session, mock_state) = make_session();
+        session.is_active = true; // but logon_received stays false
+        let mut msg = make_msg_missing("A", 49); // Logon missing SenderCompID
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        assert!(mock_state.sent().iter().all(|w| !sent_message_contains(w, 35, "3")));
+    }
+
+    // AppError from on_app_msg_received is the app's problem (real 35=j is 7.4);
+    // it must NOT tear down the session — the connection stays up.
+    #[test]
+    fn test_next_message_app_error_does_not_tear_down() {
+        let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(FailingApp));
+        let mut msg = make_msg("D", "TARGET", "SENDER", 1); // valid header; app errors
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Continue(()));
+        assert!(!mock_state.is_disconnected());
+        assert!(
+            mock_state
+                .sent()
+                .iter()
+                .all(|w| !sent_message_contains(w, 35, "3") && !sent_message_contains(w, 35, "5"))
+        );
     }
 
     // --- next_tick helpers ---
@@ -1731,7 +1951,7 @@ mod session_tests {
         let (mut session, mock_state) = make_logged_on_session_with_app(app);
 
         let mut req = make_msg("V", "TARGET", "SENDER", 1); // MarketDataRequest
-        session.next_message(&mut req).unwrap();
+        assert_eq!(session.next_message(&mut req), ControlFlow::Continue(()));
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -1769,7 +1989,7 @@ mod session_tests {
         let seq_before = session.state.next_sender_msg_seq_num;
 
         let mut req = make_msg("V", "TARGET", "SENDER", 1);
-        assert!(session.next_message(&mut req).is_ok());
+        assert_eq!(session.next_message(&mut req), ControlFlow::Continue(()));
 
         assert!(mock_state.sent().is_empty());
         assert_eq!(session.state.next_sender_msg_seq_num, seq_before);

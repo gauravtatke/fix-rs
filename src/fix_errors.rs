@@ -291,8 +291,8 @@ pub enum SessionError {
     // so 7.3b stays behavior-neutral (still propagates → still drops the
     // connection). 7.3c handles AppError at dispatch_to_app (log + keep alive)
     // and deletes this variant; the real 35=j response is 7.4.
-    #[error(transparent)]
-    AppErr(#[from] AppError),
+    // #[error(transparent)]
+    // AppErr(#[from] AppError),
     // send_app_message failed while replying on THIS session (the pipe broke
     // mid-response). SessionNotFound can't occur here (no registry lookup) and
     // NotLoggedOn only in a disconnect race → classifies as fatal (disconnect).

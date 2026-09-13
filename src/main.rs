@@ -4,10 +4,10 @@ include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 
 mod application;
 mod data_dictionary;
+mod fix_errors;
 mod io;
 mod message;
 mod network;
-mod fix_errors;
 mod sample_app;
 mod session;
 

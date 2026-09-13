@@ -1,6 +1,6 @@
 use crate::application::Application;
-use crate::message::{Message, StringField};
 use crate::fix_errors::{AppError, DonotSend, RejectLogon};
+use crate::message::{Message, StringField};
 use crate::session::SessionId;
 
 pub struct SampleApp {
