@@ -1,5 +1,5 @@
 use crate::application::Application;
-use crate::fix_errors::{BusinessMsgRejectReason, DonotSend, RejectLogon};
+use crate::fix_errors::{BusinessMsgReject, DonotSend, RejectLogon};
 use crate::message::Message;
 use crate::session::SessionId;
 
@@ -141,7 +141,7 @@ impl Application for SampleApp {
         &mut self,
         session_id: &SessionId,
         message: &Message,
-    ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
+    ) -> Result<Vec<Message>, BusinessMsgReject> {
         // MsgType(35) is guaranteed: from_str requires it, and next_message routed
         // on it to reach us.
         let msg_type = message.get_msg_type().expect("MsgType(35) present on a routed message");
@@ -153,7 +153,7 @@ impl Application for SampleApp {
                 // simulator contract puts it there; a peer that omits it is a genuine
                 // business-level miss → BusinessMessageReject (380=5).
                 let ccy_pair = message.get_body_field::<String>(55).map_err(|_| {
-                    BusinessMsgRejectReason::MissingConditionallyRequiredField { tag: 55 }
+                    BusinessMsgReject::MissingConditionallyRequiredField { tag: 55 }
                 })?;
                 // MDReqID(262) is dictionary-required for V — the engine already
                 // rejected any V missing it before dispatch, so it's present here.
@@ -273,10 +273,7 @@ mod sample_app_tests {
         req.set_body_field(262, "REQ-3"); // has 262, no top-level 55
 
         let err = app.on_app_msg_received(&sid(), &req).unwrap_err();
-        assert!(matches!(
-            err,
-            BusinessMsgRejectReason::MissingConditionallyRequiredField { tag: 55 }
-        ));
+        assert!(matches!(err, BusinessMsgReject::MissingConditionallyRequiredField { tag: 55 }));
     }
 
     // Builds an inbound NewOrderSingle (35=D) the way on_app_msg_received reads

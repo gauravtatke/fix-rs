@@ -24,8 +24,8 @@ Touches `src/message.rs` and `src/quickfix_errors.rs` only.
   (`src/message.rs`). Add round-trip tests (parse a fixture, `.to_string()` it, assert it matches the original). *Done —
   4 round-trip tests passing (`msg_test_round_trip_*`).*
 
-- [x] **1.2 — Expose `SessionRejectReason` for testing.**
-  In `src/quickfix_errors.rs`: make `SessionRejectReason` `pub`, derive `Debug, PartialEq, Eq, Clone, Copy` on it, add
+- [x] **1.2 — Expose `SessionRejectError` for testing.**
+  In `src/quickfix_errors.rs`: make `SessionRejectError` `pub`, derive `Debug, PartialEq, Eq, Clone, Copy` on it, add
   `SessionRejectError::kind(&self) -> SessionRejectReason`. Pure enabler, no behavior change — should compile with zero
   other edits. Done when: `cargo build` is clean and you can write
   `assert_matches!(err.kind(), SessionRejectReason::SomeVariant)` from a test.
@@ -41,7 +41,7 @@ Touches `src/message.rs` and `src/quickfix_errors.rs` only.
   weakening the check. *(Done — both fixtures were missing real required fields; fixed rather than weakening the
   check.)*
   Done when: un-stub `msg_test_trailer_with_more_fields` (give it a real body) + new tests for missing-required-tag,
-  undefined-tag, wrong-msgtype, each asserting the specific `SessionRejectReason` via `kind()`. *(Done — see
+  undefined-tag, wrong-msgtype, each asserting the specific `SessionRejectError` via `kind()`. *(Done — see
   `session_context/2026-07-26.md` for the design reasoning behind where each check ended up living, and a real gap found
   in the process: the group-instance-level required-field check needed `rg_dd`, not the `dd` parameter, since `dd` is
   silently inherited unchanged across recursive nested-group calls.)*
@@ -50,7 +50,7 @@ Touches `src/message.rs` and `src/quickfix_errors.rs` only.
   *Depends on 1.3 (same validation helper).* If `dd.get_field_values(tag)` is `Some(set)`, check membership →
   `value_out_of_range_err`. Validate the raw string against `dd.get_field_type(tag)`'s category (numeric types must
   parse as such, `Boolean` must be `Y`/`N`, etc.) → `incorrect_data_format_err`. Done when: new tests cover an
-  out-of-domain enum value and a malformed numeric field, each asserting the right `SessionRejectReason`.
+  out-of-domain enum value and a malformed numeric field, each asserting the right `SessionRejectError`.
 
 - [x] **1.5 — Wire incoming checksum/body-length verification.**
   *Independent of 1.3/1.4 — can be done before or after them.* In `from_str`, recompute expected body length/checksum
@@ -384,7 +384,7 @@ via `SessionMap::send` (6.4b).
 
 **Why this exists.** As of v1, the engine *detects* every inbound error but never *responds* on the wire. In
 `handle_connection`, both `Message::from_str(...)?` (parse/validation errors — `SessionRejectError`) and
-`session.next_message(...)?` (session errors — `SessionError`; and app errors — `BusinessMsgRejectReason`) propagate via
+`session.next_message(...)?` (session errors — `InboundMsgError`; and app errors — `BusinessMsgReject`) propagate via
 `?`, which ends the connection thread — the TCP connection is **silently dropped**. No `Reject (35=3)`, no `BusinessMessageReject
 (35=j)`, no `Logout (35=5)` with a reason ever goes out. This was a deliberate v1 simplification (see task 4.7, which
 skipped Reject generation). Our tests only assert the error is *returned/detected*, never that a corrective FIX message
@@ -401,10 +401,10 @@ failures and session-level failures.
 |------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------|-----------------------------|
 | Invalid field: bad type, value out of range, required tag missing, tag out of order (`SessionRejectError`) | **Reject (35=3)** with `RefSeqNum(45)`, `SessionRejectReason(373)`, opt `RefTagID(371)`; increment target seq; keep connection | drops connection            |
 | Bad checksum / body length (`SessionRejectError`)                                                          | **Silently drop** the message (garbled → RefSeqNum untrusted); do NOT Reject; keep connection                                  | drops connection            |
-| CompID mismatch (`SessionError`)                                                                           | **Logout (35=5)** with text, then disconnect                                                                                   | disconnects, no Logout sent |
-| MsgSeqNum too low, no PossDup (`SessionError`)                                                             | **Logout** + disconnect (fatal)                                                                                                | disconnects, no Logout sent |
+| CompID mismatch (`InboundMsgError`)                                                                        | **Logout (35=5)** with text, then disconnect                                                                                   | disconnects, no Logout sent |
+| MsgSeqNum too low, no PossDup (`InboundMsgError`)                                                          | **Logout** + disconnect (fatal)                                                                                                | disconnects, no Logout sent |
 | MsgSeqNum too high                                                                                         | **ResendRequest (35=2)** — deferred to a later milestone (needs message store/resend)                                          | —                           |
-| App-level (`BusinessMsgRejectReason`)                                                                      | app's responsibility (return a reject message), or engine **BusinessMessageReject (35=j)** as a fallback                       | drops connection            |
+| App-level (`BusinessMsgReject`)                                                                            | app's responsibility (return a reject message), or engine **BusinessMessageReject (35=j)** as a fallback                       | drops connection            |
 
 **The architectural change.** Errors currently propagate *up and out* of the session. To respond, the session must
 *catch* the error and translate it into an outbound message, then continue (recoverable) or disconnect (fatal) — instead
@@ -412,11 +412,11 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
 
 - [x] **7.1 — `generate_reject` builder + error classification.**
   `Session::generate_reject(ref_seq_num, reason: SessionRejectReason)` — sibling of the existing admin builders. Stamps
-  `35=3` + tags 45/373 (+ 371/58 when known), runs through `initialize_header`/`send_raw`. `SessionRejectReason` is now
+  `35=3` + tags 45/373 (+ 371/58 when known), runs through `initialize_header`/`send_raw`. `SessionRejectError` is now
   the error type itself (a data-carrying enum deriving `thiserror::Error`), with `code()` (tag 373), `ref_tag()` (371),
   `text()` (58), and `is_garbled()` — the recoverable-vs-fatal classification for the parse side (garbled → drop, else →
   reject). Session-side classification is inlined at the point of use in 7.3 rather than a separate `is_fatal()`, since
-  `SessionError` is nearly all-fatal. Done: `13e7d05`.
+  `InboundMsgError` is nearly all-fatal. Done: `13e7d05`.
 
 - [x] **7.2 — Parse-side error → response.**
   In the acceptor read loop, a bad `Message::from_str`: garbled (`is_garbled()`) → `warn` + drop + keep reading;
@@ -429,8 +429,9 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   the connection with nothing on the wire. Split into (all done; committed across 7a2f8e3 / 059e62c / 7.3c commit):
 
   Note on ordering: getting into 7.3 showed the dependency runs opposite to a naive "classify first" reading — you can't
-  classify a `SessionError` in `next_message` until *every* inbound path converges to one typed result, and the `next_*`
-  helpers + `dispatch_to_app` still `?` two app-callback error types (`RejectLogon`, `BusinessMsgRejectReason`). So 7.3
+  classify a `InboundMsgError` in `next_message` until *every* inbound path converges to one typed result, and the
+  `next_*`
+  helpers + `dispatch_to_app` still `?` two app-callback error types (`RejectLogon`, `BusinessMsgReject`). So 7.3
   mirrors 7.3a's rhythm: **converge the types first (7.3b, no behavior change), then classify + act (7.3c, the wire
   behavior).** See
   `session_context/error-conversion-map_err-vs-from.md` for the `#[from]` vs `map_err` reasoning.
@@ -445,40 +446,41 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
     - [x] **7.3b — Converge the inbound chain to one typed result (types only, no behavior change).**
       Make `next_*`, `dispatch_to_app`, and `next_message` return `Result<(), SessionError>` (drop the
       `Box`). Fold the two app-callback errors in:
-        - `RejectLogon` → `SessionError` via `#[from]` (the self-contained, propagation case — e.g. a
+        - `RejectLogon` → `InboundMsgError` via `#[from]` (the self-contained, propagation case — e.g. a
           `LogonRejected(#[from] RejectLogon)` variant); `on_admin_msg_received(...)?` then auto-converts.
-        - `BusinessMsgRejectReason` → a **throwaway** `App(#[from] AppError)` variant so it propagates as a
-          `SessionError`
+        - `BusinessMsgReject` → a **throwaway** `App(#[from] AppError)` variant so it propagates as a
+          `InboundMsgError`
           and the acceptor still `?`s it → connection still drops exactly as today (zero behavior change). The real
           handling (log-and-keep-alive stopgap, then 35=j) lands in 7.3c/7.4; delete this variant then. (Chosen over
-          handling `BusinessMsgRejectReason` locally now, to keep 7.3b strictly type-only.)
+          handling `BusinessMsgReject` locally now, to keep 7.3b strictly type-only.)
           Also convert the three `return Err(Box::from(SessionError::...))` in `next_logon` to plain
           `return Err(...)`. Done when: it compiles and 197 tests stay green (behavior identical — bad message still
           drops the connection).
 
     - [x] **7.3c — Classify + act + control signal (the wire behavior).**
-      `next_message` (or a thin wrapper) catches the `SessionError`, applies recoverable-vs-fatal + the pre-logon gate
-      (before `logon_received`, everything is fatal → disconnect, since Reject is post-logon), and acts:
+      `next_message` (or a thin wrapper) catches the `InboundMsgError`, applies recoverable-vs-fatal + the pre-logon
+      gate (before `logon_received`, everything is fatal → disconnect, since Reject is post-logon), and acts:
       `MissingHeaderField` → `reject_message` (recoverable, keep reading); fatal (BeginStringMismatch, CompIdMismatch,
       SeqNumTooLow, InvalidStateForMsgType, OutOfSessionTime) +
       `LogonRejected` → `generate_logout(reason)` + `disconnect`; `App` → stopgap log + keep the connection (do NOT
-      disconnect; real fix is 7.4), and drop the throwaway `App` variant in favor of handling `BusinessMsgRejectReason`
+      disconnect; real fix is 7.4), and drop the throwaway `App` variant in favor of handling `BusinessMsgReject`
       at `dispatch_to_app`. `next_message` returns a control signal (e.g.
       `ControlFlow`) so the acceptor's two `?` calls become a `match` (keep looping vs break) and all FIX policy stays
       in `Session`. Watch the seq-num double-advance: `verify_seq_number` bumps target seq on its OK path,
       `reject_message` bumps it itself — trace each error's origin relative to the bump. Done when: a bad post-logon
       field → Reject + connection survives + seq advanced once; a fatal error → Logout + disconnect; a rejected logon
-      tears down cleanly; an `BusinessMsgRejectReason` no longer drops the connection.
+      tears down cleanly; an `BusinessMsgReject` no longer drops the connection.
 
 - [x] **7.4 — `send_business_msg_reject` (35=j).**
-  Engine-level fallback for `BusinessMsgRejectReason` returned by `on_app_msg_received`. `Session::send_business_msg_reject
+  Engine-level fallback for `BusinessMsgReject` returned by `on_app_msg_received`. `Session::send_business_msg_reject
   (ref_seq_num, ref_msg_type, &reason)` builds a `35=j` with `372` RefMsgType + `380` BusinessRejectReason (required),
   plus `45` RefSeqNum and `58` Text (reason `Display`), routed through `send_app_message` (35=j is an app message).
   Wired into `dispatch_to_app`'s `Err` arm (log + reply + `?` on SendError, fatal like the Ok path). Boundary: business
-  rejects are primarily the app's job (it returns specific rejects in its `Vec<Message>`); this is the catch-all for when
-  the app signals a generic error. `BusinessMsgRejectReason` was reshaped to the 380 reason set (the old FieldNotFound/
-  IncorrectDataFormat were dropped — the engine already validates those during `from_str`). Done: unit-tested
-  (`test_send_business_msg_reject_builds_35j`, `test_next_message_app_error_business_rejects_without_teardown`).
+  rejects are primarily the app's job (it returns specific rejects in its `Vec<Message>`); this is the catch-all for
+  when the app signals a generic error. `BusinessMsgReject` was reshaped to the 380 reason set (the old FieldNotFound/
+  IncorrectDataFormat were dropped — the engine already validates those during `from_str`). Done:
+  unit-tested (`test_send_business_msg_reject_builds_35j`,
+  `test_next_message_app_error_business_rejects_without_teardown`).
 
 - [ ] **7.5 — Tests.**
   Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). The 7.3c

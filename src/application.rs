@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::fix_errors::{BusinessMsgRejectReason, DonotSend, RejectLogon};
+use crate::fix_errors::{BusinessMsgReject, DonotSend, RejectLogon};
 use crate::message::*;
 use crate::session::*;
 
@@ -36,7 +36,7 @@ pub trait Application: Send {
         &mut self,
         session_id: &SessionId,
         message: &Message,
-    ) -> Result<Vec<Message>, BusinessMsgRejectReason>;
+    ) -> Result<Vec<Message>, BusinessMsgReject>;
 
     // Unsolicited outbound seam. The engine polls this each timer tick; the app
     // returns any messages it wants sent on its own initiative (e.g. a streaming
@@ -81,7 +81,7 @@ impl Application for DefaultApplication {
         &mut self,
         session_id: &SessionId,
         message: &Message,
-    ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
+    ) -> Result<Vec<Message>, BusinessMsgReject> {
         Ok(vec![])
     }
 }
