@@ -10,8 +10,8 @@ pub use settings::*;
 
 use crate::application::Application;
 use crate::data_dictionary::DataDictionary;
-use crate::fix_errors::{SendError, SessionError, SessionRejectReason};
-use crate::message::{Message, StringField};
+use crate::fix_errors::{BusinessMsgRejectReason, SendError, SessionError, SessionRejectReason};
+use crate::message::Message;
 use crate::session::schedule::SessionSchedule;
 use getset::{Getters, Setters};
 use log::{error, info, warn};
@@ -72,14 +72,6 @@ impl Session {
         }
     }
 
-    // pub fn set_responder(&mut self, responder: Box<dyn Responder>) {
-    //     self.responder = Some(responder);
-    // }
-    //
-    // pub fn dictionary(&self) -> &DataDictionary {
-    //     &self.data_dict
-    // }
-
     // Before logon, only Logon messages are valid. During logout (sent but
     // not received), only Logout and SequenceReset are accepted.
     fn valid_logon_state(&self, msg_type: &str) -> bool {
@@ -119,6 +111,26 @@ impl Session {
             }
         }
         self.responder = None;
+    }
+
+    // Builds and sends a BusinessMessageReject (35=j) for an application-level
+    // error the app could not handle. Carries the two required fields —
+    // RefMsgType(372) and BusinessRejectReason(380) — plus RefSeqNum(45) so the
+    // counterparty can correlate the rejected message, and the reason text in
+    // Text(58). Routed through send_app_message since 35=j is an application message.
+    pub(crate) fn send_business_msg_reject(
+        &mut self,
+        ref_seq_num: u32,
+        ref_msg_type: &str,
+        reason: &BusinessMsgRejectReason,
+    ) -> Result<(), SendError> {
+        let mut msg = Message::new();
+        msg.set_header_field(35, "j");
+        msg.set_body_field(45, ref_seq_num.to_string());
+        msg.set_body_field(372, ref_msg_type);
+        msg.set_body_field(380, reason.code().to_string());
+        msg.set_body_field(58, reason.to_string());
+        self.send_app_message(msg)
     }
 
     // The single outbound path for application messages. Stamps the standard
@@ -173,24 +185,23 @@ impl Session {
     // Stamps standard header fields (BeginString, CompIDs, MsgSeqNum, SendingTime)
     // on any outbound message. Shared by admin builders and the outbound app path.
     fn initialize_header(&mut self, msg: &mut Message) {
-        msg.header_mut().set_field(StringField::new(8, self.id.begin_string()));
-        msg.header_mut().set_field(StringField::new(49, self.id.sender_comp_id()));
-        msg.header_mut().set_field(StringField::new(56, self.id.target_comp_id()));
+        msg.set_header_field(8, self.id.begin_string());
+        msg.set_header_field(49, self.id.sender_comp_id());
+        msg.set_header_field(56, self.id.target_comp_id());
         if let Some(sender_subid) = self.id.sender_sub_id() {
-            msg.header_mut().set_field(StringField::new(50, sender_subid));
+            msg.set_header_field(50, sender_subid);
         }
         if let Some(sender_locid) = self.id.sender_location_id() {
-            msg.header_mut().set_field(StringField::new(142, sender_locid));
+            msg.set_header_field(142, sender_locid);
         }
         if let Some(target_subid) = self.id.target_sub_id() {
-            msg.header_mut().set_field(StringField::new(57, target_subid));
+            msg.set_header_field(57, target_subid);
         }
         if let Some(target_locid) = self.id.target_location_id() {
-            msg.header_mut().set_field(StringField::new(143, target_locid));
+            msg.set_header_field(143, target_locid);
         }
         msg.set_sending_time();
-        msg.header_mut()
-            .set_field(StringField::new(34, &self.state.next_sender_msg_seq_num.to_string()));
+        msg.set_header_field(34, self.state.next_sender_msg_seq_num.to_string());
     }
 
     // Finalizes (body length, checksum) and pushes the message through the Responder.
@@ -207,9 +218,9 @@ impl Session {
     // Builds and sends a Logon (MsgType=A) with HeartBtInt.
     fn generate_logon(&mut self) {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "A"));
-        msg.set_field(StringField::new(98, "0"));
-        msg.set_field(StringField::new(108, &self.state.heartbeat_interval.to_string()));
+        msg.set_header_field(35, "A");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, self.state.heartbeat_interval.to_string());
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
@@ -218,10 +229,10 @@ impl Session {
     // Builds and sends a Logout (MsgType=5) with optional Text reason.
     fn generate_logout(&mut self, reason: Option<&str>) {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "5"));
+        msg.set_header_field(35, "5");
         self.initialize_header(&mut msg);
         if let Some(reason) = reason {
-            msg.set_field(StringField::new(58, reason));
+            msg.set_body_field(58, reason);
         }
         self.app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
@@ -230,9 +241,9 @@ impl Session {
     // Builds and sends a Heartbeat (MsgType=0). Echoes TestReqID if responding to a TestRequest.
     fn generate_heartbeat(&mut self, test_req_id: Option<&str>) {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "0"));
+        msg.set_header_field(35, "0");
         if let Some(test_reqid) = test_req_id {
-            msg.set_field(StringField::new(112, test_reqid));
+            msg.set_body_field(112, test_reqid);
         }
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
@@ -246,14 +257,14 @@ impl Session {
     // sender seq num); target-seq bookkeeping is the caller's job (reject_message).
     fn generate_reject(&mut self, ref_seq_num: u32, reason: SessionRejectReason) {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "3"));
-        msg.set_field(StringField::new(45, ref_seq_num.to_string().as_str()));
-        msg.set_field(StringField::new(373, reason.code().to_string().as_str()));
+        msg.set_header_field(35, "3");
+        msg.set_body_field(45, ref_seq_num.to_string());
+        msg.set_body_field(373, reason.code().to_string());
         if let Some(err_msg) = reason.text() {
-            msg.set_field(StringField::new(58, err_msg));
+            msg.set_body_field(58, err_msg);
         }
         if let Some(tag) = reason.ref_tag() {
-            msg.set_field(StringField::new(371, tag.to_string().as_str()));
+            msg.set_body_field(371, tag.to_string());
         }
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
@@ -263,8 +274,8 @@ impl Session {
     // Builds and sends a TestRequest (MsgType=1) with the given TestReqID.
     fn generate_test_request(&mut self, req_id: &str) {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "1"));
-        msg.set_field(StringField::new(112, req_id));
+        msg.set_header_field(35, "1");
+        msg.set_body_field(112, req_id);
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
@@ -292,11 +303,9 @@ impl Session {
         } else {
             // An error from on_app_msg_received is an APPLICATION-level problem
             // (the counterparty's business message broke the app's contract), not
-            // a reason to tear down a healthy FIX session. So we catch it here and
-            // keep the connection up instead of `?`-propagating it — otherwise a
-            // single bad order would drop the whole session. The correct wire
-            // response is a BusinessMessageReject (35=j); until that lands (7.4)
-            // we only log.
+            // a reason to tear down a healthy FIX session. So instead of
+            // `?`-propagating it (which would drop the session on one bad order),
+            // we translate it into a BusinessMessageReject (35=j) and keep reading.
             //
             // send_app_message keeps its `?`: a SendError means our own outbound
             // pipe is broken, which IS session-fatal and must propagate.
@@ -307,8 +316,13 @@ impl Session {
                     }
                 }
                 Err(e) => {
-                    // TODO(7.4): reply with BusinessMessageReject (35=j) instead of only logging.
+                    // Reply with a BusinessMessageReject (35=j) referencing this
+                    // message's seq num and the reason. A SendError here means our
+                    // outbound pipe is broken → session-fatal, so propagate it (`?`),
+                    // same as the Ok-response path above.
                     error!("{}", e);
+                    let ref_seq_num = msg.get_header_field::<u32>(34).unwrap_or(0);
+                    self.send_business_msg_reject(ref_seq_num, msg_type, &e)?;
                 }
             }
         }
@@ -319,8 +333,7 @@ impl Session {
     // Does not check sequence numbers or dispatch to Application callbacks.
     fn verify_msg(&mut self, msg: &Message) -> Result<(), SessionError> {
         let begin_string = msg
-            .header()
-            .get_field::<String>(8)
+            .get_header_field::<String>(8)
             .map_err(|_| SessionError::MissingHeaderField { tag: 8 })?;
         if self.id.begin_string() != &begin_string {
             return Err(SessionError::BeginStringMismatch {
@@ -338,12 +351,10 @@ impl Session {
             });
         }
         let sender_compid = msg
-            .header()
-            .get_field::<String>(49)
+            .get_header_field::<String>(49)
             .map_err(|_| SessionError::MissingHeaderField { tag: 49 })?;
         let target_compid = msg
-            .header()
-            .get_field::<String>(56)
+            .get_header_field::<String>(56)
             .map_err(|_| SessionError::MissingHeaderField { tag: 56 })?;
         if !self.id.sender_comp_id().eq(&target_compid)
             || !self.id.target_comp_id().eq(&sender_compid)
@@ -359,8 +370,7 @@ impl Session {
     // Checks MsgSeqNum: rejects if too low, warns if too high, increments expected.
     fn verify_seq_number(&mut self, msg: &Message) -> Result<(), SessionError> {
         let incoming_seq_num = msg
-            .header()
-            .get_field::<u32>(34)
+            .get_header_field::<u32>(34)
             .map_err(|_| SessionError::MissingHeaderField { tag: 34 })?;
         if incoming_seq_num > self.state.next_target_msg_seq_num {
             warn!(
@@ -419,7 +429,7 @@ impl Session {
             // message was still consumed); verify_seq_number never ran on this path,
             // so the seq is bumped exactly once.
             SessionError::MissingHeaderField { tag } => {
-                let seq = msg.header().get_field::<u32>(34).unwrap_or(0);
+                let seq = msg.get_header_field::<u32>(34).unwrap_or(0);
                 // Log the reason at the session layer for troubleshooting — the
                 // outgoing Reject only carries the tag-373 code, not this text.
                 warn!("{} rejecting message: {}", self.id, err);
@@ -475,7 +485,7 @@ impl Session {
         }
 
         // Wire-level reset (tag 141=Y) — counterparty explicitly requests it.
-        if let Ok(reset_seq_flag) = msg.get_field::<String>(141)
+        if let Ok(reset_seq_flag) = msg.get_body_field::<String>(141)
             && reset_seq_flag == "Y"
         {
             self.state.reset(Instant::now());
@@ -506,7 +516,7 @@ impl Session {
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
         self.app.on_admin_msg_received(&self.id, msg)?;
-        let test_req_id = msg.get_field::<String>(112).ok();
+        let test_req_id = msg.get_body_field::<String>(112).ok();
         self.generate_heartbeat(test_req_id.as_deref());
         Ok(())
     }
@@ -648,7 +658,7 @@ mod responder_tests {
 mod session_tests {
     use super::*;
     use crate::application::Application;
-    use crate::fix_errors::{AppError, DonotSend, RejectLogon};
+    use crate::fix_errors::{BusinessMsgRejectReason, DonotSend, RejectLogon};
     use std::collections::VecDeque;
     use std::ops::ControlFlow;
     use std::sync::Mutex;
@@ -769,7 +779,7 @@ mod session_tests {
             &mut self,
             _session_id: &SessionId,
             _message: &Message,
-        ) -> Result<Vec<Message>, AppError> {
+        ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
             self.spy.record("from_app");
             Ok(vec![])
         }
@@ -865,13 +875,12 @@ mod session_tests {
     }
 
     fn make_msg(msg_type: &str, sender: &str, target: &str, seq_num: u32) -> Message {
-        use crate::message::StringField;
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(8, "FIX.4.3"));
-        msg.header_mut().set_field(StringField::new(35, msg_type));
-        msg.header_mut().set_field(StringField::new(49, sender));
-        msg.header_mut().set_field(StringField::new(56, target));
-        msg.header_mut().set_field(StringField::new(34, &seq_num.to_string()));
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, msg_type);
+        msg.set_header_field(49, sender);
+        msg.set_header_field(56, target);
+        msg.set_header_field(34, seq_num.to_string());
         msg
     }
 
@@ -884,10 +893,9 @@ mod session_tests {
 
     #[test]
     fn test_verify_msg_rejects_begin_string_mismatch() {
-        use crate::message::StringField;
         let (mut session, _) = make_session();
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        msg.header_mut().set_field(StringField::new(8, "FIX.4.4"));
+        msg.set_header_field(8, "FIX.4.4");
         assert!(session.verify_msg(&msg).is_err());
     }
 
@@ -1005,7 +1013,7 @@ mod session_tests {
         session.state.next_sender_msg_seq_num = 15;
 
         let mut msg = make_msg("A", "TARGET", "SENDER", 1);
-        msg.set_field(StringField::new(141, "Y"));
+        msg.set_body_field(141, "Y");
         session.next_logon(&mut msg).unwrap();
 
         assert!(session.state.logon_received);
@@ -1254,7 +1262,7 @@ mod session_tests {
         let (mut session, mock_state) = make_logged_on_session();
 
         let mut msg = make_msg("1", "TARGET", "SENDER", 1);
-        msg.set_field(StringField::new(112, "TEST123"));
+        msg.set_body_field(112, "TEST123");
         session.next_test_request(&mut msg).unwrap();
 
         let sent = mock_state.sent();
@@ -1402,14 +1410,15 @@ mod session_tests {
             &mut self,
             _s: &SessionId,
             _m: &Message,
-        ) -> Result<Vec<Message>, AppError> {
-            Err(AppError::UnsupportedMessageType)
+        ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
+            Err(BusinessMsgRejectReason::UnknownMessageTye {
+                msg_type: "D".to_string(),
+            })
         }
     }
 
     // An otherwise-well-formed header message of `msg_type` with one header tag omitted.
     fn make_msg_missing(msg_type: &str, missing_tag: u32) -> Message {
-        use crate::message::StringField;
         let mut msg = Message::new();
         for (tag, val) in [
             (8u32, "FIX.4.3"),
@@ -1418,10 +1427,10 @@ mod session_tests {
             (56, "SENDER"),
         ] {
             if tag != missing_tag {
-                msg.header_mut().set_field(StringField::new(tag, val));
+                msg.set_header_field(tag, val);
             }
         }
-        msg.header_mut().set_field(StringField::new(34, "1"));
+        msg.set_header_field(34, "1");
         msg
     }
 
@@ -1475,10 +1484,11 @@ mod session_tests {
         assert!(mock_state.sent().iter().all(|w| !sent_message_contains(w, 35, "3")));
     }
 
-    // AppError from on_app_msg_received is the app's problem (real 35=j is 7.4);
-    // it must NOT tear down the session — the connection stays up.
+    // A business-reject error from on_app_msg_received must NOT tear down the
+    // session: the engine replies with a BusinessMessageReject (35=j) and keeps
+    // reading. No session Reject (35=3) or Logout (35=5) is involved.
     #[test]
-    fn test_next_message_app_error_does_not_tear_down() {
+    fn test_next_message_app_error_business_rejects_without_teardown() {
         let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(FailingApp));
         let mut msg = make_msg("D", "TARGET", "SENDER", 1); // valid header; app errors
 
@@ -1486,12 +1496,32 @@ mod session_tests {
 
         assert_eq!(flow, ControlFlow::Continue(()));
         assert!(!mock_state.is_disconnected());
+        let sent = mock_state.sent();
+        // A BusinessMessageReject went out — but not a session Reject/Logout.
+        assert!(sent.iter().any(|w| sent_message_contains(w, 35, "j")));
         assert!(
-            mock_state
-                .sent()
-                .iter()
+            sent.iter()
                 .all(|w| !sent_message_contains(w, 35, "3") && !sent_message_contains(w, 35, "5"))
         );
+    }
+
+    // send_business_msg_reject builds a well-formed 35=j: the two required fields
+    // RefMsgType(372) + BusinessRejectReason(380), plus RefSeqNum(45) and the
+    // reason as Text(58).
+    #[test]
+    fn test_send_business_msg_reject_builds_35j() {
+        let (mut session, mock_state) = make_logged_on_session();
+        let reason = BusinessMsgRejectReason::MissingConditionallyRequiredField { tag: 55 };
+
+        session.send_business_msg_reject(42, "V", &reason).unwrap();
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "j")); // BusinessMessageReject
+        assert!(sent_message_contains(&sent[0], 45, "42")); // RefSeqNum
+        assert!(sent_message_contains(&sent[0], 372, "V")); // RefMsgType
+        assert!(sent_message_contains(&sent[0], 380, "5")); // ConditionallyRequiredFieldMissing
+        assert!(sent_message_contains(&sent[0], 58, "Conditionally required field is missing: 55"));
     }
 
     // --- next_tick helpers ---
@@ -1889,7 +1919,7 @@ mod session_tests {
 
     fn app_msg(msg_type: &str) -> Message {
         let mut m = Message::new();
-        m.header_mut().set_field(StringField::new(35, msg_type));
+        m.set_header_field(35, msg_type);
         m
     }
 
@@ -1916,7 +1946,7 @@ mod session_tests {
             &mut self,
             _s: &SessionId,
             _m: &Message,
-        ) -> Result<Vec<Message>, AppError> {
+        ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
             if self.respond {
                 // MarketDataSnapshotFullRefresh-ish reply to the request.
                 Ok(vec![app_msg("W")])
@@ -2012,7 +2042,7 @@ mod session_tests {
         let feed_id = id.clone();
         std::thread::spawn(move || {
             let mut md = Message::new();
-            md.header_mut().set_field(StringField::new(35, "W")); // MarketDataSnapshot
+            md.set_header_field(35, "W"); // MarketDataSnapshot
             feed_map.send(&feed_id, md).unwrap();
         })
         .join()

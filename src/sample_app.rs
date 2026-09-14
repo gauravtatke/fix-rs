@@ -1,6 +1,6 @@
 use crate::application::Application;
-use crate::fix_errors::{AppError, DonotSend, RejectLogon};
-use crate::message::{Message, StringField};
+use crate::fix_errors::{BusinessMsgRejectReason, DonotSend, RejectLogon};
+use crate::message::Message;
 use crate::session::SessionId;
 
 pub struct SampleApp {
@@ -34,17 +34,17 @@ impl SampleApp {
         qty: &str,
     ) -> Message {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "8"));
-        msg.body_mut().set_field(StringField::new(37, &self.next_id())); // OrderID
-        msg.body_mut().set_field(StringField::new(17, &self.next_id())); // ExecID
-        msg.body_mut().set_field(StringField::new(150, "0")); // ExecType = New
-        msg.body_mut().set_field(StringField::new(39, "0")); // OrdStatus = New
-        msg.body_mut().set_field(StringField::new(54, side)); // Side (echoed)
-        msg.body_mut().set_field(StringField::new(151, qty)); // LeavesQty = OrderQty
-        msg.body_mut().set_field(StringField::new(14, "0")); // CumQty
-        msg.body_mut().set_field(StringField::new(6, "0")); // AvgPx
-        msg.body_mut().set_field(StringField::new(11, cl_ord_id)); // ClOrdID (echoed)
-        msg.body_mut().set_field(StringField::new(55, symbol)); // Symbol (echoed)
+        msg.set_header_field(35, "8");
+        msg.set_body_field(37, self.next_id()); // OrderID
+        msg.set_body_field(17, self.next_id()); // ExecID
+        msg.set_body_field(150, "0"); // ExecType = New
+        msg.set_body_field(39, "0"); // OrdStatus = New
+        msg.set_body_field(54, side); // Side (echoed)
+        msg.set_body_field(151, qty); // LeavesQty = OrderQty
+        msg.set_body_field(14, "0"); // CumQty
+        msg.set_body_field(6, "0"); // AvgPx
+        msg.set_body_field(11, cl_ord_id); // ClOrdID (echoed)
+        msg.set_body_field(55, symbol); // Symbol (echoed)
         msg
     }
 
@@ -63,39 +63,39 @@ impl SampleApp {
         price: &str,
     ) -> Message {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "8"));
-        msg.body_mut().set_field(StringField::new(37, &self.next_id())); // OrderID
-        msg.body_mut().set_field(StringField::new(17, &self.next_id())); // ExecID
-        msg.body_mut().set_field(StringField::new(150, "F")); // ExecType = Trade
-        msg.body_mut().set_field(StringField::new(39, "2")); // OrdStatus = Filled
-        msg.body_mut().set_field(StringField::new(54, side)); // Side (echoed)
-        msg.body_mut().set_field(StringField::new(151, "0")); // LeavesQty = 0 (fully filled)
-        msg.body_mut().set_field(StringField::new(14, qty)); // CumQty = OrderQty
-        msg.body_mut().set_field(StringField::new(6, price)); // AvgPx
-        msg.body_mut().set_field(StringField::new(31, price)); // LastPx (fill price)
-        msg.body_mut().set_field(StringField::new(32, qty)); // LastQty (fill size)
-        msg.body_mut().set_field(StringField::new(11, cl_ord_id)); // ClOrdID (echoed)
-        msg.body_mut().set_field(StringField::new(55, symbol)); // Symbol (echoed)
+        msg.set_header_field(35, "8");
+        msg.set_body_field(37, self.next_id()); // OrderID
+        msg.set_body_field(17, self.next_id()); // ExecID
+        msg.set_body_field(150, "F"); // ExecType = Trade
+        msg.set_body_field(39, "2"); // OrdStatus = Filled
+        msg.set_body_field(54, side); // Side (echoed)
+        msg.set_body_field(151, "0"); // LeavesQty = 0 (fully filled)
+        msg.set_body_field(14, qty); // CumQty = OrderQty
+        msg.set_body_field(6, price); // AvgPx
+        msg.set_body_field(31, price); // LastPx (fill price)
+        msg.set_body_field(32, qty); // LastQty (fill size)
+        msg.set_body_field(11, cl_ord_id); // ClOrdID (echoed)
+        msg.set_body_field(55, symbol); // Symbol (echoed)
         msg
     }
 
     fn build_md_snapshot(&self, mdreq_id: &str, ccy_pair: &str) -> Message {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "W"));
-        msg.body_mut().set_field(StringField::new(262, mdreq_id));
-        msg.body_mut().set_field(StringField::new(55, ccy_pair));
+        msg.set_header_field(35, "W");
+        msg.set_body_field(262, mdreq_id);
+        msg.set_body_field(55, ccy_pair);
         let group = msg.body_mut().set_group(268, 2, 269);
         for i in 0..2 {
             if i % 2 == 0 {
                 // bid side
-                group[i].set_field(StringField::new(269, "0"));
-                group[i].set_field(StringField::new(270, "1.4"));
-                group[i].set_field(StringField::new(271, "1000"));
+                group[i].set_field(269, "0");
+                group[i].set_field(270, "1.4");
+                group[i].set_field(271, "1000");
             } else {
                 // offer side
-                group[i].set_field(StringField::new(269, "1"));
-                group[i].set_field(StringField::new(270, "1.8"));
-                group[i].set_field(StringField::new(271, "1000"));
+                group[i].set_field(269, "1");
+                group[i].set_field(270, "1.8");
+                group[i].set_field(271, "1000");
             }
         }
         msg
@@ -141,37 +141,45 @@ impl Application for SampleApp {
         &mut self,
         session_id: &SessionId,
         message: &Message,
-    ) -> Result<Vec<Message>, AppError> {
-        let msg_type = message.get_msg_type().map_err(|_| AppError::FieldNotFound { tag: 35 })?;
+    ) -> Result<Vec<Message>, BusinessMsgRejectReason> {
+        // MsgType(35) is guaranteed: from_str requires it, and next_message routed
+        // on it to reach us.
+        let msg_type = message.get_msg_type().expect("MsgType(35) present on a routed message");
         match msg_type.as_str() {
             "V" => {
                 // MarketDataRequest → MarketDataSnapshotFullRefresh
-                let ccy_pair = message
-                    .get_field::<String>(55)
-                    .map_err(|_| AppError::FieldNotFound { tag: 55 })?;
+                // Symbol(55): FIX43 carries it inside the NoRelatedSym group, not at
+                // top level, so the engine does NOT guarantee a top-level 55. Our v1
+                // simulator contract puts it there; a peer that omits it is a genuine
+                // business-level miss → BusinessMessageReject (380=5).
+                let ccy_pair = message.get_body_field::<String>(55).map_err(|_| {
+                    BusinessMsgRejectReason::MissingConditionallyRequiredField { tag: 55 }
+                })?;
+                // MDReqID(262) is dictionary-required for V — the engine already
+                // rejected any V missing it before dispatch, so it's present here.
                 let mdreq_id = message
-                    .get_field::<String>(262)
-                    .map_err(|_| AppError::FieldNotFound { tag: 262 })?;
+                    .get_body_field::<String>(262)
+                    .expect("MDReqID(262) required for V; engine-validated");
                 Ok(vec![self.build_md_snapshot(&mdreq_id, &ccy_pair)])
             }
             "D" => {
                 // NewOrderSingle → New ack, then a full fill. Two ExecutionReports:
                 // the first (New) acknowledges the order; the second (Trade/Filled)
                 // executes it so a row appears in the client's execution blotter.
-                let cl_ord_id = message
-                    .get_field::<String>(11)
-                    .map_err(|_| AppError::FieldNotFound { tag: 11 })?;
-                let side = message
-                    .get_field::<String>(54)
-                    .map_err(|_| AppError::FieldNotFound { tag: 54 })?;
-                let symbol = message
-                    .get_field::<String>(55)
-                    .map_err(|_| AppError::FieldNotFound { tag: 55 })?;
-                let qty = message
-                    .get_field::<String>(38)
-                    .map_err(|_| AppError::FieldNotFound { tag: 38 })?;
+                // ClOrdID(11), Side(54), Symbol(55, via the required Instrument
+                // component) and OrderQty(38, via OrderQtyData) are all
+                // dictionary-required for D — the engine validated them before
+                // dispatch, so they're guaranteed present here.
+                let cl_ord_id =
+                    message.get_body_field::<String>(11).expect("ClOrdID(11) required for D");
+                let side = message.get_body_field::<String>(54).expect("Side(54) required for D");
+                let symbol =
+                    message.get_body_field::<String>(55).expect("Symbol(55) required for D");
+                let qty =
+                    message.get_body_field::<String>(38).expect("OrderQty(38) required for D");
                 // Limit price if present (Price, tag 44); market orders have none.
-                let price = message.get_field::<String>(44).unwrap_or_else(|_| "0".to_string());
+                let price =
+                    message.get_body_field::<String>(44).unwrap_or_else(|_| "0".to_string());
                 let accept = self.build_exec_report(&cl_ord_id, &side, &symbol, &qty);
                 let fill = self.build_fill_report(&cl_ord_id, &side, &symbol, &qty, &price);
                 Ok(vec![accept, fill])
@@ -187,13 +195,13 @@ mod sample_app_tests {
 
     // Builds an inbound MarketDataRequest (35=V) shaped the way on_app_msg_received
     // reads it: MsgType in the header, MDReqID (262) and Symbol (55) in the body
-    // (Message::get_field reads the body). This mirrors the simulator contract we
+    // (read via message.get_body_field). This mirrors the simulator contract we
     // chose for v1 — a top-level 55 on the request.
     fn market_data_request(mdreq_id: &str, symbol: &str) -> Message {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "V"));
-        msg.set_field(StringField::new(262, mdreq_id));
-        msg.set_field(StringField::new(55, symbol));
+        msg.set_header_field(35, "V");
+        msg.set_body_field(262, mdreq_id);
+        msg.set_body_field(55, symbol);
         msg
     }
 
@@ -214,8 +222,8 @@ mod sample_app_tests {
         let resp = &responses[0];
         assert_eq!(resp.get_msg_type().unwrap(), "W");
         // MDReqID echoed so the client can correlate response to request.
-        assert_eq!(resp.get_field::<String>(262).unwrap(), "REQ-1");
-        assert_eq!(resp.get_field::<String>(55).unwrap(), "EUR/USD");
+        assert_eq!(resp.get_body_field::<String>(262).unwrap(), "REQ-1");
+        assert_eq!(resp.get_body_field::<String>(55).unwrap(), "EUR/USD");
     }
 
     // The snapshot carries a NoMDEntries (268) group with two entries: a bid
@@ -228,7 +236,7 @@ mod sample_app_tests {
         let responses = app.on_app_msg_received(&sid(), &req).unwrap();
         let resp = &responses[0];
 
-        let entries = resp.get_group(268).expect("NoMDEntries group present");
+        let entries = resp.body().get_group(268).expect("NoMDEntries group present");
         assert_eq!(entries.size(), 2);
         // entry 0 = bid side
         assert_eq!(entries[0].get_field::<String>(269).unwrap(), "0");
@@ -245,36 +253,30 @@ mod sample_app_tests {
     fn test_unhandled_message_returns_empty() {
         let mut app = SampleApp::new();
         let mut other = Message::new();
-        other.header_mut().set_field(StringField::new(35, "8"));
+        other.set_header_field(35, "8");
 
         let responses = app.on_app_msg_received(&sid(), &other).unwrap();
         assert!(responses.is_empty());
     }
 
-    // A V request missing the required MDReqID (262) is rejected with a typed
-    // error rather than panicking — a malformed peer message must not crash the
-    // session thread.
+    // A V missing the top-level Symbol (55) is business-rejected. This IS a real,
+    // reachable case: the dictionary carries 55 inside the NoRelatedSym group, so
+    // the engine does not require a top-level 55 — a spec-compliant V can reach the
+    // app without one, and our simulator contract needs it → 380=5.
+    // (MDReqID(262), by contrast, is dictionary-required, so the engine rejects a
+    // V without it before dispatch — the app never sees that, hence no test here.)
     #[test]
-    fn test_v_request_missing_mdreqid_errors() {
+    fn test_v_request_missing_symbol_business_rejects() {
         let mut app = SampleApp::new();
         let mut req = Message::new();
-        req.header_mut().set_field(StringField::new(35, "V"));
-        req.set_field(StringField::new(55, "EUR/USD")); // has symbol, no 262
+        req.set_header_field(35, "V");
+        req.set_body_field(262, "REQ-3"); // has 262, no top-level 55
 
         let err = app.on_app_msg_received(&sid(), &req).unwrap_err();
-        assert!(matches!(err, AppError::FieldNotFound { tag: 262 }));
-    }
-
-    // Likewise for the symbol (55), per our chosen simulator contract.
-    #[test]
-    fn test_v_request_missing_symbol_errors() {
-        let mut app = SampleApp::new();
-        let mut req = Message::new();
-        req.header_mut().set_field(StringField::new(35, "V"));
-        req.set_field(StringField::new(262, "REQ-3")); // has 262, no symbol
-
-        let err = app.on_app_msg_received(&sid(), &req).unwrap_err();
-        assert!(matches!(err, AppError::FieldNotFound { tag: 55 }));
+        assert!(matches!(
+            err,
+            BusinessMsgRejectReason::MissingConditionallyRequiredField { tag: 55 }
+        ));
     }
 
     // Builds an inbound NewOrderSingle (35=D) the way on_app_msg_received reads
@@ -283,11 +285,11 @@ mod sample_app_tests {
     // our sample only needs these four.)
     fn new_order_single(cl_ord_id: &str, side: &str, symbol: &str, qty: &str) -> Message {
         let mut msg = Message::new();
-        msg.header_mut().set_field(StringField::new(35, "D"));
-        msg.set_field(StringField::new(11, cl_ord_id));
-        msg.set_field(StringField::new(54, side));
-        msg.set_field(StringField::new(55, symbol));
-        msg.set_field(StringField::new(38, qty));
+        msg.set_header_field(35, "D");
+        msg.set_body_field(11, cl_ord_id);
+        msg.set_body_field(54, side);
+        msg.set_body_field(55, symbol);
+        msg.set_body_field(38, qty);
         msg
     }
 
@@ -306,39 +308,29 @@ mod sample_app_tests {
         // --- index 0: New ack ---
         let ack = &responses[0];
         assert_eq!(ack.get_msg_type().unwrap(), "8");
-        assert_eq!(ack.get_field::<String>(11).unwrap(), "ORD-1"); // ClOrdID echoed
-        assert_eq!(ack.get_field::<String>(54).unwrap(), "1"); // Side
-        assert_eq!(ack.get_field::<String>(55).unwrap(), "AAPL"); // Symbol
-        assert_eq!(ack.get_field::<String>(150).unwrap(), "0"); // ExecType = New
-        assert_eq!(ack.get_field::<String>(39).unwrap(), "0"); // OrdStatus = New
-        assert_eq!(ack.get_field::<String>(151).unwrap(), "100"); // LeavesQty = OrderQty
-        assert_eq!(ack.get_field::<String>(14).unwrap(), "0"); // CumQty
-        assert!(ack.get_field::<String>(37).is_ok()); // OrderID present
-        assert!(ack.get_field::<String>(17).is_ok()); // ExecID present
+        assert_eq!(ack.get_body_field::<String>(11).unwrap(), "ORD-1"); // ClOrdID echoed
+        assert_eq!(ack.get_body_field::<String>(54).unwrap(), "1"); // Side
+        assert_eq!(ack.get_body_field::<String>(55).unwrap(), "AAPL"); // Symbol
+        assert_eq!(ack.get_body_field::<String>(150).unwrap(), "0"); // ExecType = New
+        assert_eq!(ack.get_body_field::<String>(39).unwrap(), "0"); // OrdStatus = New
+        assert_eq!(ack.get_body_field::<String>(151).unwrap(), "100"); // LeavesQty = OrderQty
+        assert_eq!(ack.get_body_field::<String>(14).unwrap(), "0"); // CumQty
+        assert!(ack.get_body_field::<String>(37).is_ok()); // OrderID present
+        assert!(ack.get_body_field::<String>(17).is_ok()); // ExecID present
 
         // --- index 1: full fill ---
         let fill = &responses[1];
         assert_eq!(fill.get_msg_type().unwrap(), "8");
-        assert_eq!(fill.get_field::<String>(11).unwrap(), "ORD-1"); // same order
-        assert_eq!(fill.get_field::<String>(150).unwrap(), "F"); // ExecType = Trade
-        assert_eq!(fill.get_field::<String>(39).unwrap(), "2"); // OrdStatus = Filled
-        assert_eq!(fill.get_field::<String>(151).unwrap(), "0"); // LeavesQty = 0
-        assert_eq!(fill.get_field::<String>(14).unwrap(), "100"); // CumQty = OrderQty
-        assert_eq!(fill.get_field::<String>(32).unwrap(), "100"); // LastQty = fill size
+        assert_eq!(fill.get_body_field::<String>(11).unwrap(), "ORD-1"); // same order
+        assert_eq!(fill.get_body_field::<String>(150).unwrap(), "F"); // ExecType = Trade
+        assert_eq!(fill.get_body_field::<String>(39).unwrap(), "2"); // OrdStatus = Filled
+        assert_eq!(fill.get_body_field::<String>(151).unwrap(), "0"); // LeavesQty = 0
+        assert_eq!(fill.get_body_field::<String>(14).unwrap(), "100"); // CumQty = OrderQty
+        assert_eq!(fill.get_body_field::<String>(32).unwrap(), "100"); // LastQty = fill size
     }
 
-    // A NewOrderSingle missing a field the handler needs is rejected with a
-    // typed error rather than panicking. ClOrdID (11) shown here.
-    #[test]
-    fn test_d_order_missing_clordid_errors() {
-        let mut app = SampleApp::new();
-        let mut order = Message::new();
-        order.header_mut().set_field(StringField::new(35, "D"));
-        order.set_field(StringField::new(54, "1"));
-        order.set_field(StringField::new(55, "AAPL"));
-        order.set_field(StringField::new(38, "100")); // no ClOrdID (11)
-
-        let err = app.on_app_msg_received(&sid(), &order).unwrap_err();
-        assert!(matches!(err, AppError::FieldNotFound { tag: 11 }));
-    }
+    // (No "D missing ClOrdID" test: ClOrdID(11), Side(54), Symbol(55), OrderQty(38)
+    // are all dictionary-required for D, so the engine rejects a D missing any of
+    // them before dispatch — the handler `expect`s their presence. That
+    // required-field rejection is the engine's job, covered by message-layer tests.)
 }

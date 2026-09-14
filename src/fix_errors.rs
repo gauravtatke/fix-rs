@@ -287,12 +287,6 @@ pub enum SessionError {
     // (generate_logout + disconnect).
     #[error(transparent)]
     LogonRejected(#[from] RejectLogon),
-    // App-level error from on_app_msg_received. TRANSITIONAL: folded in here only
-    // so 7.3b stays behavior-neutral (still propagates → still drops the
-    // connection). 7.3c handles AppError at dispatch_to_app (log + keep alive)
-    // and deletes this variant; the real 35=j response is 7.4.
-    // #[error(transparent)]
-    // AppErr(#[from] AppError),
     // send_app_message failed while replying on THIS session (the pipe broke
     // mid-response). SessionNotFound can't occur here (no registry lookup) and
     // NotLoggedOn only in a disconnect race → classifies as fatal (disconnect).
@@ -311,13 +305,41 @@ pub struct RejectLogon {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AppError {
-    #[error("Unsupported message type")]
-    UnsupportedMessageType,
-    #[error("Required field is missing: {tag}")]
-    FieldNotFound { tag: u32 },
-    #[error("Field value does not parse to the expected value")]
-    IncorrectDataFormat,
+pub enum BusinessMsgRejectReason {
+    #[error("Other error")]
+    Other,
+    #[error("Unknown id")]
+    UnknownId,
+    #[error("Unknown security")]
+    UnknownSecurity,
+    #[error("Unknown message type: {msg_type}")]
+    UnknownMessageTye { msg_type: String },
+    #[error("Application not available")]
+    ApplicationNotAvailable,
+    #[error("Conditionally required field is missing: {tag}")]
+    MissingConditionallyRequiredField { tag: u32 },
+    #[error("Not authorized")]
+    NotAuthorized,
+    #[error("DeliverTo firm not available at this time")]
+    DeliverToFirmNotAvailableAtThisTime,
+    #[error("Invalid price increment")]
+    InvalidPriceIncrement,
+}
+
+impl BusinessMsgRejectReason {
+    pub fn code(&self) -> u32 {
+        match self {
+            BusinessMsgRejectReason::Other => 0,
+            BusinessMsgRejectReason::UnknownId => 1,
+            BusinessMsgRejectReason::UnknownSecurity => 2,
+            BusinessMsgRejectReason::UnknownMessageTye { .. } => 3,
+            BusinessMsgRejectReason::ApplicationNotAvailable => 4,
+            BusinessMsgRejectReason::MissingConditionallyRequiredField { .. } => 5,
+            BusinessMsgRejectReason::NotAuthorized => 6,
+            BusinessMsgRejectReason::DeliverToFirmNotAvailableAtThisTime => 7,
+            BusinessMsgRejectReason::InvalidPriceIncrement => 18,
+        }
+    }
 }
 
 // Failure modes for an outbound app-message send driven from outside the engine

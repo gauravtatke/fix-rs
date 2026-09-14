@@ -93,7 +93,7 @@ mod session_map_tests {
     use super::*;
     use crate::application::DefaultApplication;
     use crate::data_dictionary::DataDictionary;
-    use crate::message::StringField;
+
     use crate::session::schedule::SessionSchedule;
     use crate::session::state::SessionState;
     use std::time::Instant;
@@ -130,7 +130,7 @@ mod session_map_tests {
         let map: SessionMap = vec![(id.clone(), session)].into_iter().collect();
 
         let mut md = Message::new();
-        md.header_mut().set_field(StringField::new(35, "W"));
+        md.set_header_field(35, "W");
         let err = map.send(&id, md).unwrap_err();
         assert!(matches!(err, SendError::NotLoggedOn));
     }

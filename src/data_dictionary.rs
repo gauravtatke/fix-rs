@@ -219,10 +219,7 @@ impl DataDictionary {
         }
         msg_fields.insert(fnum);
         if required {
-            self.msg_required_fields
-                .entry(msg_type.to_owned())
-                .or_default()
-                .insert(fnum);
+            self.msg_required_fields.entry(msg_type.to_owned()).or_default().insert(fnum);
         }
         Ok(())
     }
@@ -749,7 +746,7 @@ mod dictionary_tests {
                     && get_attribute("msgtype", node).unwrap().eq(msg_type)
             })
             .unwrap();
-        
+
         msg_node
             .children()
             .filter(|node| node.is_element() && node.has_tag_name("field"))

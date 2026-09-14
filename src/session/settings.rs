@@ -724,7 +724,8 @@ mod session_setting_tests {
         assert_eq!(props.sessions.len(), 1);
 
         let sid = "FIX.4.3:SENDER/sender_sub/sender_loc->TARGET/target_sub/target_loc:qual1";
-        let s = props.sessions.get(sid).unwrap_or_else(|| panic!("session not found for key: {}", sid));
+        let s =
+            props.sessions.get(sid).unwrap_or_else(|| panic!("session not found for key: {}", sid));
 
         assert_eq!(s.begin_string, "FIX.4.3");
         assert_eq!(s.connection_type, ConnectionType::Acceptor);

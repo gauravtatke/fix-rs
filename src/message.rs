@@ -58,10 +58,13 @@ pub struct StringField {
 }
 
 impl StringField {
-    pub fn new(tag: Tag, value: &str) -> Self {
+    // `impl Into<String>` so callers can pass a `&str` (allocates once) or an owned
+    // `String` (moved in, zero-copy) without the to_string()+as_str() dance that
+    // otherwise allocates twice. Numbers stay explicit: `new(tag, n.to_string())`.
+    pub(crate) fn new(tag: Tag, value: impl Into<String>) -> Self {
         Self {
             tag,
-            value: value.to_string(),
+            value: value.into(),
         }
     }
 }
@@ -102,8 +105,18 @@ impl FieldMap {
         }
     }
 
-    pub fn set_field(&mut self, field: StringField) {
+    // Insert a pre-built field. Private: only the parser (which already holds a
+    // StringField) and the ergonomic `set_field` below use it — callers build fields
+    // via `set_field(tag, value)`.
+    fn insert_field(&mut self, field: StringField) {
         self.fields.insert(field.tag(), field);
+    }
+
+    // Ergonomic setter for *building* a message/group: `set_field(tag, value)` with
+    // no explicit StringField. `value: impl Into<String>` takes a &str or an owned
+    // String (numbers stay explicit: `set_field(tag, n.to_string())`).
+    pub fn set_field(&mut self, tag: Tag, value: impl Into<String>) {
+        self.insert_field(StringField::new(tag, value));
     }
 
     pub fn get_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
@@ -114,8 +127,7 @@ impl FieldMap {
     }
 
     pub fn set_group(&mut self, tag: Tag, value: u32, rep_grp_delimiter: Tag) -> &mut Group {
-        let grp_field = StringField::new(tag, value.to_string().as_str());
-        self.set_field(grp_field);
+        self.set_field(tag, value.to_string());
         let group =
             self.group.entry(tag).or_insert_with(|| Group::new(rep_grp_delimiter, tag, value));
         // create group instances and insert into group
@@ -250,20 +262,33 @@ impl Message {
         }
     }
 
-    pub fn set_field(&mut self, fld: StringField) {
-        self.body.set_field(fld);
+    // Section-named field setters. The section is in the method name so a call site
+    // can never be ambiguous about where a field lives (header vs body), and they
+    // build the StringField themselves — `set_body_field(45, x)` instead of
+    // `set_body_field(StringField::new(45, x))`. `value: impl Into<String>` takes a
+    // &str or an owned String; numbers stay explicit (`set_body_field(45, n.to_string())`).
+    pub fn set_header_field(&mut self, tag: Tag, value: impl Into<String>) {
+        self.header.set_field(tag, value);
     }
 
-    pub fn get_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+    pub fn set_body_field(&mut self, tag: Tag, value: impl Into<String>) {
+        self.body.set_field(tag, value);
+    }
+
+    pub fn set_trailer_field(&mut self, tag: Tag, value: impl Into<String>) {
+        self.trailer.set_field(tag, value);
+    }
+
+    pub fn get_header_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+        self.header.get_field(tag)
+    }
+
+    pub fn get_body_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
         self.body.get_field(tag)
     }
 
-    pub fn set_group(&mut self, tag: Tag, value: u32, rep_grp_delimiter: Tag) -> &mut Group {
-        self.body.set_group(tag, value, rep_grp_delimiter)
-    }
-
-    pub fn get_group(&self, tag: Tag) -> Option<&Group> {
-        self.body.get_group(tag)
+    pub fn get_trailer_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+        self.trailer.get_field(tag)
     }
 
     fn add_group(&mut self, tag: Tag, grp: Group) {
@@ -286,7 +311,7 @@ impl Message {
 
     pub fn set_checksum(&mut self) {
         let checksum_str = format!("{:0>3}", self.calc_checksum());
-        self.trailer_mut().set_field(StringField::new(10, &checksum_str));
+        self.set_trailer_field(10, &checksum_str);
     }
 
     fn calc_body_len(&self) -> usize {
@@ -307,7 +332,7 @@ impl Message {
 
     pub fn set_body_len(&mut self) {
         let body_len = self.calc_body_len();
-        self.header_mut().set_field(StringField::new(9, &body_len.to_string()))
+        self.set_header_field(9, body_len.to_string())
     }
 
     pub fn get_msg_type(&self) -> Result<String, FieldError> {
@@ -317,7 +342,7 @@ impl Message {
     pub fn set_sending_time(&mut self) {
         let curr_time = chrono::Utc::now();
         let sending_time = curr_time.format("%Y%m%d-%T%.3f").to_string();
-        self.header_mut().set_field(StringField::new(52, &sending_time));
+        self.set_header_field(52, &sending_time);
     }
 
     // Entry point for turning a raw wire string into a `Message`. Two passes:
@@ -460,12 +485,12 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<
     // for a short/malformed message instead of rejecting it cleanly.
     if v.len() < 3
         || (
-            // validate the first 3 fields and the last one
-            v[0].tag() != BeginString::field()
-                || v[1].tag() != BodyLength::field()
-                || v[2].tag() != MsgType::field()
-                || v[v.len() - 1].tag() != CheckSum::field()
-        )
+        // validate the first 3 fields and the last one
+        v[0].tag() != BeginString::field()
+            || v[1].tag() != BodyLength::field()
+            || v[2].tag() != MsgType::field()
+            || v[v.len() - 1].tag() != CheckSum::field()
+    )
     {
         return Err(SessionRejectReason::Other {
             msg: "field 8|9|35 are not correct".to_string(),
@@ -600,7 +625,7 @@ fn parse_group(
                 // possible) — recurse into it instead of just storing it as a plain field.
                 parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
             } else {
-                group_instance.set_field(next_field);
+                group_instance.insert_field(next_field);
             }
         } else if rg_dd.is_msg_group(msg_type, next_field.tag()) {
             // A nested group's count field, appearing partway through the current instance.
@@ -639,7 +664,7 @@ fn parse_group(
                 });
             }
             let group_instance = &mut group[actual_count - 1];
-            group_instance.set_field(next_field);
+            group_instance.insert_field(next_field);
             previous_offset = offset;
         } else {
             // This field belongs to whatever comes after the group (the rest of the body, or
@@ -691,7 +716,7 @@ fn parse_header(
             // of the dictionary rather than a real message type's.
             parse_group(v, HEADER_ID, &fld, header, dd)?;
         } else {
-            header.set_field(fld);
+            header.insert_field(fld);
         }
     }
     Ok(())
@@ -728,7 +753,7 @@ fn parse_body(
             parse_group(v, &msg_type, &fld, &mut msg.body, dd)?;
         } else {
             validate_tag_for_msgtype(fld.tag(), &msg_type, dd)?;
-            msg.set_field(fld);
+            msg.body_mut().insert_field(fld);
         }
     }
     Ok(())
@@ -747,7 +772,7 @@ fn parse_trailer(
         if !dd.is_trailer_field(fld.tag()) {
             return Err(SessionRejectReason::TagSpecifiedOutOfOrder { tag: fld.tag() });
         }
-        trailer.set_field(fld);
+        trailer.insert_field(fld);
     }
     Ok(())
 }
@@ -872,13 +897,13 @@ fn validate_required_tag_missing(
 
 pub fn test_logon() -> Message {
     let mut heartbeat = Message::new();
-    heartbeat.header_mut().set_field(StringField::new(8, "FIX.4.3"));
-    heartbeat.header_mut().set_field(StringField::new(35, "A"));
-    heartbeat.header_mut().set_field(StringField::new(34, "1"));
-    heartbeat.header_mut().set_field(StringField::new(49, "FIXIMULATOR"));
-    heartbeat.header_mut().set_field(StringField::new(56, "BANZAI"));
-    heartbeat.set_field(StringField::new(98, "0"));
-    heartbeat.set_field(StringField::new(108, "30"));
+    heartbeat.set_header_field(8, "FIX.4.3");
+    heartbeat.set_header_field(35, "A");
+    heartbeat.set_header_field(34, "1");
+    heartbeat.set_header_field(49, "FIXIMULATOR");
+    heartbeat.set_header_field(56, "BANZAI");
+    heartbeat.set_body_field(98, "0");
+    heartbeat.set_body_field(108, "30");
     heartbeat.set_sending_time();
     heartbeat.set_body_len();
     heartbeat.set_checksum();
@@ -925,7 +950,7 @@ mod message_test {
         assert!(msg.is_ok());
         let msg = msg.unwrap();
         assert_eq!(msg.get_msg_type().unwrap(), "A");
-        assert_eq!(msg.header().get_field::<String>(8).unwrap(), "FIX.4.3");
+        assert_eq!(msg.get_header_field::<String>(8).unwrap(), "FIX.4.3");
     }
 
     #[test]
@@ -953,8 +978,8 @@ mod message_test {
         assert!(msg.is_ok());
         let msg = msg.unwrap();
         assert_eq!(msg.get_msg_type().unwrap(), "W");
-        assert!(msg.get_group(268).is_some());
-        let md_entries_grp = msg.get_group(268).unwrap();
+        assert!(msg.body().get_group(268).is_some());
+        let md_entries_grp = msg.body().get_group(268).unwrap();
         assert_eq!(md_entries_grp.delim(), 269);
         assert_eq!(md_entries_grp.size(), 2);
         assert_eq!(md_entries_grp[0].get_field::<u32>(269).unwrap(), 0);
@@ -974,8 +999,8 @@ mod message_test {
         assert!(msg.is_ok());
         let msg = msg.unwrap();
         assert_eq!(msg.get_msg_type().unwrap(), "E");
-        assert!(msg.get_group(73).is_some());
-        let no_orders_grp = msg.get_group(73).unwrap();
+        assert!(msg.body().get_group(73).is_some());
+        let no_orders_grp = msg.body().get_group(73).unwrap();
         assert_eq!(no_orders_grp.delim(), 11);
         assert_eq!(no_orders_grp.size(), 2);
         assert_eq!(no_orders_grp[0].get_field::<String>(11).unwrap(), "ClientOrderId1");
@@ -1096,9 +1121,9 @@ mod message_test {
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_ok());
         let msg = msg.unwrap();
-        assert_eq!(msg.trailer().get_field::<u32>(93).unwrap(), 15);
-        assert_eq!(msg.trailer().get_field::<String>(89).unwrap(), "abc123signature");
-        assert_eq!(msg.trailer().get_field::<String>(10).unwrap(), "000");
+        assert_eq!(msg.get_trailer_field::<u32>(93).unwrap(), 15);
+        assert_eq!(msg.get_trailer_field::<String>(89).unwrap(), "abc123signature");
+        assert_eq!(msg.get_trailer_field::<String>(10).unwrap(), "000");
     }
 
     #[test]
