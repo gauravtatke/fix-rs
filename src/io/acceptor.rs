@@ -108,7 +108,10 @@ fn establish_session(session: &mut Session, stream: TcpStream, raw: &str) -> Con
     }
 }
 
-fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> {
+// pub(crate) so the in-process raw-input harness (session_tests, 7.6a) can drive
+// this exact inbound seam — parse -> garbled-drop / Reject / dispatch — without a
+// socket. Crate-internal only; not part of any external API.
+pub(crate) fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> {
     match Message::from_str(msg_str, session.data_dict()) {
         Ok(mut msg) => {
             // next_message has already applied any FIX response (Reject /

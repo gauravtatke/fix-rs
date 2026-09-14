@@ -678,7 +678,9 @@ mod responder_tests {
 mod session_tests {
     use super::*;
     use crate::application::Application;
-    use crate::fix_errors::{BusinessMsgReject, DonotSend, RejectLogon};
+    use crate::fix_errors::{
+        BusinessMsgReject, DonotSend, InboundMsgError, RejectLogon, SendError, SessionRejectError,
+    };
     use std::collections::VecDeque;
     use std::ops::ControlFlow;
     use std::sync::Mutex;
@@ -1622,6 +1624,305 @@ mod session_tests {
         assert!(!session.state.logon_received);
         // Nothing went out — not a Logout(35=5), not a Reject(35=3).
         assert!(mock_state.sent().is_empty(), "bad-identity logon must be silent");
+    }
+
+    // Response-building for EVERY non-garbled reject reason, including the ones the
+    // parser doesn't emit yet (audit Groups A/B). Guarantees that if any of them
+    // ever arises, reject_message builds a correct Reject(35=3): SessionRejectReason
+    // (373) = the reason's wire code, RefTagID(371) for tag-bearing reasons, Text(58)
+    // for message-bearing ones, and RefSeqNum(45) echoed. Garbled markers
+    // (InvalidBodyLength/InvalidChecksum) are excluded — they are dropped, never
+    // rejected (see the harness garbled test).
+    #[test]
+    fn test_reject_message_builds_correct_reject_for_every_reason() {
+        let reasons = [
+            SessionRejectError::InvalidTag { tag: 1 },
+            SessionRejectError::RequiredTagMissing { tag: 35 },
+            SessionRejectError::TagNotDefinedForMsgType { tag: 44 },
+            SessionRejectError::UndefinedTag { tag: 99 },
+            SessionRejectError::TagSpecifiedWithoutValue { tag: 58 },
+            SessionRejectError::ValueOutOfRange { tag: 54 },
+            SessionRejectError::IncorrectDataFormatForValue { tag: 44 },
+            SessionRejectError::DecryptionProblem,
+            SessionRejectError::SignatureProblem,
+            SessionRejectError::CompIdProblem,
+            SessionRejectError::SendingTimeAccuracyProblem,
+            SessionRejectError::InvalidMessageType,
+            SessionRejectError::XmlValidationError,
+            SessionRejectError::TagAppearsMoreThanOnce { tag: 55 },
+            SessionRejectError::TagSpecifiedOutOfOrder { tag: 52 },
+            SessionRejectError::RepeatingGroupsOutOfOrder { tag: 269 },
+            SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { tag: 268 },
+            SessionRejectError::NonDataFieldIncludeSOHChar { tag: 58 },
+            SessionRejectError::InvalidUnsupportedAppVersion { msg: "v9".into() },
+            SessionRejectError::Other { msg: "boom".into() },
+        ];
+
+        for reason in reasons {
+            let (mut session, mock_state) = make_logged_on_session();
+            let expected_code = reason.code().to_string();
+            let expected_tag = reason.ref_tag();
+            let expected_text = reason.text().map(|s| s.to_string());
+
+            session.reject_message(7, reason.clone());
+
+            let sent = mock_state.sent();
+            assert_eq!(sent.len(), 1, "{:?}: exactly one Reject", reason);
+            let wire = &sent[0];
+            assert!(sent_message_contains(wire, 35, "3"), "{:?}: is a Reject(35=3)", reason);
+            assert!(sent_message_contains(wire, 45, "7"), "{:?}: RefSeqNum(45)", reason);
+            assert!(sent_message_contains(wire, 373, &expected_code), "{:?}: SessionRejectReason(373)", reason);
+            if let Some(tag) = expected_tag {
+                assert!(sent_message_contains(wire, 371, &tag.to_string()), "{:?}: RefTagID(371)", reason);
+            }
+            if let Some(text) = expected_text {
+                assert!(sent_message_contains(wire, 58, &text), "{:?}: Text(58)", reason);
+            }
+        }
+    }
+
+    // Every BusinessMsgReject reason the application can return builds a correct
+    // BusinessMessageReject(35=j): BusinessRejectReason(380) = the reason's code,
+    // with RefMsgType(372) and RefSeqNum(45) echoed. (The app EMITS these — this is
+    // the app-callback side of "handle every reason right", mirroring the
+    // reject-reason test above.)
+    #[test]
+    fn test_send_business_msg_reject_builds_35j_for_every_reason() {
+        let reasons = [
+            BusinessMsgReject::Other,
+            BusinessMsgReject::UnknownId,
+            BusinessMsgReject::UnknownSecurity,
+            BusinessMsgReject::UnknownMessageTye { msg_type: "D".into() },
+            BusinessMsgReject::ApplicationNotAvailable,
+            BusinessMsgReject::MissingConditionallyRequiredField { tag: 55 },
+            BusinessMsgReject::NotAuthorized,
+            BusinessMsgReject::DeliverToFirmNotAvailableAtThisTime,
+            BusinessMsgReject::InvalidPriceIncrement,
+        ];
+
+        for reason in reasons {
+            let (mut session, mock_state) = make_logged_on_session();
+            let expected_code = reason.code().to_string();
+
+            session.send_business_msg_reject(9, "V", &reason).unwrap();
+
+            let sent = mock_state.sent();
+            assert_eq!(sent.len(), 1, "{:?}: exactly one 35=j", reason);
+            let wire = &sent[0];
+            assert!(sent_message_contains(wire, 35, "j"), "{:?}: is a BusinessMessageReject(35=j)", reason);
+            assert!(sent_message_contains(wire, 372, "V"), "{:?}: RefMsgType(372)", reason);
+            assert!(sent_message_contains(wire, 45, "9"), "{:?}: RefSeqNum(45)", reason);
+            assert!(sent_message_contains(wire, 380, &expected_code), "{:?}: BusinessRejectReason(380)", reason);
+        }
+    }
+
+    // --- 7.6(a): in-process raw-input harness ---
+    //
+    // Feeds raw SOH-delimited wire strings through the REAL inbound seam
+    // (acceptor::process_inbound_msg -> Message::from_str with the real FIX43
+    // dictionary -> garbled-drop / Reject(35=3) / next_message), with a
+    // MockResponder instead of a socket. This is the coverage Banzai can't give
+    // (it can't inject malformed/invalid messages) and that the other session
+    // tests skip (they build Messages directly and use an empty
+    // DataDictionary::default(), bypassing from_str + field validation).
+    //
+    // The wire fixtures below are the same ones exercised in message.rs's parser
+    // tests, so their parse outcome (garbled vs. which SessionRejectError) is known.
+
+    // A well-formed FIX43 Logon that parses cleanly (MsgSeqNum 0, CompIDs matching
+    // the harness session's reverse identity below).
+    const VALID_LOGON: &str = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004";
+
+    // `|` is used as a readable stand-in for SOH in the fixtures above.
+    fn soh(s: &str) -> String {
+        s.replace('|', "\x01")
+    }
+
+    // Parse the real FIX43 dictionary once for the whole harness — from_xml is slow,
+    // and each session just needs an owned clone (DataDictionary derives Clone).
+    lazy_static::lazy_static! {
+        static ref HARNESS_DD: DataDictionary = DataDictionary::from_xml("resources/FIX43.xml");
+    }
+
+    // A session with the REAL FIX43 dictionary (so from_str runs full field
+    // validation) plus a recording responder. Pre-logon and active; SenderCompID/
+    // TargetCompID mirror the FIXIMULATOR/BANZAI wire fixtures' reverse identity.
+    fn make_harness_session() -> (Session, MockState) {
+        let id = SessionId::new("FIX.4.3", "FIXIMULATOR", "BANZAI");
+        let state = SessionState::new(30, false, Instant::now());
+        let schedule = SessionSchedule::new(None, None, None, None, chrono_tz::UTC);
+        let mock_state = MockState::new();
+        let responder = MockResponder::new(mock_state.clone());
+        let dd = HARNESS_DD.clone();
+        let app = Box::new(TestApplication::new(AppSpy::new()));
+        let mut session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        session.is_active = true; // logon_received stays false
+        (session, mock_state)
+    }
+
+    // Garbled (bad BodyLength / CheckSum): a garbled message can't be trusted
+    // enough to reference in a Reject, so it is dropped — nothing on the wire, and
+    // the connection survives (Continue).
+    #[test]
+    fn test_harness_garbled_messages_are_dropped_silently() {
+        let cases = [
+            // checksum's last digit flipped (004 -> 005); body length still correct
+            ("bad checksum", "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005"),
+            // body length flipped (72 -> 73); checked before checksum in from_vec
+            ("bad body length", "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004"),
+        ];
+        for (label, wire) in cases {
+            let (mut session, mock_state) = make_harness_session();
+            let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(wire));
+            assert_eq!(flow, ControlFlow::Continue(()), "{}: keep reading", label);
+            assert!(mock_state.sent().is_empty(), "{}: garbled msg → no response", label);
+            assert!(!mock_state.is_disconnected(), "{}: connection survives", label);
+        }
+    }
+
+    // Well-formed (correct 9/10) but dictionary-invalid: process_inbound_msg replies
+    // with a session Reject(35=3) carrying RefSeqNum(45) and SessionRejectReason(373),
+    // and keeps the connection alive (Continue). The tag-373 code and RefSeqNum are
+    // asserted per case. (RefSeqNum is 0 where MsgSeqNum is absent or unparseable.)
+    #[test]
+    fn test_harness_wellformed_but_invalid_messages_are_rejected() {
+        // (label, wire, expected tag-373 code, expected RefSeqNum)
+        let cases = [
+            // TestRequest with tag 99999 (undefined anywhere in FIX43.xml) → code 3
+            ("undefined tag", "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213", "3", "1"),
+            // TestRequest with Price(44) — a real tag, but not for msg type 1 → code 2
+            ("tag not for msg type", "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082", "2", "1"),
+            // Logon with EncryptMethod(98)=9, outside the declared enum (0-6) → code 5
+            ("value out of enum range", "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013", "5", "0"),
+            // Logon with MsgSeqNum(34)=abc, a non-numeric SEQNUM → code 6. RefSeqNum
+            // falls back to 0 since "abc" can't be parsed out of the raw string.
+            ("incorrect data format", "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252", "6", "0"),
+            // Fewer than 3 fields → structural "Other" (code 99); no MsgSeqNum → RefSeqNum 0
+            ("structural / too few fields", "8=FIX.4.3|10=000", "99", "0"),
+        ];
+        for (label, wire, code, ref_seq) in cases {
+            let (mut session, mock_state) = make_harness_session();
+            let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(wire));
+            assert_eq!(flow, ControlFlow::Continue(()), "{}: recoverable, keep reading", label);
+            let sent = mock_state.sent();
+            assert_eq!(sent.len(), 1, "{}: exactly one Reject", label);
+            assert!(sent_message_contains(&sent[0], 35, "3"), "{}: is a Reject(35=3)", label);
+            assert!(sent_message_contains(&sent[0], 373, code), "{}: SessionRejectReason(373)", label);
+            assert!(sent_message_contains(&sent[0], 45, ref_seq), "{}: RefSeqNum(45)", label);
+            assert!(!mock_state.is_disconnected(), "{}: connection survives", label);
+        }
+    }
+
+    // End-to-end positive path: a valid raw Logon parses, dispatches through
+    // next_message/next_logon, logs the session on, and the acceptor answers with a
+    // confirming Logon(35=A). Proves the Ok arm of process_inbound_msg is wired,
+    // start to finish, from a raw string with no socket.
+    #[test]
+    fn test_harness_valid_logon_parses_and_logs_on() {
+        let (mut session, mock_state) = make_harness_session();
+        session.state.next_target_msg_seq_num = 0; // fixture's MsgSeqNum is 0
+
+        let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(VALID_LOGON));
+
+        assert_eq!(flow, ControlFlow::Continue(()));
+        assert!(session.state.logon_received, "valid Logon logs the session on");
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "A"), "acceptor confirms with a Logon");
+        assert!(!mock_state.is_disconnected());
+    }
+
+    // The graceful POST-logon LogonRejected arm (7.5 follow-up): if an application
+    // returns RejectLogon from a post-logon admin message (an API misuse — the name
+    // is logon-specific), the engine must NOT panic. It treats it as fatal: Logout
+    // (reason as Text(58)) + disconnect, so the counterparty can reconnect. A
+    // ResendRequest(35=2) routes through dispatch_to_app -> on_admin_msg_received,
+    // which is where RejectingApp vetoes.
+    #[test]
+    fn test_next_message_logon_rejected_post_logon_logs_out_gracefully() {
+        let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(RejectingApp));
+        let mut msg = make_msg("2", "TARGET", "SENDER", 1); // ResendRequest, in-sequence
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5")); // Logout, not a panic
+    }
+
+    // Fatal-group coverage beyond CompIdMismatch: a post-logon SeqNumTooLow is a
+    // session-level break — the classifier logs out (reason as Text(58)) and
+    // disconnects. (verify_seq_number has a unit test at its own level; this asserts
+    // the next_message classification + wire response for the fatal path.)
+    #[test]
+    fn test_next_message_seq_num_too_low_logs_out_and_disconnects() {
+        let (mut session, mock_state) = make_logged_on_session();
+        session.state.next_target_msg_seq_num = 5;
+        let mut msg = make_msg("D", "TARGET", "SENDER", 3); // below expected
+
+        let flow = session.next_message(&mut msg);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5")); // Logout
+    }
+
+    // --- Fatal-group members that aren't easily triggered end-to-end today, tested
+    // by classifying them through on_inbound_error directly. ---
+
+    // SendErr = our own outbound pipe broke while replying on this session. It's
+    // fatal: the classifier attempts a Logout and disconnects. (The Logout goes out
+    // here because the MockResponder still works; in the real broken-pipe case it
+    // wouldn't, but the classification — Break + disconnect — is what we assert.)
+    #[test]
+    fn test_on_inbound_error_send_err_is_fatal() {
+        let (mut session, mock_state) = make_logged_on_session();
+        let msg = make_msg("D", "TARGET", "SENDER", 1);
+
+        let flow = session.on_inbound_error(&msg, InboundMsgError::SendErr(SendError::NotLoggedOn));
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5")); // Logout
+    }
+
+    // OutOfSessionTime is emitted only inside next_logon today (pre-logon), so it
+    // takes the pre-logon gate: SILENT disconnect, no Logout — a logon outside the
+    // session window reveals nothing and just drops.
+    #[test]
+    fn test_on_inbound_error_out_of_session_time_pre_logon_is_silent() {
+        let (mut session, mock_state) = make_session(); // logon_received stays false
+        let msg = make_msg("A", "TARGET", "SENDER", 1);
+
+        let flow = session.on_inbound_error(&msg, InboundMsgError::OutOfSessionTime);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        assert!(mock_state.sent().is_empty(), "pre-logon OutOfSessionTime is silent");
+    }
+
+    // Reserved forward-looking path: IF a future session-window-close-while-connected
+    // path emits OutOfSessionTime POST-logon, the fatal arm sends a Logout and
+    // disconnects. Documents that the fatal-arm classification is correct for when
+    // that path exists (it isn't emitted post-logon yet).
+    #[test]
+    fn test_on_inbound_error_out_of_session_time_post_logon_is_fatal() {
+        let (mut session, mock_state) = make_logged_on_session();
+        let msg = make_msg("D", "TARGET", "SENDER", 1);
+
+        let flow = session.on_inbound_error(&msg, InboundMsgError::OutOfSessionTime);
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        assert!(mock_state.is_disconnected());
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "5")); // Logout
     }
 
     // send_business_msg_reject builds a well-formed 35=j: the two required fields

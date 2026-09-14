@@ -482,26 +482,39 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   unit-tested (`test_send_business_msg_reject_builds_35j`,
   `test_next_message_app_error_business_rejects_without_teardown`).
 
-- [ ] **7.5 — Tests.**
-  Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). The 7.3c
-  classifier already has unit coverage (recoverable Reject / fatal Logout+disconnect / pre-logon gate / AppError
-  no-teardown, 4 tests). Add a dedicated `LogonRejected → Logout+disconnect` case (currently only indirectly covered by
-  the pre-logon gate test), and 35=j coverage once 7.4 lands.
+- [x] **7.5 — Tests. DONE (2026-09-14, session 2).**
+  Unit tests (MockResponder asserting the `3`/`5`/`j` on the wire, RefSeqNum, reason code, seq-num advance). 7.3c
+  classifier coverage (recoverable Reject / fatal Logout+disconnect / pre-logon gate / AppError no-teardown). Added the
+  dedicated `LogonRejected → Logout+disconnect` case (pre-logon Logout + post-logon graceful arm), a `CompIdMismatch`
+  pre-logon **silent**-disconnect case (FIX 4.3 security exception), `SeqNumTooLow`/`SendErr`/`OutOfSessionTime` fatal
+  classification, and — closing the "handle every reason right, even the unreached ones" gap — two exhaustive
+  builder tests: `test_reject_message_builds_correct_reject_for_every_reason` (all 20 non-garbled `SessionRejectError`
+  variants → correct 35=3: 373/371/58/45) and `test_send_business_msg_reject_builds_35j_for_every_reason` (all 9
+  `BusinessMsgReject` reasons → correct 35=j: 380/372/45).
 
-  **Blocker for live/interop testing (see 7.6): Banzai cannot inject malformed or invalid messages** — it's an
-  order-entry GUI with no way to script a broken/out-of-order/garbled message, so the Reject/Logout paths can't be
-  exercised end-to-end against it. Banzai only validated the happy-path order round trip (M6). The malformed-input paths
-  therefore need a different harness.
+- [~] **7.6 — Protocol test harness / simulator. (a) DONE; (b) remaining.**
+  (a) **DONE (2026-09-14, session 2):** in-process raw-input harness in `session_tests` drives the real inbound seam
+  `acceptor::process_inbound_msg` (widened to `pub(crate)` for test access) — raw SOH string → `Message::from_str` with
+  the real `FIX43.xml` dictionary → garbled-drop / Reject(35=3) / dispatch — via `MockResponder`, no socket. Cases:
+  garbled (bad BodyLength/CheckSum) → dropped silently; well-formed-but-invalid (undefined tag, tag-not-for-msgtype,
+  value-out-of-range, incorrect-data-format, structural) → Reject(35=3) with the right 373 code + RefSeqNum; a valid
+  Logon → parses, logs on, confirming Logon(35=A). Dictionary parsed once via a `lazy_static` + clone.
+  (b) **TODO:** a small scripted TCP simulator connecting to the acceptor (send/expect scripts) — true end-to-end,
+  catches the acceptor/IO seam + `establish_session` (needs a real socket, so unreachable by (a)). QFJ AT `.def` engine
+  is the reference; strategy in `session_context/qfj-testing-strategy.md`.
 
-- [ ] **7.6 — Protocol test harness / simulator (NEW — needed for M7 and beyond).**
-  We need a way to drive the engine with arbitrary raw wire input (malformed, out-of-order, garbled, wrong CompID/
-  BeginString, bad seq num) and assert the exact response, since Banzai can't. Two candidate layers (likely both):
-  (a) in-process integration tests that construct a `Session` + `MockResponder` and feed raw strings through the inbound
-  path (no socket — cheap, deterministic); (b) a small scripted TCP simulator that connects to the acceptor and runs
-  send/expect scripts (true end-to-end, catches the acceptor/IO seam the unit tests can't). Study how QuickFIX/J does
-  this first — its acceptance-test (AT) `.def` script engine and unit `SessionTest` patterns are the reference.
-  Strategy + coverage points documented in
-  `session_context/qfj-testing-strategy.md`. Decide fix-rs's approach from that.
+  **Validation-coverage map (three layers), from the session-2 audit:**
+  - **L1 parse-time (`from_str`/`from_vec` + dictionary → `SessionRejectError`):** live/emitted variants well covered in
+    `message.rs` parser tests + the seam covered by the harness. **Response-building for ALL 20 non-garbled reasons is
+    now tested** (even unreached ones). All tag-373 `code()` values verified spec-correct.
+  - **L2 session-own (`verify_msg`/`verify_seq_number` → `InboundMsgError`):** unit + classifier coverage for
+    MissingHeaderField (recoverable), CompIdMismatch/SeqNumTooLow/SendErr/OutOfSessionTime (fatal), pre-logon gate.
+  - **L3 app callbacks:** RejectLogon (pre + post-logon), BusinessMsgReject (all 9 reasons), DonotSend.
+  - **Remaining GAPS = genuine missing parser validations (engine work, not test work) — "Group B":**
+    `TagAppearsMoreThanOnce`(373=13), `NonDataFieldIncludeSOHChar`(17, stubbed `msg_test_soh_*`), `InvalidTag`(0,
+    currently falls to `Other`), unknown-MsgType → `InvalidMessageType`(11). The response side is already tested; only
+    the *emit* side (the actual check) is missing. "Group A" variants (Decryption/Signature/CompId/SendingTime/Xml/
+    AppVersion problems, 373=7/8/9/10/12/18) stay reserved pending their features — kept, spec-complete, correctly coded.
 
 **M7 exit criteria**: inbound messages that fail engine-level validation produce the correct FIX response
 (Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is covered by automated
