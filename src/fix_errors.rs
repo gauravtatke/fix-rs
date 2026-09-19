@@ -19,6 +19,13 @@ pub enum SessionRejectError {
     RequiredTagMissing { tag: u32 },
     #[error("Tag {tag} not defined for this message type")]
     TagNotDefinedForMsgType { tag: u32 },
+    /// SessionRejectReason 3 ("Undefined Tag"). Overlaps with `InvalidTag` (reason 0): the FIX
+    /// 4.3 code list defines both, but the spec's validation rules (Vol 2 §14a) only ever
+    /// prescribe reason 0 for a tag not defined in the specification, and no rule prescribes 3.
+    /// So this variant is effectively vestigial — the parser emits `InvalidTag` for the unknown-
+    /// tag case, and the only remaining `UndefinedTag` reference is an unreachable branch in
+    /// `validate_tag_value_for_type`. Kept (with its 373=3 code) so a Reject we *receive*
+    /// carrying reason 3 can still be represented.
     #[error("Undefined tag: {tag}")]
     UndefinedTag { tag: u32 },
     #[error("Tag {tag} specified without a value")]

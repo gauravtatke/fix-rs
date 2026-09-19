@@ -496,14 +496,6 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<
             msg: "field 8|9|35 are not correct".to_string(),
         });
     }
-    // // validate the first 3 fields and the last one
-    // if v[0].tag() != BeginString::field()
-    //     || v[1].tag() != BodyLength::field()
-    //     || v[2].tag() != MsgType::field()
-    //     || v[v.len() - 1].tag() != CheckSum::field()
-    // {
-    //     return Err(SessionRejectError::other_err("field 8|9|35 are not correct"));
-    // }
     let body_len_field = &v[1];
     let expected_body_len =
         body_len_field.value().parse::<u32>().map_err(|_| SessionRejectError::InvalidBodyLength)?;
@@ -712,8 +704,10 @@ fn parse_header(
             // The header's own repeating group (NoHops) — HEADER_ID is used here as the
             // "message type" so parse_group can look group info up in the header's own section
             // of the dictionary rather than a real message type's.
+            validate_tag_for_duplicacy(fld.tag(), header)?;
             parse_group(v, HEADER_ID, &fld, header, dd)?;
         } else {
+            validate_tag_for_duplicacy(fld.tag(), header)?;
             header.insert_field(fld);
         }
     }
@@ -734,23 +728,21 @@ fn parse_body(
         Ok(s) => s,
         Err(_) => return Err(SessionRejectError::RequiredTagMissing { tag: 35 }),
     };
+    // first check for a valid msgtype
+    validate_known_msg_type(&msg_type, dd)?;
     while let Some(fld) = v.pop_front() {
-        if dd.is_header_field(fld.tag()) {
-            // A header field showing up after the body has started is never valid — header
-            // fields only belong at the very front of the message (parse_header already
-            // consumed all of them), so seeing one here is a genuine ordering violation, not
-            // just "not part of the body" (contrast with the trailer case just below, which is
-            // a normal, expected end-of-body signal).
-            return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag: fld.tag() });
-        }
+        validate_body_field(fld.tag(), dd)?;
         if dd.is_trailer_field(fld.tag()) {
+            // Normal, expected end-of-body signal: hand the trailer field back to parse_trailer.
             v.push_front(fld);
             return Ok(());
         }
         if dd.is_msg_group(msg_type.as_str(), fld.tag()) {
+            validate_tag_for_duplicacy(fld.tag(), msg.body())?;
             parse_group(v, &msg_type, &fld, &mut msg.body, dd)?;
         } else {
             validate_tag_for_msgtype(fld.tag(), &msg_type, dd)?;
+            validate_tag_for_duplicacy(fld.tag(), msg.body())?;
             msg.body_mut().insert_field(fld);
         }
     }
@@ -767,14 +759,17 @@ fn parse_trailer(
     dd: &DataDictionary,
 ) -> SessionResult<()> {
     while let Some(fld) = v.pop_front() {
-        if !dd.is_trailer_field(fld.tag()) {
-            return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag: fld.tag() });
-        }
+        validate_trailer_field(fld.tag(), dd)?;
+        validate_tag_for_duplicacy(fld.tag(), trailer)?;
         trailer.insert_field(fld);
     }
     Ok(())
 }
 
+// Post-parse sweep over every field in the message — header, body, trailer, and every group
+// instance at any depth (FieldMap::iter recurses) — running two per-value checks on each:
+// its value parses as the tag's declared type, and (if the tag is an enum) its value is in
+// the allowed set. Emits IncorrectDataFormatForValue / ValueOutOfRange.
 fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResult<()> {
     for field in message
         .header()
@@ -789,6 +784,13 @@ fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResul
     Ok(())
 }
 
+// Is `tag` allowed to appear in a message of type `msg_type`? Ok if it's one of that message
+// type's declared fields. Otherwise distinguishes "known tag, just not for this message type"
+// (TagNotDefinedForMsgType, 373=2 — the field_type lookup succeeds) from "not a tag the
+// dictionary knows at all" (InvalidTag, 373=0). The latter uses InvalidTag rather than the
+// near-synonymous UndefinedTag (373=3) to match FIX 4.3 Vol 2 §14a, which prescribes reason 0
+// ("Invalid tag number") for a tag not defined in the specification; see the UndefinedTag
+// variant's note in fix_errors.rs.
 fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
     if dd.is_msg_field(msg_type, tag) {
         return Ok(());
@@ -796,9 +798,59 @@ fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> Se
         // this field exist, since the field_type is defined. But may be not for this message type
         return Err(SessionRejectError::TagNotDefinedForMsgType { tag });
     }
-    Err(SessionRejectError::UndefinedTag { tag })
+    Err(SessionRejectError::InvalidTag { tag })
 }
 
+// Is the value of MsgType(35) a message type the dictionary defines? -> InvalidMessageType
+// (373=11). Delegates to the dictionary's own membership predicate so the "what counts as a
+// valid message type" knowledge lives in one place. Runs early in parse_body, before the
+// body-field loop, so an unknown type isn't first mislabelled as TagNotDefinedForMsgType.
+fn validate_known_msg_type(msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
+    if dd.is_valid_msg_type(msg_type) {
+        Ok(())
+    } else {
+        Err(SessionRejectError::InvalidMessageType)
+    }
+}
+
+// Rejects a non-group tag that already appears in this section -> TagAppearsMoreThanOnce
+// (373=13). Must run *before* the field is inserted: FieldMap stores flat fields in an
+// IndexMap, whose `insert` silently overwrites a duplicate, so a duplicate can only be caught
+// at insert time — a post-parse sweep (unlike validate_field_values) would already see the
+// collapsed single entry. Only called from the header/body top-level loops, not inside a group
+// instance, where a repeating delimiter tag is expected and handled by parse_group.
+fn validate_tag_for_duplicacy(tag: Tag, field_map: &FieldMap) -> SessionResult<()> {
+    // A repeating-group count tag also lands in `fields` (set_group calls set_field), so this
+    // one check covers both plain fields and a duplicated group count tag — no separate
+    // `field_map.group` lookup needed.
+    if field_map.fields.contains_key(&tag) {
+        return Err(SessionRejectError::TagAppearsMoreThanOnce { tag });
+    }
+    Ok(())
+}
+
+// A header field appearing after the body has started is an ordering violation -> the body has
+// already consumed every header field in parse_header, so this is not a hand-off signal (that's
+// the trailer case) but a genuine out-of-order field. -> TagSpecifiedOutOfOrder (373=14).
+fn validate_body_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
+    if dd.is_header_field(tag) {
+        return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
+    }
+    Ok(())
+}
+
+// The trailer is the last section, so any field here that isn't a declared trailer field is
+// out of order (there's no next section to hand it off to). -> TagSpecifiedOutOfOrder (373=14).
+fn validate_trailer_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
+    if !dd.is_trailer_field(tag) {
+        return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
+    }
+    Ok(())
+}
+
+// Enum-membership check: if `tag` declares a set of allowed values in the dictionary, is
+// `value` one of them? -> ValueOutOfRange on a miss. Tags with no declared value set are
+// unconstrained (any value is Ok).
 fn validate_tag_for_value_range(
     tag: Tag,
     value: &String,
@@ -815,6 +867,10 @@ fn validate_tag_for_value_range(
     }
 }
 
+// Type-format check: does `value` parse as the tag's declared FIX data type? Numeric families
+// must parse as i64/f64, Char must be a single char, Boolean must be exactly "Y"/"N"; the
+// string-shaped categories are accepted as-is (their sub-grammars aren't validated here).
+// -> IncorrectDataFormatForValue on a bad parse.
 fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessionResult<()> {
     match dd.get_field_type(tag) {
         Some(fix_type) => {
@@ -870,6 +926,10 @@ fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) ->
     }
 }
 
+// Are all of `msg_type`'s required tags present in `field_map`? -> RequiredTagMissing on the
+// first gap. Called once per section against the relevant "message type" key: the real msg
+// type for the body, HEADER_ID for the header, and the group's own type for each group
+// instance (so it doubles as the per-instance required-field check inside parse_group).
 fn validate_required_tag_missing(
     msg_type: &str,
     field_map: &FieldMap,
@@ -889,23 +949,6 @@ fn validate_required_tag_missing(
         }
         None => Ok(()),
     }
-}
-
-// pub const SAMPLE_MSG: &str = "8=FIX.4.2|9=251|35=D|49=AFUNDMGR|56=ABROKER|34=2|52=2003061501:14:49|11=12345|1=111111|63=0|64=20030621|21=3|110=1000|111=50000|55=IBM|48=459200101|22=1|54=1|60=2003061501:14:49|38=5000|40=1|44=15.75|15=USD|59=0|10=127|";
-
-pub fn test_logon() -> Message {
-    let mut heartbeat = Message::new();
-    heartbeat.set_header_field(8, "FIX.4.3");
-    heartbeat.set_header_field(35, "A");
-    heartbeat.set_header_field(34, "1");
-    heartbeat.set_header_field(49, "FIXIMULATOR");
-    heartbeat.set_header_field(56, "BANZAI");
-    heartbeat.set_body_field(98, "0");
-    heartbeat.set_body_field(108, "30");
-    heartbeat.set_sending_time();
-    heartbeat.set_body_len();
-    heartbeat.set_checksum();
-    heartbeat
 }
 
 #[cfg(test)]
@@ -1125,13 +1168,15 @@ mod message_test {
     }
 
     #[test]
-    fn msg_test_undefined_tag() {
-        // TestRequest(35=1) with an extra tag (99999) that isn't defined anywhere in
-        // the FIX43.xml dictionary at all — validate_tag_for_msgtype's fallback branch.
+    fn msg_test_invalid_tag() {
+        // TestRequest(35=1) with an extra tag (99999) that isn't defined anywhere in the
+        // FIX43.xml dictionary at all — validate_tag_for_msgtype's fallback branch. Per FIX 4.3
+        // Vol 2 §14a a tag not defined in the specification is reason 0 (InvalidTag), not the
+        // near-synonymous UndefinedTag (373=3), which the spec's behaviour table never emits.
         let test_request = "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
-        assert_matches!(msg.unwrap_err(), SessionRejectError::UndefinedTag { .. });
+        assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidTag { .. });
     }
 
     #[test]
@@ -1186,6 +1231,115 @@ mod message_test {
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidBodyLength);
+    }
+
+    #[test]
+    fn msg_test_invalid_msg_type() {
+        // MsgType(35) whose value ("ZZ") is not a message type FIX43.xml defines. Built via
+        // the message builder so BodyLength(9) and CheckSum(10) are correct and all required
+        // header fields are present — so the *only* thing wrong is the message type itself,
+        // and the reject is InvalidMessageType (373=11) rather than a body-length/checksum,
+        // required-field, or (crucially) TagNotDefinedForMsgType error.
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "ZZ");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_len();
+        msg.set_checksum();
+        let parsed = Message::from_str(&msg.to_string(), &DD);
+        assert!(parsed.is_err());
+        assert_matches!(parsed.unwrap_err(), SessionRejectError::InvalidMessageType);
+    }
+
+    // Duplicate-tag matrix (TagAppearsMoreThanOnce, 373=13). The rule is "a non-group tag may
+    // appear only once in a section"; a repeating group's delimiter/member tags legitimately
+    // recur once per instance and must NOT trip the check.
+
+    #[test]
+    fn msg_test_duplicate_non_group_tag_rejected() {
+        // (a) Logon(35=A) with SenderCompID(49) present twice in the header — the second
+        // occurrence is a duplicate. BodyLength/CheckSum are correct for the duplicated wire so
+        // parsing gets past from_vec's structural checks and reaches parse_header's per-field check.
+        let logon = "8=FIX.4.3|9=82|35=A|34=0|49=BANZAI|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=101|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagAppearsMoreThanOnce { tag: 49 });
+    }
+
+    #[test]
+    fn msg_test_repeating_group_member_tags_are_not_duplicates() {
+        // (b) + (c) MarketDataSnapshotFullRefresh(35=W) with NoMDEntries(268=2): the count tag
+        // 268 appears once (c), and the delimiter MDEntryType(269), MDEntryPx(270) and
+        // MDEntrySize(271) each recur once per instance (b). None of these is a duplicate — the
+        // repeated fields live in separate group instances, not the same section — so it parses.
+        let w = "8=FIX.4.3|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=012|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_ok(), "repeated group member tags must not be treated as duplicates");
+        assert_eq!(msg.unwrap().body().get_group(268).unwrap().size(), 2);
+    }
+
+    #[test]
+    fn msg_test_duplicate_group_count_tag_rejected() {
+        // (d) Same W, but NoMDEntries(268) count tag appears twice — two separate group blocks.
+        // The count tag is a non-group tag (set_group also records it in `fields`), so the
+        // second 268 is a duplicate. Rejected as the second 268 is popped, before its own
+        // instances are parsed.
+        let w = "8=FIX.4.3|9=140|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=1|269=0|270=8490.07|271=10|268=1|269=1|270=8519.57|271=20|10=023|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagAppearsMoreThanOnce { tag: 268 });
+    }
+
+    #[test]
+    fn msg_test_header_field_in_body_out_of_order() {
+        // Audit gap: TagSpecifiedOutOfOrder (373=14) from validate_body_field. PossDupFlag(43) is
+        // an (optional) header field placed in the body after 108 — since parse_header already
+        // consumed every header field, a header field reappearing in the body is out of order.
+        let logon = "8=FIX.4.3|9=77|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|43=Y|10=008|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagSpecifiedOutOfOrder { tag: 43 });
+    }
+
+    #[test]
+    fn msg_test_non_trailer_field_in_trailer_out_of_order() {
+        // Audit gap: TagSpecifiedOutOfOrder (373=14) from validate_trailer_field. After the
+        // trailer starts (93/89), a non-trailer field (Symbol 55) appears — the trailer is the
+        // last section, so anything that isn't a trailer field there is out of order.
+        let logon = "8=FIX.4.3|9=91|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|93=3|89=abc|55=IBM|10=056|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagSpecifiedOutOfOrder { tag: 55 });
+    }
+
+    #[test]
+    fn msg_test_repeating_group_fields_out_of_order() {
+        // Audit gap: RepeatingGroupsOutOfOrder (373=15). Within a NoMDEntries instance the
+        // declared order is 269, 270, 271; here 271 precedes 270, so 270 arrives with a lower
+        // rank than the field before it.
+        let w = "8=FIX.4.3|9=109|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=1|269=0|271=10|270=8490.07|10=123|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::RepeatingGroupsOutOfOrder { tag: 270 }
+        );
+    }
+
+    #[test]
+    fn msg_test_tag_specified_without_value() {
+        // Audit gap: TagSpecifiedWithoutValue (373=4). HeartBtInt(108) with an empty value. The
+        // tokenizer in from_str catches this before from_vec, so BodyLength/CheckSum are irrelevant.
+        let logon = "8=FIX.4.3|9=60|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|108=|10=000|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::TagSpecifiedWithoutValue { tag: 108 }
+        );
     }
 
     fn msg_test_soh_in_data_field() {}

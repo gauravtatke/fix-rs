@@ -1671,9 +1671,17 @@ mod session_tests {
             let wire = &sent[0];
             assert!(sent_message_contains(wire, 35, "3"), "{:?}: is a Reject(35=3)", reason);
             assert!(sent_message_contains(wire, 45, "7"), "{:?}: RefSeqNum(45)", reason);
-            assert!(sent_message_contains(wire, 373, &expected_code), "{:?}: SessionRejectReason(373)", reason);
+            assert!(
+                sent_message_contains(wire, 373, &expected_code),
+                "{:?}: SessionRejectReason(373)",
+                reason
+            );
             if let Some(tag) = expected_tag {
-                assert!(sent_message_contains(wire, 371, &tag.to_string()), "{:?}: RefTagID(371)", reason);
+                assert!(
+                    sent_message_contains(wire, 371, &tag.to_string()),
+                    "{:?}: RefTagID(371)",
+                    reason
+                );
             }
             if let Some(text) = expected_text {
                 assert!(sent_message_contains(wire, 58, &text), "{:?}: Text(58)", reason);
@@ -1692,7 +1700,9 @@ mod session_tests {
             BusinessMsgReject::Other,
             BusinessMsgReject::UnknownId,
             BusinessMsgReject::UnknownSecurity,
-            BusinessMsgReject::UnknownMessageTye { msg_type: "D".into() },
+            BusinessMsgReject::UnknownMessageTye {
+                msg_type: "D".into(),
+            },
             BusinessMsgReject::ApplicationNotAvailable,
             BusinessMsgReject::MissingConditionallyRequiredField { tag: 55 },
             BusinessMsgReject::NotAuthorized,
@@ -1709,10 +1719,18 @@ mod session_tests {
             let sent = mock_state.sent();
             assert_eq!(sent.len(), 1, "{:?}: exactly one 35=j", reason);
             let wire = &sent[0];
-            assert!(sent_message_contains(wire, 35, "j"), "{:?}: is a BusinessMessageReject(35=j)", reason);
+            assert!(
+                sent_message_contains(wire, 35, "j"),
+                "{:?}: is a BusinessMessageReject(35=j)",
+                reason
+            );
             assert!(sent_message_contains(wire, 372, "V"), "{:?}: RefMsgType(372)", reason);
             assert!(sent_message_contains(wire, 45, "9"), "{:?}: RefSeqNum(45)", reason);
-            assert!(sent_message_contains(wire, 380, &expected_code), "{:?}: BusinessRejectReason(380)", reason);
+            assert!(
+                sent_message_contains(wire, 380, &expected_code),
+                "{:?}: BusinessRejectReason(380)",
+                reason
+            );
         }
     }
 
@@ -1767,9 +1785,15 @@ mod session_tests {
     fn test_harness_garbled_messages_are_dropped_silently() {
         let cases = [
             // checksum's last digit flipped (004 -> 005); body length still correct
-            ("bad checksum", "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005"),
+            (
+                "bad checksum",
+                "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005",
+            ),
             // body length flipped (72 -> 73); checked before checksum in from_vec
-            ("bad body length", "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004"),
+            (
+                "bad body length",
+                "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004",
+            ),
         ];
         for (label, wire) in cases {
             let (mut session, mock_state) = make_harness_session();
@@ -1788,15 +1812,36 @@ mod session_tests {
     fn test_harness_wellformed_but_invalid_messages_are_rejected() {
         // (label, wire, expected tag-373 code, expected RefSeqNum)
         let cases = [
-            // TestRequest with tag 99999 (undefined anywhere in FIX43.xml) → code 3
-            ("undefined tag", "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213", "3", "1"),
+            // TestRequest with tag 99999 (not defined anywhere in FIX43.xml) → code 0
+            // (InvalidTag, per FIX 4.3 Vol 2 §14a; the near-synonymous UndefinedTag/3 is unused)
+            (
+                "invalid tag",
+                "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213",
+                "0",
+                "1",
+            ),
             // TestRequest with Price(44) — a real tag, but not for msg type 1 → code 2
-            ("tag not for msg type", "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082", "2", "1"),
+            (
+                "tag not for msg type",
+                "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082",
+                "2",
+                "1",
+            ),
             // Logon with EncryptMethod(98)=9, outside the declared enum (0-6) → code 5
-            ("value out of enum range", "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013", "5", "0"),
+            (
+                "value out of enum range",
+                "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013",
+                "5",
+                "0",
+            ),
             // Logon with MsgSeqNum(34)=abc, a non-numeric SEQNUM → code 6. RefSeqNum
             // falls back to 0 since "abc" can't be parsed out of the raw string.
-            ("incorrect data format", "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252", "6", "0"),
+            (
+                "incorrect data format",
+                "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252",
+                "6",
+                "0",
+            ),
             // Fewer than 3 fields → structural "Other" (code 99); no MsgSeqNum → RefSeqNum 0
             ("structural / too few fields", "8=FIX.4.3|10=000", "99", "0"),
         ];
@@ -1807,7 +1852,11 @@ mod session_tests {
             let sent = mock_state.sent();
             assert_eq!(sent.len(), 1, "{}: exactly one Reject", label);
             assert!(sent_message_contains(&sent[0], 35, "3"), "{}: is a Reject(35=3)", label);
-            assert!(sent_message_contains(&sent[0], 373, code), "{}: SessionRejectReason(373)", label);
+            assert!(
+                sent_message_contains(&sent[0], 373, code),
+                "{}: SessionRejectReason(373)",
+                label
+            );
             assert!(sent_message_contains(&sent[0], 45, ref_seq), "{}: RefSeqNum(45)", label);
             assert!(!mock_state.is_disconnected(), "{}: connection survives", label);
         }

@@ -112,11 +112,11 @@ impl std::fmt::Display for FixType {
 
 #[derive(Debug, Default, Clone)]
 pub struct DataDictionary {
-    begin_string: String,
-    fields_by_tag: HashMap<u32, String>,
-    fields_by_name: HashMap<String, u32>,
-    field_values: HashMap<u32, HashSet<String>>,
-    field_type: HashMap<u32, FixType>,
+    begin_string: String, // FIX version this dictionary describes, e.g. "FIX.4.3"
+    fields_by_tag: HashMap<u32, String>, // tag -> field name, e.g. 35 -> "MsgType"
+    fields_by_name: HashMap<String, u32>, // field name -> tag, e.g. "MsgType" -> 35 (reverse of fields_by_tag)
+    field_values: HashMap<u32, HashSet<String>>, // tag -> allowed enum values, e.g. 54 -> {"1","2"}; 35 -> all valid MsgType codes
+    field_type: HashMap<u32, FixType>,           // tag -> FIX data type, e.g. 44 -> Price
     // mapping of msg_type -> group field. i.e "D" -> <78, 386>
     // {"D" -> {78 -> NoAllocsGroupInfo, 386 -> NoTradingSessionGroupInfo}}
     groups: HashMap<String, HashMap<u32, GroupInfo>>, // can have "header" -> {..}
@@ -124,7 +124,7 @@ pub struct DataDictionary {
     types: HashMap<String, String>, // "NewOrderSingle" -> "D"
     category: HashMap<String, String>, // "D" -> "app"
     msg_fields: HashMap<String, HashSet<u32>>, // "D" -> <44, 54, ...>, "header" -> <..>
-    msg_required_fields: HashMap<String, HashSet<u32>>,
+    msg_required_fields: HashMap<String, HashSet<u32>>, // msg_type -> required tags, e.g. "D" -> <11, 21, 54, ...> (subset of msg_fields)
 }
 
 impl DataDictionary {
@@ -165,6 +165,20 @@ impl DataDictionary {
         self.msg_fields.get(msg_type).and_then(|val| val.get(&tag)).is_some()
     }
 
+    /// Whether `msg_type` is a message type the spec defines — i.e. whether it is one of the
+    /// enumerated `<value>`s declared for MsgType (tag 35) in the dictionary XML.
+    ///
+    /// This is really the same "is this value in the allowed set for this tag" test that
+    /// `validate_tag_for_value_range` applies to every enum field; tag 35 just gets its own
+    /// dedicated predicate because an out-of-set MsgType is rejected with its own reason
+    /// (`InvalidMessageType`, 373=11), not the generic `ValueOutOfRange` (373=5), and because
+    /// the check has to run in `parse_body` *before* the body-field loop — otherwise an unknown
+    /// message type is mislabelled as `TagNotDefinedForMsgType` on its first body field, and the
+    /// generic range sweep (which runs last) is never reached.
+    pub fn is_valid_msg_type(&self, msg_type: &str) -> bool {
+        self.field_values.get(&35).and_then(|val| val.get(msg_type)).is_some()
+    }
+
     pub fn is_msg_req_field(&self, msg_type: &str, tag: u32) -> bool {
         self.msg_required_fields.get(msg_type).and_then(|val| val.get(&tag)).is_some()
     }
@@ -176,6 +190,7 @@ impl DataDictionary {
     pub fn is_header_field(&self, tag: u32) -> bool {
         self.is_msg_field(HEADER_ID, tag)
     }
+
     /***************************************************************************************/
     /*********************** ALL PRIVATE METHODS BELOW *************************************/
     /***************************************************************************************/
