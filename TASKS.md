@@ -58,13 +58,16 @@ Touches `src/message.rs` and `src/quickfix_errors.rs` only.
   `invalid_body_len_err`/`invalid_checksum`. Done when: un-stub `msg_test_invalid_checksum` and
   `msg_test_invalid_body_length` with deliberately corrupted fixtures (flip a digit in `9=` or `10=`).
 
-- [ ] **1.6 — (Stretch) SOH-in-Data-field handling.**
-  *Independent — skip freely, none of v1's required messages need this.* `Message::from_str`'s tokenizer naively splits
-  on SOH, which breaks for `DATA`-typed fields whose raw bytes legitimately contain SOH. If you pick this up: first
-  verify the Length/Data tag-pairing convention against real pairs in `resources/FIX43.xml` — it is *not* reliably "tag
-  minus 1" (e.g. header's `90/91 SecureDataLen/SecureData` breaks that pattern) — before writing tokenizer logic. Done
-  when: `msg_test_soh_in_data_field`/`msg_test_soh_in_non_data_field` pass, or are left `#[ignore]`d with a one-line
-  reason if descoped.
+- [x] **1.6 — SOH-in-Data-field handling. DONE (2026-09-20).**
+  `Message::from_str` was rewritten from a blind `split_terminator(SOH)` to a positional byte-cursor tokenizer: a
+  `DATA`-typed field's value is read by byte count (so embedded SOH is preserved), and every field — data or not — must
+  be SOH-terminated (a missing terminator is rejected). The length is read from the *previous* token (`vdeq.back()`),
+  since FIX requires the length field to immediately precede its data field — so no `tag-1`/`89→93` calc is needed
+  (the sole real exception, Signature 89←93, falls out for free). A guard rejects a wrong/short/overrunning length
+  rather than panicking on the slice. `NonDataFieldIncludeSOHChar` (373=17) is **descoped** — QFJ doesn't emit it
+  either — so `msg_test_soh_in_non_data_field` is `#[ignore]`d. See `session_context/qfj-data-field-parsing.md`.
+  Done: `msg_test_soh_in_data_field` (+ Signature special case, missing/short/overrunning/non-numeric length, and
+  `msg_test_missing_trailing_soh_rejected`) pass; 227 tests green.
 
 - [x] **1.7 — Housekeeping.**
   Update `ROADMAP.md`'s milestone list to reflect however M1 actually shook out (note any deviations from this task
@@ -510,11 +513,17 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   - **L2 session-own (`verify_msg`/`verify_seq_number` → `InboundMsgError`):** unit + classifier coverage for
     MissingHeaderField (recoverable), CompIdMismatch/SeqNumTooLow/SendErr/OutOfSessionTime (fatal), pre-logon gate.
   - **L3 app callbacks:** RejectLogon (pre + post-logon), BusinessMsgReject (all 9 reasons), DonotSend.
-  - **Remaining GAPS = genuine missing parser validations (engine work, not test work) — "Group B":**
-    `TagAppearsMoreThanOnce`(373=13), `NonDataFieldIncludeSOHChar`(17, stubbed `msg_test_soh_*`), `InvalidTag`(0,
-    currently falls to `Other`), unknown-MsgType → `InvalidMessageType`(11). The response side is already tested; only
-    the *emit* side (the actual check) is missing. "Group A" variants (Decryption/Signature/CompId/SendingTime/Xml/
-    AppVersion problems, 373=7/8/9/10/12/18) stay reserved pending their features — kept, spec-complete, correctly coded.
+  - **"Group B" missing parser validations — mostly DONE (2026-09-19):** `InvalidTag`(373=0, unknown tag; was
+    falling to `UndefinedTag`/3 — corrected per FIX 4.3 Vol 2 §14a, which uses reason 0; `UndefinedTag`/3 is now
+    documented as vestigial), `TagAppearsMoreThanOnce`(373=13, non-group tag duplicated in a section; count tag also
+    covered), and unknown-MsgType → `InvalidMessageType`(373=11) are now emitted *and* tested (`msg_test_invalid_tag`,
+    `msg_test_duplicate_*`, `msg_test_invalid_msg_type`). Also closed untested audit gaps while here:
+    `TagSpecifiedOutOfOrder`(14, both header-in-body and non-trailer-in-trailer), `RepeatingGroupsOutOfOrder`(15),
+    `TagSpecifiedWithoutValue`(4). Validation was refactored so every message-layer check goes through a `validate_*`
+    helper (`validate_known_msg_type`, `validate_tag_for_duplicacy`, `validate_body_field`, `validate_trailer_field`).
+    **Still open:** `NonDataFieldIncludeSOHChar`(17) — the SOH-in-data case, tracked under stretch task 1.6. "Group A"
+    variants (Decryption/Signature/CompId/SendingTime/Xml/AppVersion, 373=7/8/9/10/12/18) stay reserved pending their
+    features — kept, spec-complete, correctly coded.
 
 **M7 exit criteria**: inbound messages that fail engine-level validation produce the correct FIX response
 (Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is covered by automated

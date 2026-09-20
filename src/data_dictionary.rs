@@ -183,6 +183,28 @@ impl DataDictionary {
         self.msg_required_fields.get(msg_type).and_then(|val| val.get(&tag)).is_some()
     }
 
+    // if field_type is present then it is valid
+    pub fn is_valid_field(&self, tag: u32) -> bool {
+        self.get_field_type(tag).is_some()
+    }
+
+    pub fn is_data_field(&self, tag: u32) -> bool {
+        self.get_field_type(tag) == Some(&FixType::Data)
+    }
+
+    pub fn get_data_len_field(&self, tag: u32) -> Option<u32> {
+        if self.is_data_field(tag) {
+            // return tag number containing length
+            if tag == 89 {
+                // anomaly, tag 89 length is contained in tag 93
+                return Some(93);
+            }
+            // otherwise length tag always precedes the data field
+            return Some(tag - 1);
+        }
+        None
+    }
+
     pub fn is_trailer_field(&self, tag: u32) -> bool {
         self.is_msg_field(TRAILER_ID, tag)
     }

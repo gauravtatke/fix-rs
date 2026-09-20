@@ -1753,7 +1753,13 @@ mod session_tests {
 
     // `|` is used as a readable stand-in for SOH in the fixtures above.
     fn soh(s: &str) -> String {
-        s.replace('|', "\x01")
+        // A real wire message is always SOH-terminated (every field, including CheckSum, ends in
+        // SOH), and the tokenizer now requires it — so normalize fixtures to end in one.
+        let mut out = s.replace('|', "\x01");
+        if !out.ends_with('\x01') {
+            out.push('\x01');
+        }
+        out
     }
 
     // Parse the real FIX43 dictionary once for the whole harness — from_xml is slow,

@@ -353,31 +353,57 @@ impl Message {
     //    (and nested groups) according to the dictionary.
     pub fn from_str(s: &str, dd: &DataDictionary) -> SessionResult<Self> {
         let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
-        for field in s.split_terminator(SOH) {
-            let (tag, value) = match field.split_once('=') {
-                Some((t, v)) => {
-                    let parse_result = t.parse::<u32>();
-                    if parse_result.is_err() {
-                        return Err(SessionRejectError::Other {
-                            msg: field.to_string(),
-                        });
-                    }
-                    if v.is_empty() {
-                        return Err(SessionRejectError::TagSpecifiedWithoutValue {
-                            tag: parse_result.unwrap(),
-                        });
-                    }
-                    (parse_result.unwrap(), v)
-                }
-                None => {
+        let mut cursor: usize = 0;
+        while cursor < s.len() {
+            let next_equals_index =
+                s[cursor..].find('=').ok_or_else(|| SessionRejectError::Other {
+                    msg: "Invalid message, could not parse".to_string(),
+                })?;
+            let tag_str = &s[cursor..cursor + next_equals_index];
+            let tag: u32 = match tag_str.parse::<u32>() {
+                Ok(t) => t,
+                Err(_) => {
                     return Err(SessionRejectError::Other {
-                        msg: field.to_string(),
+                        msg: format!("Invalid tag: {}", tag_str),
                     });
                 }
             };
-            vdeq.push_back(StringField::new(tag, value));
+            cursor += next_equals_index + 1; // now points at value start
+            let value_end_index = if dd.is_data_field(tag) {
+                // DATA field: its value is a fixed byte count and may legally contain SOH. FIX
+                // requires the length field to immediately precede the data field, so the length
+                // is just the previous token — read it from the back of the deque instead of
+                // computing/looking up its tag (89 vs tag-1). See
+                // session_context/qfj-data-field-parsing.md for why QFJ computes the tag instead.
+                let prev = vdeq.back().ok_or_else(|| SessionRejectError::Other {
+                    msg: format!("Data field {} has no preceding length field", tag),
+                })?;
+                let n = prev.value().parse::<usize>().map_err(|_| {
+                    SessionRejectError::IncorrectDataFormatForValue { tag: prev.tag() }
+                })?;
+                // A wrong/short/overrunning length could point past the buffer or off a SOH
+                // boundary — reject rather than panic on the slice below.
+                if cursor + n >= s.len() || s.as_bytes()[cursor + n] != SOH as u8 {
+                    return Err(SessionRejectError::Other {
+                        msg: format!("Invalid data field length for tag {}", tag),
+                    });
+                }
+                n
+            } else {
+                // Non-data field: value runs to the next SOH. Every field, including the last, must
+                // be SOH-terminated — without it there's no way to know where the next field starts
+                // — so a missing terminator is an invalid message.
+                s[cursor..].find(SOH).ok_or_else(|| SessionRejectError::Other {
+                    msg: format!("Field {} not terminated by SOH", tag),
+                })?
+            };
+            let value_str = &s[cursor..cursor + value_end_index];
+            if value_str.is_empty() {
+                return Err(SessionRejectError::TagSpecifiedWithoutValue { tag });
+            }
+            vdeq.push_back(StringField::new(tag, value_str));
+            cursor += value_end_index + 1; // skip next SOH
         }
-
         from_vec(vdeq, dd)
     }
 
@@ -471,6 +497,52 @@ pub(crate) fn reverse_session_id_from_raw(s: &str) -> SessionId {
 pub(crate) fn seq_num_from_raw(s: &str) -> Option<&str> {
     extract_field_value("34", s)
 }
+
+// fn from_str(s: &str, dd: &DataDictionary) -> SessionResult<Message> {
+//     let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
+//     let mut cursor: usize = 0;
+//     while cursor < s.len() {
+//         let next_equals_index = s[cursor..].find('=').unwrap();
+//         let tag_str = &s[cursor..next_equals_index];
+//         let tag: u32 = match tag_str.parse::<u32>() {
+//             Ok(t) => t,
+//             Err(_) => {
+//                 return Err(SessionRejectError::Other {
+//                     msg: format!("Invalid tag: {}", tag_str),
+//                 });
+//             }
+//         };
+//         cursor += next_equals_index + 1; // now points at value start
+//         let value_end_index = match dd.get_data_len_field(tag) {
+//             Some(len_tag) => {
+//                 // data field & length is in len_tag. extract the len
+//                 // if field not found, return err
+//                 // if found, parse it in usize
+//                 extract_field_value(len_tag.to_string().as_str(), s)
+//                     .ok_or_else(|| SessionRejectError::Other {
+//                         msg: format!("Length field {} not found for field: {}", len_tag, tag_str),
+//                     })?
+//                     .parse::<usize>()
+//                     .map_err(|_| SessionRejectError::IncorrectDataFormatForValue { tag: len_tag })? + 1 // this is the index until which we read
+//             }
+//             None => {
+//                 // non data field, find index for next SOH
+//                 s[cursor..].find(SOH).ok_or_else(|| SessionRejectError::Other {
+//                     msg: "Invalid msg, not ending in SOH".to_string(),
+//                 })?
+//             }
+//         };
+//         // now read the exact bytes from s
+//         // supposedly, this value_end_index should be pointing to next SOH
+//         let value_str = &s[cursor..value_end_index];
+//         if value_str.is_empty() {
+//             return Err(SessionRejectError::TagSpecifiedWithoutValue { tag });
+//         }
+//         vdeq.push_back(StringField::new(tag, value_str));
+//         cursor = value_end_index + 1; // skip next SOH
+//     }
+//     from_vec(vdeq, dd)
+// }
 
 // Consumes the flat, wire-ordered queue of fields into a structured `Message`, in the
 // only order a FIX message can actually appear on the wire: header, then body, then
@@ -1035,7 +1107,7 @@ mod message_test {
     #[test]
     fn msg_test_with_group_and_subgroups() {
         // body having repeating groups having subgroups
-        let new_order_list = "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222";
+        let new_order_list = "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222|";
         let msg = Message::from_str(&soh_replaced_str(new_order_list), &DD);
         assert!(msg.is_ok());
         let msg = msg.unwrap();
@@ -1112,7 +1184,7 @@ mod message_test {
         // QuoteSetID(302) and TotQuoteEntries(304), on top of its nested NoQuoteEntries(295)
         // group. TotQuoteEntries is omitted here, so the check on this NoQuoteSets instance
         // (rg_dd's own required set, not the top-level message's) should catch it.
-        let mass_quote = "8=FIX.4.3|9=101|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|295=1|299=QEID1|10=173";
+        let mass_quote = "8=FIX.4.3|9=101|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|295=1|299=QEID1|10=173|";
         let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::RequiredTagMissing { .. });
@@ -1131,7 +1203,7 @@ mod message_test {
         // (0 instances found vs. 1 declared), not RequiredTagMissing. This still exercises
         // the recursive parse_group call reaching NoQuoteEntries correctly and propagating a
         // real error back up through NoQuoteSets — just not this specific reason.
-        let mass_quote = "8=FIX.4.3|9=97|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|304=1|295=1|10=091";
+        let mass_quote = "8=FIX.4.3|9=97|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|304=1|295=1|10=091|";
         let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
         assert!(msg.is_err());
         assert_matches!(
@@ -1147,7 +1219,7 @@ mod message_test {
         // (validate_required_tag_missing called directly on msg.body(), not via parse_group),
         // for a message type that never goes anywhere near a repeating group.
         let test_request =
-            "8=FIX.4.3|9=60|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|10=217";
+            "8=FIX.4.3|9=60|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|10=217|";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::RequiredTagMissing { .. });
@@ -1158,7 +1230,7 @@ mod message_test {
         // trailer having all of the trailer's declared fields (SignatureLength,
         // Signature, CheckSum), not just the mandatory CheckSum, and verifying they're
         // all parsed into the trailer correctly.
-        let test_request = "8=FIX.4.3|9=97|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|93=15|89=abc123signature|10=000";
+        let test_request = "8=FIX.4.3|9=97|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|93=15|89=abc123signature|10=000|";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_ok());
         let msg = msg.unwrap();
@@ -1173,7 +1245,7 @@ mod message_test {
         // FIX43.xml dictionary at all — validate_tag_for_msgtype's fallback branch. Per FIX 4.3
         // Vol 2 §14a a tag not defined in the specification is reason 0 (InvalidTag), not the
         // near-synonymous UndefinedTag (373=3), which the spec's behaviour table never emits.
-        let test_request = "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213";
+        let test_request = "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213|";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidTag { .. });
@@ -1185,7 +1257,7 @@ mod message_test {
         // other message types, e.g. NewOrderSingle) but not one of TestRequest's own
         // declared fields, so it should be rejected as "known tag, wrong message type"
         // rather than "undefined tag".
-        let test_request = "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082";
+        let test_request = "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082|";
         let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::TagNotDefinedForMsgType { .. });
@@ -1195,7 +1267,7 @@ mod message_test {
     fn msg_test_value_out_of_enum_range() {
         // Logon(35=A) with EncryptMethod(98) set to 9 — a well-formed int, but not one
         // of the dictionary's declared enum values for this tag (0-6 per FIX43.xml).
-        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013";
+        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013|";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::ValueOutOfRange { .. });
@@ -1205,7 +1277,7 @@ mod message_test {
     fn msg_test_incorrect_data_format() {
         // Logon(35=A) with MsgSeqNum(34) — a header field of type SEQNUM — set to a
         // non-numeric string instead of an integer.
-        let logon = "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252";
+        let logon = "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252|";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::IncorrectDataFormatForValue { .. });
@@ -1216,7 +1288,7 @@ mod message_test {
         // Same Logon fixture as MSG_STR, with the checksum's last digit flipped
         // (004 -> 005) — body length (9=72) is still correct, so this should be caught
         // specifically by the checksum comparison, not the body-length one.
-        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005";
+        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005|";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidChecksum);
@@ -1227,7 +1299,7 @@ mod message_test {
         // Same Logon fixture, with the body length's last digit flipped (72 -> 73).
         // Body length is checked before checksum in from_vec, so this is caught first
         // even though the checksum field itself is left correct for the original body.
-        let logon = "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004";
+        let logon = "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004|";
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidBodyLength);
@@ -1342,7 +1414,144 @@ mod message_test {
         );
     }
 
-    fn msg_test_soh_in_data_field() {}
+    // --- SOH-in-data (task 1.6) -------------------------------------------------------------
+    // A DATA-typed field's value is read by byte count from its length field, so it may legally
+    // contain SOH. Fixtures are built via the message builder so BodyLength(9)/CheckSum(10) are
+    // computed over the real bytes (embedded SOH included) — hand-writing them would be error
+    // prone. Positive cases assert the exact round-tripped value; negative cases assert the
+    // parser *rejects rather than panics* (the exact reject reason is still open, so they check
+    // `is_err()` and note the expected reason in a comment — tighten to assert_matches once settled).
 
+    // Build a Logon(35=A) carrying an optional body data field `data_tag` (+ its length field
+    // `len_tag`), with all required Logon/header fields present. `len` is what the length field
+    // announces — pass the true byte length for a well-formed message, or a wrong value to force
+    // a rejection. `include_len = false` omits the length field entirely.
+    fn logon_with_data_field(
+        len_tag: u32,
+        data_tag: u32,
+        data: &str,
+        len: usize,
+        include_len: bool,
+    ) -> String {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        if include_len {
+            // length must precede the data field on the wire (insertion order is preserved)
+            msg.set_body_field(len_tag, len.to_string());
+        }
+        msg.set_body_field(data_tag, data);
+        msg.set_body_len();
+        msg.set_checksum();
+        msg.to_string()
+    }
+
+    #[test]
+    fn msg_test_soh_in_data_field() {
+        // Core positive: RawData(96) whose value contains an SOH. RawDataLength(95) announces the
+        // byte count, so the tokenizer must read exactly that many bytes rather than splitting on
+        // the embedded SOH. The parsed value must equal the original, SOH and all.
+        let raw = format!("user{}pass", SOH); // 9 bytes incl. the embedded SOH
+        let wire = logon_with_data_field(95, 96, &raw, raw.len(), true);
+        let msg = Message::from_str(&wire, &DD).expect("data field with embedded SOH should parse");
+        assert_eq!(msg.get_body_field::<String>(96).unwrap(), raw);
+    }
+
+    #[test]
+    fn msg_test_soh_in_data_field_signature_special_case() {
+        // Signature(89) is the one field whose length is NOT tag-1: it lives in SignatureLength(93).
+        // Signature is a trailer field, so this also exercises the data path in the trailer.
+        let sig = format!("sig{}bytes", SOH);
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        msg.set_trailer_field(93, sig.len().to_string()); // SignatureLength precedes Signature
+        msg.set_trailer_field(89, &sig);
+        msg.set_body_len();
+        msg.set_checksum();
+        let parsed = Message::from_str(&msg.to_string(), &DD)
+            .expect("Signature(89) with embedded SOH should parse via SignatureLength(93)");
+        assert_eq!(parsed.get_trailer_field::<String>(89).unwrap(), sig);
+    }
+
+    #[test]
+    fn msg_test_data_field_missing_length_rejected() {
+        // Negative: RawData(96) present but RawDataLength(95) absent — the tokenizer can't know how
+        // many bytes to read, so it must reject rather than guess/mis-read.
+        // (Current impl -> SessionRejectError::Other.)
+        let wire = logon_with_data_field(95, 96, "abc", 3, false);
+        assert!(
+            Message::from_str(&wire, &DD).is_err(),
+            "data field without its length must reject"
+        );
+    }
+
+    #[test]
+    fn msg_test_data_field_length_too_short_rejected() {
+        // Negative: declared length is shorter than the value, so the byte after the value isn't an
+        // SOH. Must reject (the "end must land on SOH" guard), not silently mis-frame the rest.
+        let wire = logon_with_data_field(95, 96, "abcdef", 3, true);
+        assert!(Message::from_str(&wire, &DD).is_err(), "short data length must reject");
+    }
+
+    #[test]
+    fn msg_test_data_field_length_overruns_buffer_rejected() {
+        // Negative: declared length runs past the end of the message. Must reject via the bounds
+        // check, NOT panic on an out-of-range slice.
+        let wire = logon_with_data_field(95, 96, "abc", 999, true);
+        assert!(Message::from_str(&wire, &DD).is_err(), "overrunning data length must reject");
+    }
+
+    #[test]
+    fn msg_test_data_field_non_numeric_length_rejected() {
+        // Negative: the length field's value isn't a number. Must reject.
+        // (Current impl -> IncorrectDataFormatForValue { tag: 95 }.)
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        msg.set_body_field(95, "xyz"); // non-numeric RawDataLength
+        msg.set_body_field(96, "abc");
+        msg.set_body_len();
+        msg.set_checksum();
+        assert!(
+            Message::from_str(&msg.to_string(), &DD).is_err(),
+            "non-numeric data length must reject"
+        );
+    }
+
+    #[test]
+    fn msg_test_missing_trailing_soh_rejected() {
+        // Correctness check for the strict tokenizer: every field must be SOH-terminated, the last
+        // one included — without it there's no way to delimit the next field. This is MSG_STR with
+        // the trailing SOH removed (note: no `|` at the end), so the final field 10=004 has no
+        // terminator and must be rejected rather than parsed.
+        let no_trailing_soh = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004";
+        let msg = Message::from_str(&soh_replaced_str(no_trailing_soh), &DD);
+        assert!(msg.is_err(), "a message not ending in SOH must be rejected");
+        assert_matches!(msg.unwrap_err(), SessionRejectError::Other { .. });
+    }
+
+    // Descoped per QFJ (which doesn't emit 373=17 either): a SOH inside a NON-data field just
+    // splits the field early and surfaces as some other parse error, not NonDataFieldIncludeSOHChar.
+    #[test]
+    #[ignore = "NonDataFieldIncludeSOHChar (373=17) not implemented; QFJ doesn't emit it either"]
     fn msg_test_soh_in_non_data_field() {}
 }
