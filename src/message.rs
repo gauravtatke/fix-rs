@@ -498,52 +498,6 @@ pub(crate) fn seq_num_from_raw(s: &str) -> Option<&str> {
     extract_field_value("34", s)
 }
 
-// fn from_str(s: &str, dd: &DataDictionary) -> SessionResult<Message> {
-//     let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
-//     let mut cursor: usize = 0;
-//     while cursor < s.len() {
-//         let next_equals_index = s[cursor..].find('=').unwrap();
-//         let tag_str = &s[cursor..next_equals_index];
-//         let tag: u32 = match tag_str.parse::<u32>() {
-//             Ok(t) => t,
-//             Err(_) => {
-//                 return Err(SessionRejectError::Other {
-//                     msg: format!("Invalid tag: {}", tag_str),
-//                 });
-//             }
-//         };
-//         cursor += next_equals_index + 1; // now points at value start
-//         let value_end_index = match dd.get_data_len_field(tag) {
-//             Some(len_tag) => {
-//                 // data field & length is in len_tag. extract the len
-//                 // if field not found, return err
-//                 // if found, parse it in usize
-//                 extract_field_value(len_tag.to_string().as_str(), s)
-//                     .ok_or_else(|| SessionRejectError::Other {
-//                         msg: format!("Length field {} not found for field: {}", len_tag, tag_str),
-//                     })?
-//                     .parse::<usize>()
-//                     .map_err(|_| SessionRejectError::IncorrectDataFormatForValue { tag: len_tag })? + 1 // this is the index until which we read
-//             }
-//             None => {
-//                 // non data field, find index for next SOH
-//                 s[cursor..].find(SOH).ok_or_else(|| SessionRejectError::Other {
-//                     msg: "Invalid msg, not ending in SOH".to_string(),
-//                 })?
-//             }
-//         };
-//         // now read the exact bytes from s
-//         // supposedly, this value_end_index should be pointing to next SOH
-//         let value_str = &s[cursor..value_end_index];
-//         if value_str.is_empty() {
-//             return Err(SessionRejectError::TagSpecifiedWithoutValue { tag });
-//         }
-//         vdeq.push_back(StringField::new(tag, value_str));
-//         cursor = value_end_index + 1; // skip next SOH
-//     }
-//     from_vec(vdeq, dd)
-// }
-
 // Consumes the flat, wire-ordered queue of fields into a structured `Message`, in the
 // only order a FIX message can actually appear on the wire: header, then body, then
 // trailer. `v` is shared, mutable state across all three calls — each `parse_*` function

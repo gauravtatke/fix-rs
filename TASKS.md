@@ -62,11 +62,11 @@ Touches `src/message.rs` and `src/quickfix_errors.rs` only.
   `Message::from_str` was rewritten from a blind `split_terminator(SOH)` to a positional byte-cursor tokenizer: a
   `DATA`-typed field's value is read by byte count (so embedded SOH is preserved), and every field — data or not — must
   be SOH-terminated (a missing terminator is rejected). The length is read from the *previous* token (`vdeq.back()`),
-  since FIX requires the length field to immediately precede its data field — so no `tag-1`/`89→93` calc is needed
-  (the sole real exception, Signature 89←93, falls out for free). A guard rejects a wrong/short/overrunning length
-  rather than panicking on the slice. `NonDataFieldIncludeSOHChar` (373=17) is **descoped** — QFJ doesn't emit it
-  either — so `msg_test_soh_in_non_data_field` is `#[ignore]`d. See `session_context/qfj-data-field-parsing.md`.
-  Done: `msg_test_soh_in_data_field` (+ Signature special case, missing/short/overrunning/non-numeric length, and
+  since FIX requires the length field to immediately precede its data field — so no `tag-1`/`89→93` calc is needed (the
+  sole real exception, Signature 89←93, falls out for free). A guard rejects a wrong/short/overrunning length rather
+  than panicking on the slice. `NonDataFieldIncludeSOHChar` (373=17) is **descoped** — QFJ doesn't emit it either — so
+  `msg_test_soh_in_non_data_field` is `#[ignore]`d. See `session_context/qfj-data-field-parsing.md`. Done:
+  `msg_test_soh_in_data_field` (+ Signature special case, missing/short/overrunning/non-numeric length, and
   `msg_test_missing_trailing_soh_rejected`) pass; 227 tests green.
 
 - [x] **1.7 — Housekeeping.**
@@ -238,14 +238,14 @@ Replaces the disposable Tokio prototype in `network.rs`/`io/` with `std::net::Tc
 - [x] **5.3 — `TcpResponder`.** `src/io/tcp_responder.rs`: `Responder` impl wrapping `Mutex<TcpStream>`. 5 tests.
 - [x] **5.4 — `SessionMap`.** `src/network.rs`: `Arc<HashMap<SessionId, Arc<Mutex<Session>>>>`, built via
   `FromIterator`, immutable after construction. 6 tests.
-- [x] **5.5 — `IoAcceptor`.** `src/io/acceptor.rs`: binds `TcpListener`, spawns reader thread per connection, dispatches
-  via `reverse_session_id` lookup. Supporting changes: `Session::set_responder()`,
+- [x] **5.5 — `IoInitiator`.** `src/io/acceptor.rs`: binds `TcpListener`, spawns reader thread per connection,
+  dispatches via `reverse_session_id` lookup. Supporting changes: `Session::set_responder()`,
   `session_id_from_raw()`/`reverse_session_id_from_raw()` in `message.rs`.
 - [x] **5.6 — Timer thread.** `src/network.rs`: `start_timer()` spawns background thread, sleep 1s → tick all sessions.
 - [x] **5.7 — Wire `main.rs` + integration test with QFJ Banzai.**
     - `SessionConfig::to_session()` constructs Session from config.
     - `connection_type()` and `socket_accept_port()` getters exposed on `SessionConfig`.
-    - `main.rs` wired: parse config → build `SessionMap` → start timer → spawn one `IoAcceptor` thread per bind
+    - `main.rs` wired: parse config → build `SessionMap` → start timer → spawn one `IoInitiator` thread per bind
       address → join all.
     - `generate_logon()` fixed to include `EncryptMethod=0` (tag 98) — Banzai rejected Logon without it.
     - `Display` impl added for `SessionId`.
@@ -383,6 +383,16 @@ via `SessionMap::send` (6.4b).
 
 **v1 COMPLETE** — M1, M2, M4, M5, M6 done (M3 typed-codegen deferred by design; 1.6 SOH-in-Data stretch open).
 
+## Post-v1 work order (agreed 2026-09-20)
+
+Sequenced by preference, not dependency:
+
+1. **M8 — Initiator support** (below) — next up.
+2. **M3 — Typed message codegen** (sketched above; re-break into tasks when we get there).
+3. **v1.2 — Resend/seq robustness** — message store + ResendRequest / gap fill / sequence-number persistence (the
+   too-high-seq path is stubbed across M4/M5/M7). Needs its own breakdown.
+4. **7.6 (b)** — scripted end-to-end TCP simulator (deferred from M7).
+
 ## M7 — Automatic session-level error responses (post-v1 / v1.1)
 
 **Why this exists.** As of v1, the engine *detects* every inbound error but never *responds* on the wire. In
@@ -490,41 +500,133 @@ of `?`-ing to the acceptor. The core work is an explicit **recoverable vs fatal*
   classifier coverage (recoverable Reject / fatal Logout+disconnect / pre-logon gate / AppError no-teardown). Added the
   dedicated `LogonRejected → Logout+disconnect` case (pre-logon Logout + post-logon graceful arm), a `CompIdMismatch`
   pre-logon **silent**-disconnect case (FIX 4.3 security exception), `SeqNumTooLow`/`SendErr`/`OutOfSessionTime` fatal
-  classification, and — closing the "handle every reason right, even the unreached ones" gap — two exhaustive
-  builder tests: `test_reject_message_builds_correct_reject_for_every_reason` (all 20 non-garbled `SessionRejectError`
+  classification, and — closing the "handle every reason right, even the unreached ones" gap — two exhaustive builder
+  tests: `test_reject_message_builds_correct_reject_for_every_reason` (all 20 non-garbled `SessionRejectError`
   variants → correct 35=3: 373/371/58/45) and `test_send_business_msg_reject_builds_35j_for_every_reason` (all 9
   `BusinessMsgReject` reasons → correct 35=j: 380/372/45).
 
 - [~] **7.6 — Protocol test harness / simulator. (a) DONE; (b) remaining.**
   (a) **DONE (2026-09-14, session 2):** in-process raw-input harness in `session_tests` drives the real inbound seam
   `acceptor::process_inbound_msg` (widened to `pub(crate)` for test access) — raw SOH string → `Message::from_str` with
-  the real `FIX43.xml` dictionary → garbled-drop / Reject(35=3) / dispatch — via `MockResponder`, no socket. Cases:
+  the real `FIX43.xml` dictionary → garbled-drop / Reject (35=3) / dispatch — via `MockResponder`, no socket. Cases:
   garbled (bad BodyLength/CheckSum) → dropped silently; well-formed-but-invalid (undefined tag, tag-not-for-msgtype,
-  value-out-of-range, incorrect-data-format, structural) → Reject(35=3) with the right 373 code + RefSeqNum; a valid
-  Logon → parses, logs on, confirming Logon(35=A). Dictionary parsed once via a `lazy_static` + clone.
-  (b) **TODO:** a small scripted TCP simulator connecting to the acceptor (send/expect scripts) — true end-to-end,
-  catches the acceptor/IO seam + `establish_session` (needs a real socket, so unreachable by (a)). QFJ AT `.def` engine
-  is the reference; strategy in `session_context/qfj-testing-strategy.md`.
+  value-out-of-range, incorrect-data-format, structural) → Reject (35=3) with the right 373 code + RefSeqNum; a valid
+  Logon → parses, logs on, confirming Logon (35=A). Dictionary parsed once via a `lazy_static` + clone. (b) **TODO:** a
+  small scripted TCP simulator connecting to the acceptor (send/expect scripts) — true end-to-end, catches the
+  acceptor/IO seam + `establish_session` (needs a real socket, so unreachable by (a)). QFJ AT `.def` engine is the
+  reference; strategy in `session_context/qfj-testing-strategy.md`.
 
   **Validation-coverage map (three layers), from the session-2 audit:**
-  - **L1 parse-time (`from_str`/`from_vec` + dictionary → `SessionRejectError`):** live/emitted variants well covered in
-    `message.rs` parser tests + the seam covered by the harness. **Response-building for ALL 20 non-garbled reasons is
-    now tested** (even unreached ones). All tag-373 `code()` values verified spec-correct.
-  - **L2 session-own (`verify_msg`/`verify_seq_number` → `InboundMsgError`):** unit + classifier coverage for
-    MissingHeaderField (recoverable), CompIdMismatch/SeqNumTooLow/SendErr/OutOfSessionTime (fatal), pre-logon gate.
-  - **L3 app callbacks:** RejectLogon (pre + post-logon), BusinessMsgReject (all 9 reasons), DonotSend.
-  - **"Group B" missing parser validations — mostly DONE (2026-09-19):** `InvalidTag`(373=0, unknown tag; was
-    falling to `UndefinedTag`/3 — corrected per FIX 4.3 Vol 2 §14a, which uses reason 0; `UndefinedTag`/3 is now
-    documented as vestigial), `TagAppearsMoreThanOnce`(373=13, non-group tag duplicated in a section; count tag also
-    covered), and unknown-MsgType → `InvalidMessageType`(373=11) are now emitted *and* tested (`msg_test_invalid_tag`,
-    `msg_test_duplicate_*`, `msg_test_invalid_msg_type`). Also closed untested audit gaps while here:
-    `TagSpecifiedOutOfOrder`(14, both header-in-body and non-trailer-in-trailer), `RepeatingGroupsOutOfOrder`(15),
-    `TagSpecifiedWithoutValue`(4). Validation was refactored so every message-layer check goes through a `validate_*`
-    helper (`validate_known_msg_type`, `validate_tag_for_duplicacy`, `validate_body_field`, `validate_trailer_field`).
-    **Still open:** `NonDataFieldIncludeSOHChar`(17) — the SOH-in-data case, tracked under stretch task 1.6. "Group A"
-    variants (Decryption/Signature/CompId/SendingTime/Xml/AppVersion, 373=7/8/9/10/12/18) stay reserved pending their
-    features — kept, spec-complete, correctly coded.
+    - **L1 parse-time (`from_str`/`from_vec` + dictionary → `SessionRejectError`):** live/emitted variants well covered
+      in
+      `message.rs` parser tests + the seam covered by the harness. **Response-building for ALL 20 non-garbled reasons is
+      now tested** (even unreached ones). All tag-373 `code()` values verified spec-correct.
+    - **L2 session-own (`verify_msg`/`verify_seq_number` → `InboundMsgError`):** unit + classifier coverage for
+      MissingHeaderField (recoverable), CompIdMismatch/SeqNumTooLow/SendErr/OutOfSessionTime (fatal), pre-logon gate.
+    - **L3 app callbacks:** RejectLogon (pre + post-logon), BusinessMsgReject (all 9 reasons), DonotSend.
+    - **"Group B" missing parser validations — mostly DONE (2026-09-19):** `InvalidTag`(373=0, unknown tag; was falling
+      to `UndefinedTag`/3 — corrected per FIX 4.3 Vol 2 §14a, which uses reason 0; `UndefinedTag`/3 is now documented as
+      vestigial), `TagAppearsMoreThanOnce`(373=13, non-group tag duplicated in a section; count tag also covered), and
+      unknown-MsgType → `InvalidMessageType`(373=11) are now emitted *and* tested (`msg_test_invalid_tag`,
+      `msg_test_duplicate_*`, `msg_test_invalid_msg_type`). Also closed untested audit gaps while here:
+      `TagSpecifiedOutOfOrder`(14, both header-in-body and non-trailer-in-trailer), `RepeatingGroupsOutOfOrder`(15),
+      `TagSpecifiedWithoutValue`(4). Validation was refactored so every message-layer check goes through a `validate_*`
+      helper (`validate_known_msg_type`, `validate_tag_for_duplicacy`, `validate_body_field`, `validate_trailer_field`).
+      **Still open:** `NonDataFieldIncludeSOHChar`(17) — the SOH-in-data case, tracked under stretch task 1.6. "Group A"
+      variants (Decryption/Signature/CompId/SendingTime/Xml/AppVersion, 373=7/8/9/10/12/18) stay reserved pending their
+      features — kept, spec-complete, correctly coded.
 
 **M7 exit criteria**: inbound messages that fail engine-level validation produce the correct FIX response
 (Reject/Logout/drop) automatically, the connection survives recoverable errors, and the behavior is covered by automated
 tests (unit + a harness per 7.6). Too-high seq (ResendRequest) and full resend remain deferred.
+
+---
+
+## M8 — Initiator support (post-v1)
+
+**Why this exists.** v1 shipped acceptor-only (M5). The initiator *session logic already exists* — `SessionState`
+carries `is_initiator`, `next_tick` (`src/session/mod.rs`) already generates a Logon when
+`is_initiator && !logon_sent && responder.is_some()`, and `generate_logon` (with `EncryptMethod`/`HeartBtInt`) is shared
+with the acceptor path. What's missing is only the **IO half**: nothing dials out and *sets the responder* for an
+initiator. For acceptors, `handle_connection` (`src/io/acceptor.rs`) does that from the inbound socket; there is no
+symmetric outbound connector, `main.rs:33` filters initiators out of the `SessionMap`, and the `socket_addrs` collection
+in `main.rs` would panic on an initiator (`socket_accept_port().unwrap()` on every session).
+
+This milestone is a **mirror of the acceptor path**, reusing `TcpResponder`, `FixMessageReader`, the
+`acceptor::process_inbound_msg` seam, and the existing `next_tick` logon logic — no session-layer changes expected.
+Reference: QFJ `SocketInitiator` / `IoSessionInitiator`, and `session_context/qfj-session-message-flow.md`.
+
+**Key difference from the acceptor.** The acceptor is *read-first* (waits for the peer's Logon, then derives the
+`SessionId` via `reverse_session_id_from_raw`). The initiator is *send-first* and already knows its own `SessionId`
+(from config), so there is no `establish_session` / reverse-id lookup — it connects, sets the responder, and lets the
+timer send the Logon.
+
+**Invariant to preserve** (same as `handle_connection`, acceptor.rs:48): lock the session only for the dispatch of each
+message, **never across the blocking `read_message()`** — otherwise the timer thread can't tick heartbeats while the
+reader is parked on a read.
+
+- [x] **8.1 — Config getter + `main.rs` wiring.**
+  Exposed `socket_connect_host()` on `SessionConfig` via `#[getset(get = "pub")]` (added `Getters` to the derive). In
+  `main.rs`: the connection-type `filter` is gone (the `SessionMap` holds both roles; the timer no-ops responder-less
+  initiators via the `responder.is_none()` guard in `next_tick`), and the accept-address set is now collected only from
+  *acceptor* sessions (`.filter(connection_type == Acceptor)`) so an initiator in config no longer panics on
+  `socket_accept_port().unwrap()`.
+
+- [x] **8.2 — `IoInitiator`: connect + wire responder.**
+  New `src/io/initiator.rs`, symmetric to `IoAcceptor`. `IoInitiator` holds the target `Arc<Mutex<Session>>` (a clone of
+  the map entry — *not* the whole map, since an initiator never has to identify an inbound connection), the `SessionId`,
+  and the connect `SocketAddr`. `start()`: `TcpStream::connect(addr)` → `try_clone` (write half → `TcpResponder`, read
+  half → `FixMessageReader`) → lock + `set_responder`. Also extracted the shared pump/teardown into
+  `src/io/connection.rs` (`run_connection` + `process_inbound_msg` + `close_connection` + `wire_display`), reused by both
+  roles; `acceptor.rs` now calls `run_connection` too. Done: integration test
+  `test_initiator_connects_wires_responder_and_sends_logon` (throwaway `TcpListener`, asserts connect + Logon emitted +
+  clean teardown).
+
+- [x] **8.3 — Initiator reader loop + logon.**
+  Implemented as the shared `connection::run_connection` (see 8.2): loops `read_message()` → lock → `process_inbound_msg`
+  → dispatch, locking only per message (never across the blocking read, so the timer can still tick heartbeats), and
+  calls `disconnect` on EOF/error. Logon is left to the existing `next_tick` (single source of logon truth) — no second
+  path added. Log identity uses the session's own-perspective id, matching the acceptor. *Note:* the "heartbeat exchange
+  with `logon_received == true`" half of the original "done when" needs a real responding acceptor — verified live under
+  8.6, not in the unit test (which drives `next_tick` by hand).
+
+- [x] **8.4 — Spawn initiator threads in `main.rs`.**
+  For each `ConnectionType::Initiator` session, `main.rs` builds an `IoInitiator` (pulling its `Arc` out of the shared
+  `SessionMap` via `get`, and its connect addr from `socket_connect_host`/`socket_connect_port`) and spawns a thread
+  running `start()`, joined alongside the acceptor handles. Timer covers all sessions. *Caveat:* `start().unwrap()`
+  panics the thread on a failed dial — no retry yet (that's 8.5).
+
+- [ ] **8.5 — Reconnect loop.**
+  On disconnect, the initiator waits a reconnect interval and re-dials (QFJ default ≈30s). Add a `reconnect_interval`
+  config key (default 30s) and wrap 8.2/8.3 in a retry loop. `state.reset()` on reconnect follows the existing
+  `reset_on_*` flags (M5 5.9). Done when: killing the peer socket makes the initiator retry and re-logon when the peer
+  returns. *(Can be a thin fixed-interval first cut; make the interval configurable in a follow-up if needed.)*
+
+- [x] **8.6 — Integration test against a QFJ acceptor. DONE (2026-09-20).**
+  fix-rs initiator (`BANZAI->EXEC`, `src/FixCfg.toml`) dialed the QFJ `executor` acceptor (FIX.4.3, port 9879) and
+  completed a clean session: Logon out at seq 1 (correct CompIDs, `108=5`, no `141`), executor's Logon back at seq 1 →
+  `Logon received` + `on_logon`, then `35=0` heartbeats both directions in lockstep (seq 2,3,4,… monotonic, no gaps,
+  rejects or logout). Executor run with `ResetOnLogon=Y`. Run logged in `session_context/2026-09-20-initiator.md`.
+
+- [x] **8.7 — Fix `reset_on_logon` timing for initiators.**
+  `reset_on_logon` used to reset in `next_logon` (on the *inbound* Logon) for all roles — correct for an acceptor, wrong
+  for an initiator (which by then has already sent its Logon at seq 1, so the reset rewound the sender and the next
+  heartbeat reused seq 1 → counterparty Logout). Fixed both paths:
+    1. **Config reset**: an initiator now resets *before sending* in `next_tick`'s `is_initiator && !logon_sent` branch
+       (and sets `reset_sent`); the reset in `next_logon` is gated to acceptors
+       (`reset_on_logon && !self.state.is_initiator`).
+    2. **Wire-level `141=Y`**: `next_logon` now resets on a `141=Y` request only when we did *not* initiate the reset
+       (`reset_requested && !reset_sent`), so an initiator isn't rewound by the acknowledging `141=Y` in the response.
+       `generate_logon` stamps `141=Y` during a reset handshake (`reset_sent` for the initiator kicking it off,
+       `reset_received` for an acceptor echoing) — QFJ's bilateral handshake (`Session.java:2094`/`2623`).
+       `reset_received` is set deterministically per inbound Logon so a stale value can't make an acceptor echo `141=Y`.
+  Done: 4 tests — `test_initiator_reset_on_logon_keeps_sender_seq_monotonic` (reset-before-send + no rewind on the
+  `141=Y` echo), `test_generate_logon_omits_reset_flag_without_handshake`,
+  `test_acceptor_reset_on_logon_resets_without_echoing_flag`, `test_acceptor_echoes_reset_flag_when_requested`. 232 green.
+  Also **verified live** (2026-09-20): with `reset_on_logon = true` in `src/FixCfg.toml`, fix-rs restarts reconnect
+  cleanly at seq 1 against the QFJ executor (sends `141=Y`, executor resets, no seq-too-low Logout) — the reconnect case
+  the executor's persisted store used to break.
+
+**M8 exit criteria**: fix-rs can run as an initiator — dials out, completes the Logon handshake against a real QFJ
+acceptor, exchanges heartbeats, and reconnects cleanly after a drop. Acceptor path unchanged; no session-layer logic
+duplicated (logon still flows through `next_tick`).

@@ -62,18 +62,46 @@ architecture where the Rust tech stack calls for it.
 
 ## Current project state
 
-- **M1 (message/dictionary layer hardening) is done.** Tasks 1.1–1.5 complete; 1.6 (SOH-in-Data-field handling)
-  explicitly descoped as a stretch goal. `Message`/`FieldMap` parsing is fully dictionary-driven with all validation
-  going through `SessionRejectError`/`SessionRejectError`.
+**v1 is complete** — M1, M2, M4, M5, and M6 are all done. M3 (typed message codegen) was deferred by design; v1 uses the
+raw `Message` API instead. M7 (automatic session-level error responses, post-v1) is done except one deferred sub-task.
+See **[TASKS.md](TASKS.md)** for the per-task detail.
+
+- **M1 (message/dictionary layer hardening) is done.** Tasks 1.1–1.6 complete. `Message`/`FieldMap` parsing is fully
+  dictionary-driven with all validation going through `SessionRejectError`. 1.6 (SOH-in-Data-field handling) landed via
+  a positional byte-cursor tokenizer; only the `NonDataFieldIncludeSOHChar` (373=17) sub-case is descoped (QFJ doesn't
+  emit it either).
 - **M2 (config rewrite) is done.** `toml`+`serde` based config with default/session merge. Hand-rolled parser deleted.
   14 config tests.
-- **M3 (typed message codegen) is not started.** Next up — rework build-time codegen to emit per-message-type structs.
+- **M3 (typed message codegen) is not started — deferred by design.** Would rework build-time codegen to emit
+  per-message-type structs (`Logon`, `NewOrderSingle`, …) with typed accessors, matching the roadmap's two-layer goal.
+  v1 shipped on the raw `Message` API instead, so this is a post-v1 architectural improvement, not a blocker.
 - **M4 (session state machine) is done.** `SessionState`, `SessionId`, `Application` trait, `Responder` trait,
   `Session::verify`, admin message builders (`generate_logon`/`logout`/`heartbeat`/`test_request`), inbound dispatch
   (`next_message`), and timer logic (`next_tick`). All testable without real sockets via `MockResponder`.
 - **M5 (sync networking) is done.** Tokio prototype replaced with `std::net`/`std::thread`. `FixMessageReader`,
   `TcpResponder`, `SessionMap`, `IoAcceptor` (binds `TcpListener`, spawns reader thread per connection), timer thread,
   disconnect cleanup, and reset flags (`reset_on_logon`/`reset_on_logout`/`reset_on_disconnect`). Integration-tested
-  against QFJ Banzai — Logon handshake and heartbeat exchange run cleanly. 172 tests passing.
-- **M6 (close out v1) is not started.** Wire `MarketDataRequest`/`MarketDataSnapshotFullRefresh` end-to-end — depends on
-  M3.
+  against QFJ Banzai — Logon handshake and heartbeat exchange run cleanly. Acceptor only; initiator support deferred.
+- **M6 (close out v1) is done.** Application-level messages flow end-to-end against a real QFJ Banzai initiator
+  (`NewOrderSingle 35=D` → two `ExecutionReport 35=8` acks, verified in Banzai's UI). Outbound sends go via the
+  `Vec<Message>` return from `on_app_msg_received` (no ownership cycle) plus `SessionMap::send` for
+  unsolicited/streaming sends. `V`→`W` (MarketData) is unit-tested but not exercised live (Banzai has no MarketData
+  client).
+- **M7 (automatic session-level error responses, post-v1) is nearly done.** The engine now responds on the wire to
+  inbound validation/session errors — Reject (35=3) for recoverable field errors, Logout (35=5) for fatal ones, silent
+  drop for garbled messages, BusinessMessageReject (35=j) as the app-error fallback — instead of silently dropping the
+  connection. 7.1–7.5 and 7.6 (a) (in-process raw-input harness) are done; **7.6 (b)** (a scripted end-to-end TCP
+  simulator) is deferred. Too-high-seq (ResendRequest) and full resend remain deferred to v1.2+.
+
+## What's open next
+
+Everything above is post-v1. In rough order of value:
+
+- **M3 — typed message codegen.** Biggest architectural piece and the one v1 milestone skipped by design; heavy on
+  Rust-learning (build-time codegen, trait design). Aligns with roadmap goal #2's two-layer shape.
+- **v1.2 protocol robustness** — message store + ResendRequest / gap fill / sequence-number persistence. Biggest
+  *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning).
+- **M8 initiator support — mostly done** (see TASKS.md). fix-rs dials out and completes Logon + heartbeat + clean
+  reconnect against the QFJ executor (verified live 2026-09-20). Only **8.5 (auto-reconnect loop)** remains — a failed or
+  dropped dial currently panics the initiator thread instead of retrying.
+- **7.6 (b)** — scripted TCP simulator for true end-to-end coverage of the acceptor/IO seam (deferred).

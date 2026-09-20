@@ -221,6 +221,13 @@ impl Session {
         msg.set_header_field(35, "A");
         msg.set_body_field(98, "0");
         msg.set_body_field(108, self.state.heartbeat_interval.to_string());
+        // ResetSeqNumFlag(141=Y): asks the counterparty to reset its sequence numbers
+        // to 1 as well. Sent when we've just reset ours as part of a reset-on-logon
+        // handshake — as the initiator kicking it off (reset_sent), or as an acceptor
+        // echoing a reset request back in the Logon response (reset_received).
+        if self.state.reset_sent || self.state.reset_received {
+            msg.set_body_field(141, "Y");
+        }
         self.initialize_header(&mut msg);
         self.app.on_admin_msg_sending(&self.id, &mut msg);
         self.send_raw(&mut msg);
@@ -499,17 +506,23 @@ impl Session {
             return Err(InboundMsgError::OutOfSessionTime);
         }
 
-        // Config-level reset — must precede verify_seq_number so seq 1 is accepted.
-        if self.reset_on_logon {
+        // Sequence-number reset policy — must precede verify_seq_number so seq 1 is
+        // accepted. Two triggers:
+        //   - reset_on_logon config: an ACCEPTOR resets here (it hasn't sent anything
+        //     yet). An INITIATOR already reset before sending its Logon (see next_tick),
+        //     so resetting again here would rewind its sender seq — skip it.
+        //   - ResetSeqNumFlag(141=Y): the counterparty asked us to reset. Honor it
+        //     unless WE initiated the reset (reset_sent) — for an initiator the 141=Y in
+        //     the response is just an acknowledgement, and resetting would rewind us.
+        let reset_requested = matches!(msg.get_body_field::<String>(141), Ok(flag) if flag == "Y");
+        let need_reset = (self.reset_on_logon && !self.state.is_initiator)
+            || (reset_requested && !self.state.reset_sent);
+        if need_reset {
             self.state.reset(Instant::now());
         }
-
-        // Wire-level reset (tag 141=Y) — counterparty explicitly requests it.
-        if let Ok(reset_seq_flag) = msg.get_body_field::<String>(141)
-            && reset_seq_flag == "Y"
-        {
-            self.state.reset(Instant::now());
-        }
+        // Set deterministically (not just on true): reset() above clears it, and a
+        // stale value from a prior connection must not make an acceptor echo 141=Y.
+        self.state.reset_received = reset_requested;
         self.verify_msg(msg)?;
         self.verify_seq_number(msg)?;
         self.app.on_admin_msg_received(&self.id, msg)?;
@@ -573,6 +586,14 @@ impl Session {
         if !self.state.logon_received {
             if self.schedule.is_session_time() && self.state.is_initiator && !self.state.logon_sent
             {
+                // reset_on_logon for an INITIATOR must happen here, before the Logon
+                // goes out at seq 1 — resetting on the inbound response instead would
+                // rewind the sender seq we just used. reset_sent then tells
+                // generate_logon to stamp ResetSeqNumFlag(141=Y) so the peer resets too.
+                if self.reset_on_logon {
+                    self.state.reset(now);
+                    self.state.reset_sent = true;
+                }
                 self.generate_logon();
                 self.state.logon_sent = true;
             } else if self.state.is_logon_timed_out(now) {
@@ -1039,6 +1060,89 @@ mod session_tests {
         session.next_logon(&mut msg).unwrap();
 
         assert!(session.state.logon_received);
+    }
+
+    // --- 8.7: reset_on_logon timing for initiators ---
+
+    // An initiator with reset_on_logon must reset BEFORE sending its Logon (so it
+    // goes out at seq 1 with 141=Y), and must NOT rewind its sender seq when the
+    // peer's Logon response echoes 141=Y back.
+    #[test]
+    fn test_initiator_reset_on_logon_keeps_sender_seq_monotonic() {
+        let (mut session, mock_state) = make_initiator_session();
+        session.is_active = true;
+        session.reset_on_logon = true;
+        // Pretend a prior session left non-1 sequence numbers.
+        session.state.next_sender_msg_seq_num = 10;
+        session.state.next_target_msg_seq_num = 10;
+
+        // Tick: resets to 1, sends Logon(35=A, 141=Y) at seq 1, advances sender to 2.
+        session.next_tick();
+        assert!(session.state.logon_sent);
+        assert!(session.state.reset_sent);
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "A"));
+        assert!(sent_message_contains(&sent[0], 141, "Y"));
+        assert!(sent_message_contains(&sent[0], 34, "1"));
+        assert_eq!(session.state.next_sender_msg_seq_num, 2);
+
+        // Inbound Logon response carrying 141=Y at seq 1 — an acknowledgement, not a
+        // trigger to reset again. Sender must stay at 2 (not rewind to 1).
+        let mut response = make_msg("A", "TARGET", "SENDER", 1);
+        response.set_body_field(141, "Y");
+        session.next_logon(&mut response).unwrap();
+
+        assert!(session.state.logon_received);
+        assert_eq!(session.state.next_sender_msg_seq_num, 2, "sender seq must not rewind");
+        assert_eq!(session.state.next_target_msg_seq_num, 2);
+    }
+
+    // generate_logon stamps 141=Y only during a reset handshake — absent otherwise.
+    #[test]
+    fn test_generate_logon_omits_reset_flag_without_handshake() {
+        let (mut session, mock_state) = make_session(); // acceptor, no reset
+        session.generate_logon();
+        let sent = mock_state.sent();
+        assert!(sent_message_contains(&sent[0], 35, "A"));
+        assert!(!sent[0].contains("\x01141="), "141 must be absent without a reset handshake");
+    }
+
+    // An ACCEPTOR still resets on the inbound Logon (reset_on_logon) — but with no
+    // inbound 141 its response carries none either (QFJ echoes only when requested).
+    #[test]
+    fn test_acceptor_reset_on_logon_resets_without_echoing_flag() {
+        let (mut session, mock_state) = make_session(); // is_initiator = false
+        session.is_active = true;
+        session.reset_on_logon = true;
+        session.state.next_sender_msg_seq_num = 10;
+        session.state.next_target_msg_seq_num = 10;
+
+        let mut msg = make_msg("A", "TARGET", "SENDER", 1); // no 141
+        session.next_logon(&mut msg).unwrap();
+
+        assert!(session.state.logon_received);
+        // reset to 1, then the Logon response went out at seq 1 → sender advanced to 2.
+        assert_eq!(session.state.next_sender_msg_seq_num, 2);
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(!sent[0].contains("\x01141="), "no inbound 141 => no echo");
+    }
+
+    // An ACCEPTOR that receives 141=Y resets and echoes 141=Y in its Logon response.
+    #[test]
+    fn test_acceptor_echoes_reset_flag_when_requested() {
+        let (mut session, mock_state) = make_session();
+        session.is_active = true;
+        session.state.next_target_msg_seq_num = 10;
+
+        let mut msg = make_msg("A", "TARGET", "SENDER", 1);
+        msg.set_body_field(141, "Y");
+        session.next_logon(&mut msg).unwrap();
+
+        assert!(session.state.logon_received);
+        let sent = mock_state.sent();
+        assert!(sent_message_contains(&sent[0], 141, "Y"), "acceptor should echo 141=Y");
     }
 
     fn sent_message_contains(wire: &str, tag: u32, expected_value: &str) -> bool {
@@ -1737,7 +1841,7 @@ mod session_tests {
     // --- 7.6(a): in-process raw-input harness ---
     //
     // Feeds raw SOH-delimited wire strings through the REAL inbound seam
-    // (acceptor::process_inbound_msg -> Message::from_str with the real FIX43
+    // (connection::process_inbound_msg -> Message::from_str with the real FIX43
     // dictionary -> garbled-drop / Reject(35=3) / next_message), with a
     // MockResponder instead of a socket. This is the coverage Banzai can't give
     // (it can't inject malformed/invalid messages) and that the other session
@@ -1803,7 +1907,7 @@ mod session_tests {
         ];
         for (label, wire) in cases {
             let (mut session, mock_state) = make_harness_session();
-            let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(wire));
+            let flow = crate::io::connection::process_inbound_msg(&mut session, &soh(wire));
             assert_eq!(flow, ControlFlow::Continue(()), "{}: keep reading", label);
             assert!(mock_state.sent().is_empty(), "{}: garbled msg → no response", label);
             assert!(!mock_state.is_disconnected(), "{}: connection survives", label);
@@ -1853,7 +1957,7 @@ mod session_tests {
         ];
         for (label, wire, code, ref_seq) in cases {
             let (mut session, mock_state) = make_harness_session();
-            let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(wire));
+            let flow = crate::io::connection::process_inbound_msg(&mut session, &soh(wire));
             assert_eq!(flow, ControlFlow::Continue(()), "{}: recoverable, keep reading", label);
             let sent = mock_state.sent();
             assert_eq!(sent.len(), 1, "{}: exactly one Reject", label);
@@ -1877,7 +1981,7 @@ mod session_tests {
         let (mut session, mock_state) = make_harness_session();
         session.state.next_target_msg_seq_num = 0; // fixture's MsgSeqNum is 0
 
-        let flow = crate::io::acceptor::process_inbound_msg(&mut session, &soh(VALID_LOGON));
+        let flow = crate::io::connection::process_inbound_msg(&mut session, &soh(VALID_LOGON));
 
         assert_eq!(flow, ControlFlow::Continue(()));
         assert!(session.state.logon_received, "valid Logon logs the session on");

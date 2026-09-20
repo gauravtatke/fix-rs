@@ -12,6 +12,7 @@ mod sample_app;
 mod session;
 
 use crate::io::acceptor::IoAcceptor;
+use crate::io::initiator::IoInitiator;
 use crate::network::{SOCKET_ACCEPT_HOST_IP, SessionMap};
 use crate::sample_app::SampleApp;
 use crate::session::{ConnectionType, SessionProperties};
@@ -26,19 +27,23 @@ fn main() {
     let settings_str = std::fs::read_to_string(FIX_CONFIG_PATH).unwrap();
     let properties = SessionProperties::from_str(&settings_str).unwrap();
     // log::info!("{:#?}", properties);
-    // creating session map of all acceptor sessions, silently dropping initiator
+    // One shared map holds every session (both roles): the timer ticks all of them,
+    // acceptors are looked up in it by inbound connections, and SessionMap::send routes
+    // unsolicited/cross-session messages through it.
     let session_map: SessionMap = properties
         .sessions()
         .iter()
-        .filter(|(id, config)| config.connection_type() == ConnectionType::Acceptor)
         .map(|(id, config)| {
             let session = config.to_session(Box::new(SampleApp::new()));
             (id.clone(), session)
         })
         .collect();
-    let socket_addrs = properties
+
+    // ACCEPTOR PROCESSING
+    let socket_accept_addrs = properties
         .sessions()
         .values()
+        .filter(|config| config.connection_type() == ConnectionType::Acceptor)
         .map(|config| {
             SocketAddr::new(
                 SOCKET_ACCEPT_HOST_IP.parse::<IpAddr>().unwrap(),
@@ -49,7 +54,7 @@ fn main() {
     log::info!("Created {} session(s)", session_map.len());
     let timer_handle = network::start_timer(session_map.clone());
     let mut start_handle = Vec::new();
-    for addr in socket_addrs {
+    for addr in socket_accept_addrs {
         log::info!("Starting acceptor on {}", addr);
         let cloned_map = session_map.clone();
         let thread_handle = std::thread::spawn(move || {
@@ -58,5 +63,29 @@ fn main() {
         });
         start_handle.push(thread_handle);
     }
+
+    // INITIATOR processing
+    let initiators = properties
+        .sessions()
+        .iter()
+        .filter(|(_, config)| config.connection_type() == ConnectionType::Initiator)
+        .map(|(id, config)| {
+            let session = session_map.get(id).unwrap();
+            let connect_addr = SocketAddr::new(
+                config.socket_connect_host().as_ref().unwrap().parse::<IpAddr>().unwrap(),
+                config.socket_connect_port().unwrap(),
+            );
+            IoInitiator::new(id.clone(), session, connect_addr)
+        })
+        .collect::<Vec<IoInitiator>>();
+    for initiator in initiators {
+        log::info!("Starting initiator on {}", initiator.connect_addr());
+        let thread_handle = std::thread::spawn(move || {
+            initiator.start().unwrap();
+        });
+        start_handle.push(thread_handle);
+    }
+
+    // wait for all threads to finish
     start_handle.drain(..).for_each(|handle| handle.join().unwrap());
 }

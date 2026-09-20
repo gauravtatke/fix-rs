@@ -1,3 +1,4 @@
+use crate::io::connection;
 use crate::io::fix_message_reader::FixMessageReader;
 use crate::io::tcp_responder::TcpResponder;
 use crate::message::{self, Message};
@@ -7,7 +8,7 @@ use log::{info, warn};
 use std::error::Error;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::ops::ControlFlow;
-use std::ops::ControlFlow::{Break, Continue};
+use std::ops::ControlFlow::Break;
 use std::thread;
 
 /// Listens on a single bind address and spawns one thread per inbound TCP connection.
@@ -60,7 +61,7 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
         info!("No session found for {}, dropping connection from {}", reverse_id, peer_addr);
         return Ok(());
     };
-    info!("{} incoming: {}", reverse_id, wire_display(&first_msg_str));
+    info!("{} incoming: {}", reverse_id, connection::wire_display(&first_msg_str));
     // Establish the session from the first (Logon) message under a single lock.
     // On Break the first message failed (malformed, or a fatal/rejected logon) and
     // the session is already disconnected — close out (reusing the same guard, so
@@ -69,23 +70,15 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
     {
         let mut session = s_arc.lock().unwrap();
         if establish_session(&mut session, stream, &first_msg_str).is_break() {
-            close_connection(&mut session, peer_addr);
+            connection::close_connection(&mut session, peer_addr);
             return Ok(());
         }
     }
 
-    while let Ok(msg_str) = fix_msg_reader.read_message() {
-        info!("{} incoming: {}", reverse_id, wire_display(&msg_str));
-        let mut session = s_arc.lock().unwrap();
-        // Break => session already torn down inside next_message; stop reading.
-        // The tail close_connection logs the close and disconnects (idempotent).
-        if process_inbound_msg(&mut session, &msg_str).is_break() {
-            break;
-        }
-    }
-    let mut session = s_arc.lock().unwrap();
-    close_connection(&mut session, peer_addr);
-    Ok(())
+    // From here the session is established; the shared pump loop reads and dispatches
+    // subsequent messages (locking per message, never across a read) and tears the
+    // session down on disconnect.
+    connection::run_connection(s_arc, reverse_id.id(), fix_msg_reader, peer_addr)
 }
 
 /// Establishes the session from the first (Logon) message: wires the responder,
@@ -106,47 +99,4 @@ fn establish_session(session: &mut Session, stream: TcpStream, raw: &str) -> Con
             Break(())
         }
     }
-}
-
-// pub(crate) so the in-process raw-input harness (session_tests, 7.6a) can drive
-// this exact inbound seam — parse -> garbled-drop / Reject / dispatch — without a
-// socket. Crate-internal only; not part of any external API.
-pub(crate) fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> {
-    match Message::from_str(msg_str, session.data_dict()) {
-        Ok(mut msg) => {
-            // next_message has already applied any FIX response (Reject /
-            // Logout + disconnect) internally; we only read its signal.
-            // Break => session torn down, stop reading; Continue => keep going.
-            session.next_message(&mut msg)
-        }
-        Err(reason) if reason.is_garbled() => {
-            // Garbled (bad body length / checksum): drop it — a garbled
-            // message can't be trusted enough to reference in a Reject.
-            warn!("{} dropping garbled message: {}", session.id(), reason);
-            Continue(())
-        }
-        Err(reason) => {
-            // Well-formed but invalid: Reject it (RefSeqNum from the raw
-            // message) and keep the connection alive.
-            let seq_num = message::seq_num_from_raw(msg_str)
-                .and_then(|sq| sq.parse::<u32>().ok())
-                .unwrap_or(0);
-            info!("{} rejecting invalid message: {}", session.id(), reason);
-            session.reject_message(seq_num, reason);
-            Continue(())
-        }
-    }
-}
-
-/// Acceptor-side teardown: log the close and disconnect the session. Takes an
-/// already-locked `&mut Session` (the caller owns the lock), so it never locks and
-/// cannot deadlock. `Session::disconnect` is idempotent, so calling this after a
-/// fatal message already disconnected is safe (a harmless no-op).
-fn close_connection(session: &mut Session, addr: SocketAddr) {
-    info!("{} event: Connection closed ({})", session.id(), addr);
-    session.disconnect();
-}
-
-fn wire_display(raw: &str) -> String {
-    raw.replace('\x01', "|")
 }

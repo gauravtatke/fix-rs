@@ -110,7 +110,7 @@ struct FixProperties {
 // cross-field constraints (e.g. acceptor needs socket_accept_port,
 // start_time/end_time must both be present or both absent).
 // Defaults are applied here (e.g. timezone → UTC, reset flags → false).
-#[derive(Debug, CopyGetters)]
+#[derive(Debug, Getters, CopyGetters)]
 pub struct SessionConfig {
     // identity (required)
     begin_string: String,
@@ -128,6 +128,7 @@ pub struct SessionConfig {
     socket_accept_port: Option<u16>,
     #[getset(get_copy = "pub")]
     socket_connect_port: Option<u16>,
+    #[getset(get = "pub")]
     socket_connect_host: Option<String>,
     heartbeat_interval: Option<u32>,
     // schedule
