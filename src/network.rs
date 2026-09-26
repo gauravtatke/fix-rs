@@ -118,6 +118,7 @@ mod session_map_tests {
             Some(Box::new(StubResponder)),
             dd,
             Box::new(DefaultApplication::new()),
+            None,
         );
         (id, session)
     }

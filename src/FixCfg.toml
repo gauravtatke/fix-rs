@@ -16,3 +16,4 @@ socket_connect_host = "127.0.0.1"
 socket_connect_port = 9879
 heartbeat_interval = 5
 reset_on_logon = true
+reconnect_interval = 5

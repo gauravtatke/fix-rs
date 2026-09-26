@@ -13,7 +13,7 @@ use crate::data_dictionary::DataDictionary;
 use crate::fix_errors::{BusinessMsgReject, InboundMsgError, SendError, SessionRejectError};
 use crate::message::Message;
 use crate::session::schedule::SessionSchedule;
-use getset::{Getters, Setters};
+use getset::{CopyGetters, Getters, Setters};
 use log::{error, info, warn};
 use state::SessionState;
 use std::error::Error;
@@ -21,18 +21,24 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Getters, Setters)]
+#[derive(CopyGetters, Getters, Setters)]
 pub struct Session {
     #[getset(get = "pub")]
     id: SessionId,
+    #[getset(get_copy = "pub")]
     is_active: bool,
     // Config flags that control *when* Session calls state.reset() —
     // kept here (not in SessionState) because they're policy decisions,
     // not mutable runtime state.
+    #[getset(get_copy = "pub")]
     reset_on_logon: bool,
+    #[getset(get_copy = "pub")]
     reset_on_logout: bool,
+    #[getset(get_copy = "pub")]
     reset_on_disconnect: bool,
+    #[getset(get = "pub")]
     state: SessionState,
+    #[getset(get = "pub")]
     schedule: SessionSchedule,
     #[getset(set = "pub")]
     responder: Option<Box<dyn Responder>>,
@@ -43,6 +49,8 @@ pub struct Session {
     // they want sent (Vec<Message>), and the session sends them — so the
     // ownership graph is a one-way Session -> app, with no cycle to leak.
     app: Box<dyn Application>,
+    #[getset(get = "pub")]
+    reconnect_interval: Option<u16>,
 }
 
 fn is_admin_msg_type(msg_type: &str) -> bool {
@@ -57,6 +65,7 @@ impl Session {
         responder: Option<Box<dyn Responder>>,
         dictionary: DataDictionary,
         app: Box<dyn Application>,
+        reconnect_interval: Option<u16>,
     ) -> Self {
         Self {
             id,
@@ -69,6 +78,7 @@ impl Session {
             responder,
             data_dict: Arc::new(dictionary),
             app,
+            reconnect_interval,
         }
     }
 
@@ -846,7 +856,7 @@ mod session_tests {
         let dd = DataDictionary::default();
         let spy = AppSpy::new();
         let app = Box::new(TestApplication::new(spy.clone()));
-        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         (session, mock_state, spy)
     }
 
@@ -1672,7 +1682,8 @@ mod session_tests {
         let mock_state = MockState::new();
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
-        let mut session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let mut session =
+            Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         session.is_active = true; // logon_received stays false — pre-logon
         (session, mock_state)
     }
@@ -1883,7 +1894,8 @@ mod session_tests {
         let responder = MockResponder::new(mock_state.clone());
         let dd = HARNESS_DD.clone();
         let app = Box::new(TestApplication::new(AppSpy::new()));
-        let mut session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let mut session =
+            Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         session.is_active = true; // logon_received stays false
         (session, mock_state)
     }
@@ -2113,7 +2125,7 @@ mod session_tests {
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
         let app = Box::new(TestApplication::new(AppSpy::new()));
-        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         (session, mock_state)
     }
 
@@ -2127,7 +2139,7 @@ mod session_tests {
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
         let app = Box::new(TestApplication::new(AppSpy::new()));
-        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         (session, mock_state)
     }
 
@@ -2546,7 +2558,8 @@ mod session_tests {
         let mock_state = MockState::new();
         let responder = MockResponder::new(mock_state.clone());
         let dd = DataDictionary::default();
-        let mut session = Session::new(id, state, schedule, Some(Box::new(responder)), dd, app);
+        let mut session =
+            Session::new(id, state, schedule, Some(Box::new(responder)), dd, app, None);
         session.is_active = true;
         session.state.logon_received = true;
         (session, mock_state)

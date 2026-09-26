@@ -593,14 +593,26 @@ reader is parked on a read.
 - [x] **8.4 — Spawn initiator threads in `main.rs`.**
   For each `ConnectionType::Initiator` session, `main.rs` builds an `IoInitiator` (pulling its `Arc` out of the shared
   `SessionMap` via `get`, and its connect addr from `socket_connect_host`/`socket_connect_port`) and spawns a thread
-  running `start()`, joined alongside the acceptor handles. Timer covers all sessions. *Caveat:* `start().unwrap()`
-  panics the thread on a failed dial — no retry yet (that's 8.5).
+  running `start()`, joined alongside the acceptor handles. Timer covers all sessions. *(The failed-dial panic caveat
+  noted here was resolved in 8.5 — `start()` now retries instead of panicking.)*
 
-- [ ] **8.5 — Reconnect loop.**
-  On disconnect, the initiator waits a reconnect interval and re-dials (QFJ default ≈30s). Add a `reconnect_interval`
-  config key (default 30s) and wrap 8.2/8.3 in a retry loop. `state.reset()` on reconnect follows the existing
-  `reset_on_*` flags (M5 5.9). Done when: killing the peer socket makes the initiator retry and re-logon when the peer
-  returns. *(Can be a thin fixed-interval first cut; make the interval configurable in a follow-up if needed.)*
+- [x] **8.5 — Reconnect loop. DONE.**
+  `IoInitiator::start()` now wraps the dial + `run_connection` pump in an infinite retry loop: on any disconnect
+  (clean EOF/Logout or failed dial) it waits `reconnect_interval` and re-dials, gated by `schedule().is_session_time()`
+  (out-of-session it polls on a short interval instead of dialing). No max-retry — matches QFJ, which reconnects
+  forever; the loop stops only on session schedule or an explicit stop signal. `state.reset()` on reconnect rides the
+  existing `reset_on_*` flags (M5 5.9), so with `reset_on_logon` the re-logon starts clean at seq 1. Added:
+    - `reconnect_interval` config key (`Option<u16>` seconds, default 30 via `unwrap_or`) threaded through
+      `FixProperties`/`SessionConfig`/`Session`; ignored-for-acceptor validation warning updated.
+    - Graceful stop: an `Arc<AtomicBool>` `stop` flag on `IoInitiator` + `interruptible_sleep` (checks the flag between
+      sleep slices) so the loop can be halted between connections (a stop while parked in the blocking read still needs
+      the socket to close first).
+  Done when: killing the peer socket makes the initiator retry and re-logon when the peer returns — covered by
+  `test_initiator_reconnects_and_relogons_after_peer_drop` (drop peer → second accept → fresh Logon). Both initiator
+  tests now stop+join cleanly (no orphaned threads). 233 tests green. **Verified live (2026-09-26):** with
+  `reconnect_interval = 5` in `src/FixCfg.toml`, fix-rs stayed up while the QFJ executor was killed and restarted — it
+  retried every 5s and auto re-logged-on at seq 1 (`141=Y` handshake) with heartbeats resuming, no fix-rs restart. See
+  `session_context/2026-09-20-initiator.md`.
 
 - [x] **8.6 — Integration test against a QFJ acceptor. DONE (2026-09-20).**
   fix-rs initiator (`BANZAI->EXEC`, `src/FixCfg.toml`) dialed the QFJ `executor` acceptor (FIX.4.3, port 9879) and

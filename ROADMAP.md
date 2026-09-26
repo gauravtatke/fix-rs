@@ -101,7 +101,9 @@ Everything above is post-v1. In rough order of value:
   Rust-learning (build-time codegen, trait design). Aligns with roadmap goal #2's two-layer shape.
 - **v1.2 protocol robustness** — message store + ResendRequest / gap fill / sequence-number persistence. Biggest
   *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning).
-- **M8 initiator support — mostly done** (see TASKS.md). fix-rs dials out and completes Logon + heartbeat + clean
-  reconnect against the QFJ executor (verified live 2026-09-20). Only **8.5 (auto-reconnect loop)** remains — a failed or
-  dropped dial currently panics the initiator thread instead of retrying.
 - **7.6 (b)** — scripted TCP simulator for true end-to-end coverage of the acceptor/IO seam (deferred).
+
+**M8 (initiator support) is done.** fix-rs dials out and completes Logon + heartbeat + clean reconnect against the QFJ
+executor (verified live 2026-09-20). 8.5 (auto-reconnect loop) landed: `IoInitiator::start()` retries forever on a
+`reconnect_interval` (config key, default 30s), gated by session schedule, with a stop flag for graceful shutdown — a
+failed/dropped dial now re-dials instead of panicking the thread.

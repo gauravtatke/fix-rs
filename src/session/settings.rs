@@ -45,6 +45,7 @@ const START_DAY_SETTING: &str = "start_day";
 const END_DAY_SETTING: &str = "end_day";
 const START_TIME_SETTING: &str = "start_time";
 const END_TIME_SETTING: &str = "end_time";
+const RECONNECT_INTERVAL_SETTING: &str = "reconnect_interval";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionType {
@@ -102,6 +103,7 @@ struct FixProperties {
     end_day: Option<Weekday>,
     end_time: Option<NaiveTime>,
     timezone: Option<Tz>,
+    reconnect_interval: Option<u16>,
 }
 
 // Validated, fully-resolved configuration for one FIX session.
@@ -147,6 +149,7 @@ pub struct SessionConfig {
     reset_on_disconnect: bool, // default: false
     reset_on_logout: bool,     // default: false
     data_dictionary: PathBuf,  // default: derived from begin_string (e.g. FIX43.xml)
+    reconnect_interval: Option<u16>,
 }
 
 impl SessionConfig {
@@ -188,6 +191,7 @@ impl SessionConfig {
             responder: None,
             data_dict: Arc::new(dictionary),
             app,
+            reconnect_interval: self.reconnect_interval,
         }
     }
 }
@@ -256,6 +260,7 @@ impl TryFrom<FixProperties> for SessionConfig {
             start_time: settings.start_time,
             end_day: None,
             end_time: settings.end_time,
+            reconnect_interval: settings.reconnect_interval,
         };
 
         // Connection-type-specific validation:
@@ -266,10 +271,15 @@ impl TryFrom<FixProperties> for SessionConfig {
                     field: SOCKET_ACCEPT_PORT_SETTING.to_string(),
                 },
             )?);
-            if settings.socket_connect_host.is_some() || settings.socket_connect_port.is_some() {
+            if settings.socket_connect_host.is_some()
+                || settings.socket_connect_port.is_some()
+                || settings.reconnect_interval.is_some()
+            {
                 warn!(
-                    "{} and {} fields are ignored for acceptor",
-                    SOCKET_CONNECT_HOST_SETTING, SOCKET_CONNECT_PORT_SETTING
+                    "{}, {} and {} fields are ignored for acceptor",
+                    SOCKET_CONNECT_HOST_SETTING,
+                    SOCKET_CONNECT_PORT_SETTING,
+                    RECONNECT_INTERVAL_SETTING
                 );
             }
         }
@@ -290,6 +300,7 @@ impl TryFrom<FixProperties> for SessionConfig {
             config.socket_connect_host = settings.socket_connect_host;
             config.socket_connect_port = settings.socket_connect_port;
             config.heartbeat_interval = settings.heartbeat_interval;
+            config.reconnect_interval = settings.reconnect_interval;
             if settings.socket_accept_port.is_some() {
                 warn!("{} field is ignored for initiator", SOCKET_ACCEPT_PORT_SETTING);
             }
