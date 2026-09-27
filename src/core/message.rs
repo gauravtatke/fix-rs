@@ -6,8 +6,8 @@ use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 
 use crate::core::dictionary::{DataDictionary, FixType, HEADER_ID};
-use crate::fields::*;
 use crate::errors::{FieldError, SessionRejectError};
+use crate::fields::*;
 use crate::session::{SessionId, SessionIdBuilder};
 
 type SessionResult<T> = Result<T, SessionRejectError>;
@@ -44,14 +44,13 @@ pub enum Type {
     UtcTimestamp(String),
 }
 
-type Tag = u32;
 pub const SOH: char = '\u{01}';
 // pub const SOH: char = '|';
 
 #[derive(Debug, Default, Clone, CopyGetters, Getters)]
 pub struct StringField {
     #[getset(get_copy = "pub")]
-    tag: Tag,
+    tag: u32,
 
     #[getset(get = "pub")]
     value: String,
@@ -61,7 +60,7 @@ impl StringField {
     // `impl Into<String>` so callers can pass a `&str` (allocates once) or an owned
     // `String` (moved in, zero-copy) without the to_string()+as_str() dance that
     // otherwise allocates twice. Numbers stay explicit: `new(tag, n.to_string())`.
-    pub(crate) fn new(tag: Tag, value: impl Into<String>) -> Self {
+    pub(crate) fn new(tag: u32, value: impl Into<String>) -> Self {
         Self {
             tag,
             value: value.into(),
@@ -81,15 +80,15 @@ pub struct FieldMap {
     // message body / one group instance). IndexMap keeps *insertion* order, which is what
     // makes `Message::to_string()` round-trip a parsed message byte-for-byte when no
     // explicit `field_order` below overrides it.
-    fields: IndexMap<Tag, StringField>,
+    fields: IndexMap<u32, StringField>,
     // Repeating groups nested under this FieldMap, keyed by the group's "NoXXX" count tag
     // (e.g. tag 268 for MDEntries). Each Group owns its own Vec<FieldMap>, one per instance.
-    group: HashMap<Tag, Group>,
+    group: HashMap<u32, Group>,
 
     // Dictionary-declared field order for *this* section (set via `set_field_order`), used
     // to sort output when the spec cares about order (header's first 3 fields, and every
     // repeating group's field order). Empty for sections where wire order is unconstrained.
-    field_order: Vec<Tag>,
+    field_order: Vec<u32>,
 }
 
 impl FieldMap {
@@ -115,7 +114,7 @@ impl FieldMap {
     // Ergonomic setter for *building* a message/group: `set_field(tag, value)` with
     // no explicit StringField. `value: impl Into<String>` takes a &str or an owned
     // String (numbers stay explicit: `set_field(tag, n.to_string())`).
-    pub fn set_field(&mut self, tag: Tag, value: impl Into<String>) {
+    pub fn set_field(&mut self, tag: u32, value: impl Into<String>) {
         self.insert_field(StringField::new(tag, value));
     }
 
@@ -126,7 +125,7 @@ impl FieldMap {
         Err(FieldError::TagNotFound { tag })
     }
 
-    pub fn set_group(&mut self, tag: Tag, value: u32, rep_grp_delimiter: Tag) -> &mut Group {
+    pub fn set_group(&mut self, tag: u32, value: u32, rep_grp_delimiter: u32) -> &mut Group {
         self.set_field(tag, value.to_string());
         let group =
             self.group.entry(tag).or_insert_with(|| Group::new(rep_grp_delimiter, tag, value));
@@ -137,11 +136,11 @@ impl FieldMap {
         group
     }
 
-    pub fn get_group(&self, tag: Tag) -> Option<&Group> {
+    pub fn get_group(&self, tag: u32) -> Option<&Group> {
         self.group.get(&tag)
     }
 
-    pub fn get_group_mut(&mut self, tag: Tag) -> Option<&mut Group> {
+    pub fn get_group_mut(&mut self, tag: u32) -> Option<&mut Group> {
         self.group.get_mut(&tag)
     }
 
@@ -149,7 +148,7 @@ impl FieldMap {
     /// delimiter `delim` if absent), keep the count field and `Group::value` in sync, and
     /// return the new instance to fill. Lets a caller build a group incrementally without
     /// managing the count itself — fixing the `set_group`/`add_group` desync footgun.
-    pub fn add_group_instance(&mut self, count_tag: Tag, delim: Tag) -> &mut FieldMap {
+    pub fn add_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
         {
             let group =
                 self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
@@ -162,7 +161,7 @@ impl FieldMap {
     }
 
     /// Append a pre-built instance to repeating group `count_tag`, keeping the count in sync.
-    pub fn push_group_instance(&mut self, count_tag: Tag, delim: Tag, instance: FieldMap) {
+    pub fn push_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
         {
             let group =
                 self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
@@ -174,11 +173,11 @@ impl FieldMap {
     }
 
     /// Borrowed iteration over the instances of repeating group `count_tag` (empty if absent).
-    pub fn group_instances(&self, count_tag: Tag) -> impl Iterator<Item = &FieldMap> {
+    pub fn group_instances(&self, count_tag: u32) -> impl Iterator<Item = &FieldMap> {
         self.group.get(&count_tag).into_iter().flat_map(|g| g.fields.iter())
     }
 
-    pub fn set_field_order(&mut self, f_order: &[Tag]) {
+    pub fn set_field_order(&mut self, f_order: &[u32]) {
         self.field_order = f_order.to_vec();
     }
 
@@ -190,7 +189,7 @@ impl FieldMap {
 
     /// Position of `tag` in this map's declared `field_order`, or `usize::MAX` if the tag
     /// has no declared position (such fields sort last during serialization).
-    fn field_rank(&self, tag: Tag) -> usize {
+    fn field_rank(&self, tag: u32) -> usize {
         self.field_order.iter().position(|needle| *needle == tag).map_or(usize::MAX, |pos| pos)
     }
 }
@@ -240,7 +239,7 @@ pub struct Group {
     delim: u32,
 
     #[getset(get_copy)]
-    tag: Tag,
+    tag: u32,
 
     #[getset(get_copy)]
     value: u32,
@@ -249,7 +248,7 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn new(delimiter: Tag, tag: Tag, value: u32) -> Self {
+    pub fn new(delimiter: u32, tag: u32, value: u32) -> Self {
         Self {
             delim: delimiter,
             tag,
@@ -291,12 +290,11 @@ impl IndexMut<usize> for Group {
     }
 }
 
-type Header = FieldMap;
 
 #[derive(Debug, Default, Clone, MutGetters, Getters)]
 #[getset(get = "pub", get_mut = "pub")]
 pub struct Message {
-    header: Header,
+    header: FieldMap,
     body: FieldMap,
     trailer: FieldMap,
 }
@@ -314,55 +312,55 @@ impl Message {
     // build the StringField themselves — `set_body_field(45, x)` instead of
     // `set_body_field(StringField::new(45, x))`. `value: impl Into<String>` takes a
     // &str or an owned String; numbers stay explicit (`set_body_field(45, n.to_string())`).
-    pub fn set_header_field(&mut self, tag: Tag, value: impl Into<String>) {
+    pub fn set_header_field(&mut self, tag: u32, value: impl Into<String>) {
         self.header.set_field(tag, value);
     }
 
-    pub fn set_body_field(&mut self, tag: Tag, value: impl Into<String>) {
+    pub fn set_body_field(&mut self, tag: u32, value: impl Into<String>) {
         self.body.set_field(tag, value);
     }
 
-    pub fn set_trailer_field(&mut self, tag: Tag, value: impl Into<String>) {
+    pub fn set_trailer_field(&mut self, tag: u32, value: impl Into<String>) {
         self.trailer.set_field(tag, value);
     }
 
-    pub fn get_header_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+    pub fn get_header_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         self.header.get_field(tag)
     }
 
-    pub fn get_body_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+    pub fn get_body_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         self.body.get_field(tag)
     }
 
-    pub fn get_trailer_field<T: FromStr>(&self, tag: Tag) -> Result<T, FieldError> {
+    pub fn get_trailer_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         self.trailer.get_field(tag)
     }
 
-    fn add_group(&mut self, tag: Tag, grp: Group) {
+    fn add_group(&mut self, tag: u32, grp: Group) {
         self.body.group.insert(tag, grp);
     }
 
     /// Append + fill a body repeating-group instance (see `FieldMap::add_group_instance`).
-    pub fn add_body_group_instance(&mut self, count_tag: Tag, delim: Tag) -> &mut FieldMap {
+    pub fn add_body_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
         self.body.add_group_instance(count_tag, delim)
     }
 
     /// Append a pre-built body repeating-group instance.
-    pub fn push_body_group_instance(&mut self, count_tag: Tag, delim: Tag, instance: FieldMap) {
+    pub fn push_body_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
         self.body.push_group_instance(count_tag, delim, instance)
     }
 
     /// Borrowed iteration over a body repeating group's instances.
-    pub fn body_group_instances(&self, count_tag: Tag) -> impl Iterator<Item = &FieldMap> {
+    pub fn body_group_instances(&self, count_tag: u32) -> impl Iterator<Item = &FieldMap> {
         self.body.group_instances(count_tag)
     }
 
     /// The body repeating group `count_tag`, for slice/index access to its instances.
-    pub fn body_group(&self, count_tag: Tag) -> Option<&Group> {
+    pub fn body_group(&self, count_tag: u32) -> Option<&Group> {
         self.body.get_group(count_tag)
     }
 
-    pub fn body_group_mut(&mut self, count_tag: Tag) -> Option<&mut Group> {
+    pub fn body_group_mut(&mut self, count_tag: u32) -> Option<&mut Group> {
         self.body.get_group_mut(count_tag)
     }
 
@@ -888,7 +886,7 @@ fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResul
 // near-synonymous UndefinedTag (373=3) to match FIX 4.3 Vol 2 §14a, which prescribes reason 0
 // ("Invalid tag number") for a tag not defined in the specification; see the UndefinedTag
 // variant's note in fix_errors.rs.
-fn validate_tag_for_msgtype(tag: Tag, msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
+fn validate_tag_for_msgtype(tag: u32, msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
     if dd.is_msg_field(msg_type, tag) {
         return Ok(());
     } else if dd.get_field_type(tag).is_some() {
@@ -916,7 +914,7 @@ fn validate_known_msg_type(msg_type: &str, dd: &DataDictionary) -> SessionResult
 // at insert time — a post-parse sweep (unlike validate_field_values) would already see the
 // collapsed single entry. Only called from the header/body top-level loops, not inside a group
 // instance, where a repeating delimiter tag is expected and handled by parse_group.
-fn validate_tag_for_duplicacy(tag: Tag, field_map: &FieldMap) -> SessionResult<()> {
+fn validate_tag_for_duplicacy(tag: u32, field_map: &FieldMap) -> SessionResult<()> {
     // A repeating-group count tag also lands in `fields` (set_group calls set_field), so this
     // one check covers both plain fields and a duplicated group count tag — no separate
     // `field_map.group` lookup needed.
@@ -929,7 +927,7 @@ fn validate_tag_for_duplicacy(tag: Tag, field_map: &FieldMap) -> SessionResult<(
 // A header field appearing after the body has started is an ordering violation -> the body has
 // already consumed every header field in parse_header, so this is not a hand-off signal (that's
 // the trailer case) but a genuine out-of-order field. -> TagSpecifiedOutOfOrder (373=14).
-fn validate_body_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
+fn validate_body_field(tag: u32, dd: &DataDictionary) -> SessionResult<()> {
     if dd.is_header_field(tag) {
         return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
     }
@@ -938,7 +936,7 @@ fn validate_body_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
 
 // The trailer is the last section, so any field here that isn't a declared trailer field is
 // out of order (there's no next section to hand it off to). -> TagSpecifiedOutOfOrder (373=14).
-fn validate_trailer_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
+fn validate_trailer_field(tag: u32, dd: &DataDictionary) -> SessionResult<()> {
     if !dd.is_trailer_field(tag) {
         return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
     }
@@ -949,7 +947,7 @@ fn validate_trailer_field(tag: Tag, dd: &DataDictionary) -> SessionResult<()> {
 // `value` one of them? -> ValueOutOfRange on a miss. Tags with no declared value set are
 // unconstrained (any value is Ok).
 fn validate_tag_for_value_range(
-    tag: Tag,
+    tag: u32,
     value: &String,
     dd: &DataDictionary,
 ) -> SessionResult<()> {
@@ -968,7 +966,7 @@ fn validate_tag_for_value_range(
 // must parse as i64/f64, Char must be a single char, Boolean must be exactly "Y"/"N"; the
 // string-shaped categories are accepted as-is (their sub-grammars aren't validated here).
 // -> IncorrectDataFormatForValue on a bad parse.
-fn validate_tag_value_for_type(tag: Tag, value: &String, dd: &DataDictionary) -> SessionResult<()> {
+fn validate_tag_value_for_type(tag: u32, value: &String, dd: &DataDictionary) -> SessionResult<()> {
     match dd.get_field_type(tag) {
         Some(fix_type) => {
             // Grouped by which Rust primitive the FIX spec's "Data Types" section (Vol 1)
