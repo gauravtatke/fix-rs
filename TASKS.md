@@ -175,15 +175,28 @@ references are the golden target the generator must reproduce (diffed by the fre
   resolved: per-version** (not a shared union) — preserves D3's invalid-value-unrepresentable per
   version; see the D11 enum-sharing note in the design log.
 
-- [ ] **3.4 — Standalone codegen binary skeleton (USER).**
-  A `cargo run` gen binary (xtask-style) that parses `FIX43.xml` → data model → emits committed
-  `.rs`. First goal: **regenerate `Logon` byte-identical to the 3.1 hand-write.** Wire the freshness
-  test (rerun generator, fail if committed output differs). Done when: generated `Logon` matches the
-  hand-written one and its tests pass.
+- [x] **3.4 — Codegen scaffold (workspace + skeleton). DONE (2026-09-27; plumbing by Claude).**
+  Cargo workspace (root `fix-rs` + `codegen` member, edition 2024; clippy lints hoisted to
+  `[workspace.lints]`). `codegen/src/main.rs`: `generate() -> Vec<(PathBuf, String)>` (pure core,
+  stub), `rustfmt()` wiring, `main` (writes), and the **freshness test** `committed_output_is_fresh`
+  (rerun generate → diff committed files → fail with "run `cargo run -p codegen` and commit").
+  `codegen/src/spec.rs`: roxmltree parse of the `<fields>` section into raw-data
+  `FixSpec/FieldDef/FieldValue` (ported from `build/code_generator.rs`, minus Handlebars / the buggy
+  f32 type map / the `ENVal_` prefix). **Emission = plain string-building + rustfmt** (not a template
+  engine, not `quote`). Run: `cargo run -p codegen`; check: `cargo test -p codegen`.
 
-- [ ] **3.5 — Generate all admin messages + their field enums (USER).**
-  Logon/Heartbeat/TestRequest/Logout/Reject/ResendRequest/SequenceReset via the binary. Done when:
-  each has typed accessors + `TryFrom`/`Into`, tests green, freshness test passes.
+- [ ] **3.5 — Emit `tags.rs` + `fields.rs` value enums (USER).** First real emitters; both work with
+  the current `<fields>`-only parser (no message parsing needed yet).
+    - [ ] **3.5a — `tags.rs`.** Every field → `pub const <NAME>: u32 = <tag>;`, **sorted by tag** for
+      a stable diff. Names via heck shouty-snake, matching the hand-written casing incl. acronyms
+      (`MDEntryPx`→`MD_ENTRY_PX`, `NoMDEntries`→`NO_MD_ENTRIES`). Done: `cargo run -p codegen`
+      regenerates `src/tags.rs`, freshness test green, engine still compiles.
+    - [ ] **3.5b — `fields.rs` enums.** Value-constrained fields → real enums (D3, per-version):
+      variant names from `FieldValue.description` (heck UpperCamelCase), `to_fix`/`from_fix` keyed on
+      the FIX type (`char` for CHAR, `i32` for INT — see EncryptMethod/Side/OrdType). Identifier
+      sanitization: Rust keywords → raw idents or rename, digit-leading descriptions → prefix. Done:
+      regenerated `messages/fix43/fields.rs` reproduces the hand-written EncryptMethod/Side/OrdType
+      (then all constrained fields), freshness green, engine compiles.
 
 - [~] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups).**
   DONE (seeded 2026-09-26, by Claude alongside 3.7): `FieldMap::add_group_instance` (append +
@@ -206,16 +219,29 @@ references are the golden target the generator must reproduce (diffed by the fre
   promote the shape into the real MarketData reference (hand-written `MarketDataSnapshotFullRefresh`
   with `Decimal` money fields) once D8/3.2 lands.
 
-- [ ] **3.8 — Generate groups + the app messages (USER).**
-  Group generation (nested facades, zero-copy views, auto count, nesting by recursion) in the binary;
-  generate `MarketDataRequest`/`MarketDataSnapshotFullRefresh` + `NewOrderSingle`/`ExecutionReport`.
-  Done when: generated group messages match the 3.7 reference shape, tests green.
+- [ ] **3.8 — Extend `spec::parse` to messages; emit admin message facades (USER).**
+    - [ ] **3.8a — Parse `<messages>`.** msg_type / msg_cat + each message's ordered fields + required
+      flags, resolving `<component>` references (the parser currently handles `<fields>` only).
+    - [ ] **3.8b — Emit `Logon`** (the old 3.4 "Logon byte-identical" first goal). Facade over
+      `Message`: named natural-type accessors (via the `convert` map + enums), `has_*`,
+      `TryFrom<Message>` (checks 35=A) + `From<_> for Message`, `message()`/`message_mut()`. Reproduce
+      the 3.1 hand-write. Done: generated `Logon` + its tests pass, freshness green.
+    - [ ] **3.8c — Emit remaining admin messages.** Heartbeat/TestRequest/Logout/Reject/
+      ResendRequest/SequenceReset. Done: each has typed accessors + `TryFrom`/`Into`, tests green.
 
-- [ ] **3.9 — Generate ALL FIX43 messages + fields (USER).**
-  Full dictionary; module organization (per message/category, not one file); leave a hook for
-  per-version feature-gating (single version now). Remove the old `build.rs`/`fields::*` codegen and
-  migrate its usages (e.g. `session_and_state.rs`). Done when: `build.rs` gone, everything compiles
-  on the new generated layer, freshness test green.
+- [ ] **3.9 — Groups + app messages + remove the old `build.rs` codegen (USER).**
+    - [ ] **3.9a — Groups + app messages.** Extend the parser to repeating groups (nested, via
+      component refs); emit the group facade in the **`c_indexed` shape** (closure builder,
+      `index`/`index_mut` panic-on-OOB, zero-copy, auto count, nesting by recursion) +
+      `MarketDataRequest`/`MarketDataSnapshotFullRefresh` + `NewOrderSingle`/`ExecutionReport`. Done:
+      generated group messages match the 3.7 shape, tests green.
+    - [ ] **3.9b — Remove `build.rs`.** Its only consumer is `core/message.rs:583-586`
+      (`BeginString/BodyLength/MsgType/CheckSum::field()` → tags 8/9/35/10). Swap those to
+      `crate::tags::` consts, drop `use crate::fields::*`, remove the `include!` from `lib.rs` and
+      `build = "build/main.rs"` from `Cargo.toml`, delete `build/`. Done: `build/` gone, engine
+      compiles on the generated layer, all tests + freshness green.
+    - [ ] **3.9c — Full dictionary + module org.** Emit all FIX43 messages; organize per
+      message/category (not one file); leave a per-version feature-gate hook (single version now).
 
 - [ ] **3.10 — Factory + Cracker (D6) + SampleApp migration (USER app code; Claude tests).**
   `MessageFactory` (msgType → typed message) + `MessageCracker`-style typed inbound dispatch wired
