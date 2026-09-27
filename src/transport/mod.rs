@@ -13,4 +13,4 @@ pub use registry::SessionMap;
 pub use timer::start_timer;
 
 /// Default bind IP for acceptor sockets.
-pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
+pub const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";

@@ -1,33 +1,25 @@
 #![allow(dead_code, unused_variables)]
 
-include!(concat!(env!("OUT_DIR"), "/mod.rs"));
+//! Demo binary: loads config, builds the session registry, and runs acceptors/initiators using
+//! the `fix_rs` engine library. `SampleApp` is the reference `Application` implementation.
 
-mod application;
-mod convert;
-mod messages;
-mod errors;
-mod transport;
-mod core;
 mod sample_app;
-mod session;
-mod tags;
 
-use crate::transport::sync::acceptor::IoAcceptor;
-use crate::transport::sync::initiator::IoInitiator;
-use crate::transport::{SOCKET_ACCEPT_HOST_IP, SessionMap};
 use crate::sample_app::SampleApp;
-use crate::session::{ConnectionType, SessionProperties};
+use fix_rs::session::{ConnectionType, SessionProperties};
+use fix_rs::transport::sync::acceptor::IoAcceptor;
+use fix_rs::transport::sync::initiator::IoInitiator;
+use fix_rs::transport::{SOCKET_ACCEPT_HOST_IP, SessionMap};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
-pub(crate) const FILE_PATH: &str = "resources/FIX43.xml";
-pub(crate) const FIX_CONFIG_PATH: &str = "src/FixCfg.toml";
+const FILE_PATH: &str = "resources/FIX43.xml";
+const FIX_CONFIG_PATH: &str = "src/FixCfg.toml";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let settings_str = std::fs::read_to_string(FIX_CONFIG_PATH).unwrap();
     let properties = SessionProperties::from_str(&settings_str).unwrap();
-    // log::info!("{:#?}", properties);
     // One shared map holds every session (both roles): the timer ticks all of them,
     // acceptors are looked up in it by inbound connections, and SessionMap::send routes
     // unsolicited/cross-session messages through it.
@@ -53,7 +45,7 @@ fn main() {
         })
         .collect::<HashSet<SocketAddr>>();
     log::info!("Created {} session(s)", session_map.len());
-    let timer_handle = crate::transport::start_timer(session_map.clone());
+    let timer_handle = fix_rs::transport::start_timer(session_map.clone());
     let mut start_handle = Vec::new();
     for addr in socket_accept_addrs {
         log::info!("Starting acceptor on {}", addr);

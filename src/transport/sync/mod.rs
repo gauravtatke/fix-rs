@@ -1,5 +1,5 @@
-pub(crate) mod acceptor;
+pub mod acceptor;
 pub(crate) mod connection;
 pub(crate) mod reader;
-pub(crate) mod initiator;
+pub mod initiator;
 pub(crate) mod responder;

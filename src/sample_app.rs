@@ -1,7 +1,7 @@
-use crate::application::Application;
-use crate::errors::{BusinessMsgReject, DonotSend, RejectLogon};
-use crate::core::message::Message;
-use crate::session::SessionId;
+use fix_rs::application::Application;
+use fix_rs::errors::{BusinessMsgReject, DonotSend, RejectLogon};
+use fix_rs::core::message::Message;
+use fix_rs::session::SessionId;
 
 pub struct SampleApp {
     // Monotonic counter for generating unique OrderID (37) / ExecID (17) values
