@@ -1,0 +1,1579 @@
+use getset::{CopyGetters, Getters, MutGetters};
+use indexmap::IndexMap;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
+use std::ops::{Index, IndexMut};
+use std::str::FromStr;
+
+use crate::core::dictionary::{DataDictionary, FixType, HEADER_ID};
+use crate::errors::{FieldError, SessionRejectError};
+use crate::fields::*;
+use crate::session::{SessionId, SessionIdBuilder};
+
+type SessionResult<T> = Result<T, SessionRejectError>;
+
+/*
+derive a macro which will create impl fns for each of the items in this enum
+ and then delete this comment
+ */
+#[derive(Debug)]
+pub enum Type {
+    Int(i64),
+    Length(u32),
+    TagNum(u32),
+    DayOfMonth(u32),
+    SeqNum(u64),
+    NumInGroup(u32),
+    Float(f64),
+    Price(f64),
+    PriceOffset(f64),
+    Amt(f64),
+    Percent(f64),
+    Qty(f64),
+    Char(char),
+    Bool(bool),
+    Str(String),
+    Currency(String),
+    Country(String),
+    Exchange(String),
+    LocalMktDate(String),
+    MonthYear(String),
+    MultiValueStr(String),
+    UtcDate(String),
+    UtcTimeOnly(String),
+    UtcTimestamp(String),
+}
+
+pub const SOH: char = '\u{01}';
+// pub const SOH: char = '|';
+
+#[derive(Debug, Default, Clone, CopyGetters, Getters)]
+pub struct StringField {
+    #[getset(get_copy = "pub")]
+    tag: u32,
+
+    #[getset(get = "pub")]
+    value: String,
+}
+
+impl StringField {
+    // `impl Into<String>` so callers can pass a `&str` (allocates once) or an owned
+    // `String` (moved in, zero-copy) without the to_string()+as_str() dance that
+    // otherwise allocates twice. Numbers stay explicit: `new(tag, n.to_string())`.
+    pub(crate) fn new(tag: u32, value: impl Into<String>) -> Self {
+        Self {
+            tag,
+            value: value.into(),
+        }
+    }
+}
+
+impl Display for StringField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}={}{}", self.tag, self.value, SOH)
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct FieldMap {
+    // Flat (tag -> value) fields belonging directly to this section (header, trailer, or a
+    // message body / one group instance). IndexMap keeps *insertion* order, which is what
+    // makes `Message::to_string()` round-trip a parsed message byte-for-byte when no
+    // explicit `field_order` below overrides it.
+    fields: IndexMap<u32, StringField>,
+    // Repeating groups nested under this FieldMap, keyed by the group's "NoXXX" count tag
+    // (e.g. tag 268 for MDEntries). Each Group owns its own Vec<FieldMap>, one per instance.
+    group: HashMap<u32, Group>,
+
+    // Dictionary-declared field order for *this* section (set via `set_field_order`), used
+    // to sort output when the spec cares about order (header's first 3 fields, and every
+    // repeating group's field order). Empty for sections where wire order is unconstrained.
+    field_order: Vec<u32>,
+}
+
+impl FieldMap {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn with_field_order(field_order: &[u32]) -> Self {
+        Self {
+            field_order: field_order.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    // Insert a pre-built field. Private: only the parser (which already holds a
+    // StringField) and the ergonomic `set_field` below use it — callers build fields
+    // via `set_field(tag, value)`.
+    fn insert_field(&mut self, field: StringField) {
+        self.fields.insert(field.tag(), field);
+    }
+
+    // Ergonomic setter for *building* a message/group: `set_field(tag, value)` with
+    // no explicit StringField. `value: impl Into<String>` takes a &str or an owned
+    // String (numbers stay explicit: `set_field(tag, n.to_string())`).
+    pub fn set_field(&mut self, tag: u32, value: impl Into<String>) {
+        self.insert_field(StringField::new(tag, value));
+    }
+
+    pub fn get_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
+        if let Some(field) = self.fields.get(&tag) {
+            return field.value.parse::<T>().map_err(|_| FieldError::InvalidFormat { tag });
+        }
+        Err(FieldError::TagNotFound { tag })
+    }
+
+    pub fn set_group(&mut self, tag: u32, value: u32, rep_grp_delimiter: u32) -> &mut Group {
+        self.set_field(tag, value.to_string());
+        let group =
+            self.group.entry(tag).or_insert_with(|| Group::new(rep_grp_delimiter, tag, value));
+        // create group instances and insert into group
+        for i in 0..value {
+            group.add_group(FieldMap::new());
+        }
+        group
+    }
+
+    pub fn get_group(&self, tag: u32) -> Option<&Group> {
+        self.group.get(&tag)
+    }
+
+    pub fn get_group_mut(&mut self, tag: u32) -> Option<&mut Group> {
+        self.group.get_mut(&tag)
+    }
+
+    /// Append a new empty instance to repeating group `count_tag` (creating the group with
+    /// delimiter `delim` if absent), keep the count field and `Group::value` in sync, and
+    /// return the new instance to fill. Lets a caller build a group incrementally without
+    /// managing the count itself — fixing the `set_group`/`add_group` desync footgun.
+    pub fn add_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
+        {
+            let group =
+                self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
+            group.add_group(FieldMap::new());
+            group.value = group.fields.len() as u32;
+        }
+        let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
+        self.set_field(count_tag, n.to_string());
+        self.group.get_mut(&count_tag).and_then(|g| g.fields.last_mut()).expect("just pushed")
+    }
+
+    /// Append a pre-built instance to repeating group `count_tag`, keeping the count in sync.
+    pub fn push_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
+        {
+            let group =
+                self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
+            group.add_group(instance);
+            group.value = group.fields.len() as u32;
+        }
+        let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
+        self.set_field(count_tag, n.to_string());
+    }
+
+    /// Borrowed iteration over the instances of repeating group `count_tag` (empty if absent).
+    pub fn group_instances(&self, count_tag: u32) -> impl Iterator<Item = &FieldMap> {
+        self.group.get(&count_tag).into_iter().flat_map(|g| g.fields.iter())
+    }
+
+    pub fn set_field_order(&mut self, f_order: &[u32]) {
+        self.field_order = f_order.to_vec();
+    }
+
+    pub fn iter(&self) -> FieldMapIter<'_> {
+        let mut map_iter = FieldMapIter::default();
+        map_iter.fieldmap_to_vec(self);
+        map_iter
+    }
+
+    /// Position of `tag` in this map's declared `field_order`, or `usize::MAX` if the tag
+    /// has no declared position (such fields sort last during serialization).
+    fn field_rank(&self, tag: u32) -> usize {
+        self.field_order.iter().position(|needle| *needle == tag).map_or(usize::MAX, |pos| pos)
+    }
+}
+
+impl Display for FieldMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = String::from_iter(self.iter().into_iter().map(|sfield| sfield.to_string()));
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct FieldMapIter<'a> {
+    vec_str_field: Vec<&'a StringField>,
+}
+
+impl<'a> FieldMapIter<'a> {
+    fn fieldmap_to_vec(&mut self, field_map: &'a FieldMap) {
+        let mut temp_vec: Vec<&StringField> = field_map.fields.values().collect();
+        if !field_map.field_order.is_empty() {
+            temp_vec.sort_by_cached_key(|&field| field_map.field_rank(field.tag()))
+        }
+        for str_field in temp_vec {
+            let tag = str_field.tag();
+            self.vec_str_field.push(str_field);
+            if let Some(grp) = field_map.get_group(tag) {
+                for grp_field_map in grp.fields.iter() {
+                    self.fieldmap_to_vec(grp_field_map);
+                }
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for FieldMapIter<'a> {
+    type Item = &'a StringField;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.vec_str_field.into_iter()
+    }
+}
+
+#[derive(Debug, Default, Clone, CopyGetters, Getters)]
+pub struct Group {
+    #[getset(get_copy)]
+    delim: u32,
+
+    #[getset(get_copy)]
+    tag: u32,
+
+    #[getset(get_copy)]
+    value: u32,
+
+    fields: Vec<FieldMap>,
+}
+
+impl Group {
+    pub fn new(delimiter: u32, tag: u32, value: u32) -> Self {
+        Self {
+            delim: delimiter,
+            tag,
+            value,
+            ..Default::default()
+        }
+    }
+
+    pub fn add_group(&mut self, grp: FieldMap) {
+        self.fields.push(grp);
+    }
+
+    pub fn size(&self) -> u32 {
+        self.fields.len() as u32
+    }
+
+    /// The group's instances as a slice — lets a typed layer read them by index/iteration
+    /// (e.g. `as_slice().get(i)` wrapped in a borrowed view facade; see `fix43::group_variants`).
+    pub fn as_slice(&self) -> &[FieldMap] {
+        &self.fields
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [FieldMap] {
+        &mut self.fields
+    }
+}
+
+impl Index<usize> for Group {
+    type Output = FieldMap;
+
+    fn index(&self, idx: usize) -> &Self::Output {
+        self.fields.index(idx)
+    }
+}
+
+impl IndexMut<usize> for Group {
+    fn index_mut(&mut self, idx: usize) -> &mut Self::Output {
+        self.fields.index_mut(idx)
+    }
+}
+
+#[derive(Debug, Default, Clone, MutGetters, Getters)]
+#[getset(get = "pub", get_mut = "pub")]
+pub struct Message {
+    header: FieldMap,
+    body: FieldMap,
+    trailer: FieldMap,
+}
+
+impl Message {
+    pub fn new() -> Self {
+        Self {
+            header: FieldMap::with_field_order(&[8, 9, 35]),
+            ..Default::default()
+        }
+    }
+
+    // Section-named field setters. The section is in the method name so a call site
+    // can never be ambiguous about where a field lives (header vs body), and they
+    // build the StringField themselves — `set_body_field(45, x)` instead of
+    // `set_body_field(StringField::new(45, x))`. `value: impl Into<String>` takes a
+    // &str or an owned String; numbers stay explicit (`set_body_field(45, n.to_string())`).
+    pub fn set_header_field(&mut self, tag: u32, value: impl Into<String>) {
+        self.header.set_field(tag, value);
+    }
+
+    pub fn set_body_field(&mut self, tag: u32, value: impl Into<String>) {
+        self.body.set_field(tag, value);
+    }
+
+    pub fn set_trailer_field(&mut self, tag: u32, value: impl Into<String>) {
+        self.trailer.set_field(tag, value);
+    }
+
+    pub fn get_header_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
+        self.header.get_field(tag)
+    }
+
+    pub fn get_body_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
+        self.body.get_field(tag)
+    }
+
+    pub fn get_trailer_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
+        self.trailer.get_field(tag)
+    }
+
+    fn add_group(&mut self, tag: u32, grp: Group) {
+        self.body.group.insert(tag, grp);
+    }
+
+    /// Append + fill a body repeating-group instance (see `FieldMap::add_group_instance`).
+    pub fn add_body_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
+        self.body.add_group_instance(count_tag, delim)
+    }
+
+    /// Append a pre-built body repeating-group instance.
+    pub fn push_body_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
+        self.body.push_group_instance(count_tag, delim, instance)
+    }
+
+    /// Borrowed iteration over a body repeating group's instances.
+    pub fn body_group_instances(&self, count_tag: u32) -> impl Iterator<Item = &FieldMap> {
+        self.body.group_instances(count_tag)
+    }
+
+    /// The body repeating group `count_tag`, for slice/index access to its instances.
+    pub fn body_group(&self, count_tag: u32) -> Option<&Group> {
+        self.body.get_group(count_tag)
+    }
+
+    pub fn body_group_mut(&mut self, count_tag: u32) -> Option<&mut Group> {
+        self.body.get_group_mut(count_tag)
+    }
+
+    fn calc_checksum(&self) -> u32 {
+        let mut byte_sum = 0u32;
+        for sfield in
+            self.header.iter().into_iter().chain(self.body.iter()).chain(self.trailer.iter())
+        {
+            if sfield.tag() != 10 {
+                for byt in sfield.to_string().as_bytes() {
+                    byte_sum += *byt as u32;
+                }
+            }
+        }
+        byte_sum % 256
+    }
+
+    pub fn set_checksum(&mut self) {
+        let checksum_str = format!("{:0>3}", self.calc_checksum());
+        self.set_trailer_field(10, &checksum_str);
+    }
+
+    fn calc_body_len(&self) -> usize {
+        self.header
+            .iter()
+            .into_iter()
+            .chain(self.body.iter())
+            .chain(self.trailer.iter())
+            .filter_map(|sfield| {
+                if sfield.tag() != 8 && sfield.tag() != 9 && sfield.tag() != 10 {
+                    Some(sfield.to_string().len())
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
+    pub fn set_body_len(&mut self) {
+        let body_len = self.calc_body_len();
+        self.set_header_field(9, body_len.to_string())
+    }
+
+    pub fn get_msg_type(&self) -> Result<String, FieldError> {
+        self.header.get_field::<String>(35)
+    }
+
+    pub fn set_sending_time(&mut self) {
+        let curr_time = chrono::Utc::now();
+        let sending_time = curr_time.format("%Y%m%d-%T%.3f").to_string();
+        self.set_header_field(52, &sending_time);
+    }
+
+    // Entry point for turning a raw wire string into a `Message`. Two passes:
+    // 1. Tokenize: split on SOH, split each "tag=value" chunk, push every field into a
+    //    VecDeque in wire order (a plain Vec would do for this pass alone, but VecDeque is
+    //    what the second pass needs — see `from_vec`).
+    // 2. Structure: `from_vec` walks that queue and sorts fields into header/body/trailer
+    //    (and nested groups) according to the dictionary.
+    pub fn from_str(s: &str, dd: &DataDictionary) -> SessionResult<Self> {
+        let mut vdeq: VecDeque<StringField> = VecDeque::with_capacity(16);
+        let mut cursor: usize = 0;
+        while cursor < s.len() {
+            let next_equals_index =
+                s[cursor..].find('=').ok_or_else(|| SessionRejectError::Other {
+                    msg: "Invalid message, could not parse".to_string(),
+                })?;
+            let tag_str = &s[cursor..cursor + next_equals_index];
+            let tag: u32 = match tag_str.parse::<u32>() {
+                Ok(t) => t,
+                Err(_) => {
+                    return Err(SessionRejectError::Other {
+                        msg: format!("Invalid tag: {}", tag_str),
+                    });
+                }
+            };
+            cursor += next_equals_index + 1; // now points at value start
+            let value_end_index = if dd.is_data_field(tag) {
+                // DATA field: its value is a fixed byte count and may legally contain SOH. FIX
+                // requires the length field to immediately precede the data field, so the length
+                // is just the previous token — read it from the back of the deque instead of
+                // computing/looking up its tag (89 vs tag-1). See
+                // session_context/qfj-data-field-parsing.md for why QFJ computes the tag instead.
+                let prev = vdeq.back().ok_or_else(|| SessionRejectError::Other {
+                    msg: format!("Data field {} has no preceding length field", tag),
+                })?;
+                let n = prev.value().parse::<usize>().map_err(|_| {
+                    SessionRejectError::IncorrectDataFormatForValue { tag: prev.tag() }
+                })?;
+                // A wrong/short/overrunning length could point past the buffer or off a SOH
+                // boundary — reject rather than panic on the slice below.
+                if cursor + n >= s.len() || s.as_bytes()[cursor + n] != SOH as u8 {
+                    return Err(SessionRejectError::Other {
+                        msg: format!("Invalid data field length for tag {}", tag),
+                    });
+                }
+                n
+            } else {
+                // Non-data field: value runs to the next SOH. Every field, including the last, must
+                // be SOH-terminated — without it there's no way to know where the next field starts
+                // — so a missing terminator is an invalid message.
+                s[cursor..].find(SOH).ok_or_else(|| SessionRejectError::Other {
+                    msg: format!("Field {} not terminated by SOH", tag),
+                })?
+            };
+            let value_str = &s[cursor..cursor + value_end_index];
+            if value_str.is_empty() {
+                return Err(SessionRejectError::TagSpecifiedWithoutValue { tag });
+            }
+            vdeq.push_back(StringField::new(tag, value_str));
+            cursor += value_end_index + 1; // skip next SOH
+        }
+        from_vec(vdeq, dd)
+    }
+
+    pub fn get_session_id(&self) -> SessionId {
+        let begin_str = self.header.get_field::<String>(8).unwrap();
+        let sender_comp = self.header.get_field::<String>(49).unwrap();
+        let target_comp = self.header.get_field::<String>(56).unwrap();
+        SessionIdBuilder::new(&begin_str, &sender_comp, &target_comp)
+            .sender_sub_id(self.header.get_field::<String>(50).ok().as_deref())
+            .sender_location_id(self.header.get_field::<String>(142).ok().as_deref())
+            .target_sub_id(self.header.get_field::<String>(57).ok().as_deref())
+            .target_location_id(self.header.get_field::<String>(143).ok().as_deref())
+            .build()
+    }
+
+    pub fn get_reverse_session_id(&self) -> SessionId {
+        // sender values from message is put into target & vice-versa
+        let begin_str = self.header.get_field::<String>(8).unwrap();
+        let sender_comp = self.header.get_field::<String>(49).unwrap();
+        let target_comp = self.header.get_field::<String>(56).unwrap();
+        SessionIdBuilder::new(&begin_str, &target_comp, &sender_comp)
+            .sender_sub_id(self.header.get_field::<String>(57).ok().as_deref())
+            .sender_location_id(self.header.get_field::<String>(143).ok().as_deref())
+            .target_sub_id(self.header.get_field::<String>(50).ok().as_deref())
+            .target_location_id(self.header.get_field::<String>(142).ok().as_deref())
+            .build()
+    }
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}{}", self.header(), self.body, self.trailer())
+    }
+}
+
+// Pulls a single field's value straight out of the raw wire string, without doing a full
+// parse — used by get_session_id/get_reverse_session_id to identify which session a raw
+// message belongs to *before* we know which DataDictionary (and therefore which
+// `Message::from_str`) to parse it with.
+//
+// Searching for a bare "9=" would false-match the "9" inside "49=..." or "109=...", so
+// every tag except 8 is searched for as SOH + tag + "=" to guarantee we're matching a
+// tag boundary, not a substring of some other tag/value. Tag 8 (BeginString) is exempt
+// because it is always the literal first bytes of the message, with no leading SOH to
+// require.
+fn extract_field_value<'a>(tag: &str, s: &'a str) -> Option<&'a str> {
+    let pat_prefix = match tag {
+        "8" => "",
+        _ => std::str::from_utf8(&[SOH as u8]).unwrap(),
+    };
+    let pat = format!("{}{}=", pat_prefix, tag);
+    if let Some(indx) = s.find(pat.as_str()) {
+        let field_start_pos = indx + pat_prefix.len();
+        // ignore the first SOH prefix, if any, and start from tag
+        let end_pos = s[field_start_pos..].find(SOH).unwrap();
+        let start_pos = s[field_start_pos..].find('=').unwrap();
+        return Some(&s[field_start_pos + start_pos + 1..field_start_pos + end_pos]);
+    }
+    None
+}
+
+pub(crate) fn session_id_from_raw(s: &str) -> SessionId {
+    let begin_str = extract_field_value("8", s).unwrap();
+    let sender_comp = extract_field_value("49", s).unwrap();
+    let target_comp = extract_field_value("56", s).unwrap();
+    SessionIdBuilder::new(begin_str, sender_comp, target_comp)
+        .sender_sub_id(extract_field_value("50", s))
+        .sender_location_id(extract_field_value("142", s))
+        .target_sub_id(extract_field_value("57", s))
+        .target_location_id(extract_field_value("143", s))
+        .build()
+}
+
+pub(crate) fn reverse_session_id_from_raw(s: &str) -> SessionId {
+    // sender values from message is put into target & vice-versa
+    let begin_str = extract_field_value("8", s).unwrap();
+    let sender_comp = extract_field_value("56", s).unwrap(); // incoming target
+    let target_comp = extract_field_value("49", s).unwrap(); // incoming sender
+    SessionIdBuilder::new(begin_str, sender_comp, target_comp)
+        .sender_sub_id(extract_field_value("57", s))
+        .sender_location_id(extract_field_value("143", s))
+        .target_sub_id(extract_field_value("50", s))
+        .target_location_id(extract_field_value("142", s))
+        .build()
+}
+
+// Pulls MsgSeqNum(34) straight out of the raw wire string, without a full parse.
+// Used to fill a Reject's RefSeqNum(45) when parsing failed (so no `Message`
+// exists) — returns `None` if the tag is absent (e.g. a message too malformed to
+// contain it). Mirrors session_id_from_raw's use of extract_field_value.
+pub(crate) fn seq_num_from_raw(s: &str) -> Option<&str> {
+    extract_field_value("34", s)
+}
+
+// Consumes the flat, wire-ordered queue of fields into a structured `Message`, in the
+// only order a FIX message can actually appear on the wire: header, then body, then
+// trailer. `v` is shared, mutable state across all three calls — each `parse_*` function
+// pops fields off the *front* of the queue for as long as they belong to its section,
+// then leaves whatever's left (starting with the first field it doesn't recognize) for
+// the next call. That's why they take `&mut VecDeque` rather than returning a remainder.
+fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<Message> {
+    let mut message = Message::new();
+    // Too few fields to possibly hold BeginString/BodyLength/MsgType as v[0]/v[1]/v[2] —
+    // bail before any indexing below, which would otherwise panic on out-of-bounds access
+    // for a short/malformed message instead of rejecting it cleanly.
+    if v.len() < 3
+        || (
+            // validate the first 3 fields and the last one
+            v[0].tag() != BeginString::field()
+                || v[1].tag() != BodyLength::field()
+                || v[2].tag() != MsgType::field()
+                || v[v.len() - 1].tag() != CheckSum::field()
+        )
+    {
+        return Err(SessionRejectError::Other {
+            msg: "field 8|9|35 are not correct".to_string(),
+        });
+    }
+    let body_len_field = &v[1];
+    let expected_body_len =
+        body_len_field.value().parse::<u32>().map_err(|_| SessionRejectError::InvalidBodyLength)?;
+    // Body length excludes BeginString(8)/BodyLength(9)/CheckSum(10) — same rule as
+    // Message::calc_body_len, just computed over the raw incoming fields instead of an
+    // already-built Message's header/body/trailer.
+    let actual_body_len: usize = v
+        .iter()
+        .filter(|sfield| sfield.tag() != 8 && sfield.tag() != 9 && sfield.tag() != 10)
+        .map(|sfield| sfield.to_string().len())
+        .sum();
+    if actual_body_len as u32 != expected_body_len {
+        return Err(SessionRejectError::InvalidBodyLength);
+    }
+    let expected_checksum =
+        v[v.len() - 1].value().parse::<u32>().map_err(|_| SessionRejectError::InvalidChecksum)?;
+    let actual_total_bytes_sum: u32 = v
+        .iter()
+        .filter(|sfield| sfield.tag() != 10)
+        .flat_map(|sfield| sfield.to_string().into_bytes())
+        .map(|b| b as u32)
+        .sum();
+    let actual_check_sum = actual_total_bytes_sum % 256;
+    if actual_check_sum != expected_checksum {
+        return Err(SessionRejectError::InvalidChecksum);
+    }
+    parse_header(&mut v, message.header_mut(), dd)?;
+    validate_required_tag_missing(HEADER_ID, message.header(), dd)?;
+    parse_body(&mut v, &mut message, dd)?;
+    validate_required_tag_missing(&message.get_msg_type().unwrap(), message.body(), dd)?;
+    parse_trailer(&mut v, message.trailer_mut(), dd)?;
+    // One pass over every field in the fully-built message — header, body, trailer, and
+    // every group instance at any nesting depth (FieldMap::iter() already recurses into
+    // groups) — checking each field's value against its declared type/enum-values. Kept
+    // as a single post-parse sweep rather than interleaved into parse_header/parse_body/
+    // parse_group: this way there's exactly one DataDictionary in scope (the true
+    // top-level one), so no need to thread a second dictionary reference through group
+    // recursion just for these checks.
+    validate_field_values(&message, dd)?;
+    Ok(message)
+}
+
+// Parses one repeating group (e.g. `268=2` NoMDEntries followed by two MDEntry
+// instances) starting right after its count field `fld` (268=2) has already been popped
+// by the caller. `fld.tag()` is the group's count tag; `fld.value()` is the declared
+// number of instances (`declared_count`) — NOT yet verified against how many instances
+// actually show up, that's what this function checks.
+//
+// Every group has its own delimiter tag: the first field of each instance (e.g. tag 269,
+// MDEntryType, for NoMDEntries) — seeing that tag again is how we know a new instance
+// has started, since groups aren't wrapped in any explicit begin/end marker on the wire.
+fn parse_group(
+    v: &mut VecDeque<StringField>,
+    msg_type: &str,
+    fld: &StringField,
+    fmap: &mut FieldMap,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    let rg = dd
+        .get_msg_group(msg_type, fld.tag())
+        .ok_or_else(|| SessionRejectError::TagNotDefinedForMsgType { tag: fld.tag() })?;
+    // Groups can nest (a group whose instances themselves contain a group), so each group
+    // gets its own little DataDictionary scoped to just its own fields/sub-groups.
+    let rg_dd = rg.data_dictionary();
+    // The dictionary-declared field order *within one instance* of this group — used both
+    // to enforce "fields inside a group instance must appear in declared order" below, and
+    // (via `set_field_order`) to sort each instance back into that order on output.
+    let field_order = rg_dd.get_ordered_fields();
+    let group_count_tag = fld.tag();
+    let declared_count = match fld.value().parse::<u32>() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(SessionRejectError::IncorrectDataFormatForValue {
+                tag: group_count_tag,
+            });
+        }
+    };
+    let delimiter = rg.delimiter();
+    // Pre-allocates `declared_count` empty FieldMap slots up front; the loop below fills
+    // them in by index as instances are recognized on the wire.
+    let group = fmap.set_group(fld.tag(), declared_count, delimiter);
+    // `actual_count`: number of group instances started so far, bumped each time the
+    // delimiter tag reappears. `0` means "no instance started yet" — a real, in-range
+    // usize value, since this counts instances rather than indexing into `group[..]`
+    // directly (indexing uses `actual_count - 1`, only reached after the `actual_count
+    // == 0` guards below have already ruled out "no instance yet").
+    let mut actual_count: usize = 0;
+    // `previous_offset`: 1-based rank (declared `field_order` position + 1) of the last
+    // field seen *within the current instance*; reset to `0` (nothing seen yet) each time
+    // a new instance starts. The `+1` shift means a real rank can never collide with the
+    // "nothing seen yet" value, so plain `usize` works here without needing `Option`.
+    // Used to detect a field appearing out of its declared order inside one instance.
+    let mut previous_offset: usize = 0;
+    // Consume fields off the shared queue one at a time. This loop doesn't know in advance
+    // how many fields belong to the group overall (only how many *instances* are
+    // declared) — it keeps going until it pops a field that isn't part of this group at
+    // all, at which point it must push that field back (see the final `else` below) so
+    // whichever caller invoked us (parse_header/parse_body/an outer parse_group) can
+    // process it instead.
+    while let Some(next_field) = v.pop_front() {
+        if next_field.tag() == delimiter {
+            // Start of a new instance.
+            actual_count += 1;
+            if actual_count > declared_count as usize {
+                // We've seen more instances than the count field declared.
+                // incorrect NumInGroups
+                return Err(SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup {
+                    tag: group_count_tag,
+                });
+            }
+            // resetting previous offset
+            previous_offset = 0;
+            let group_instance = &mut group[actual_count - 1];
+            group_instance.set_field_order(&field_order);
+            if rg_dd.is_msg_group(msg_type, next_field.tag()) {
+                // The delimiter field itself starts a nested group (rare, but structurally
+                // possible) — recurse into it instead of just storing it as a plain field.
+                parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
+            } else {
+                group_instance.insert_field(next_field);
+            }
+        } else if rg_dd.is_msg_group(msg_type, next_field.tag()) {
+            // A nested group's count field, appearing partway through the current instance.
+            if actual_count == 0 {
+                // delimiter not found but other tag is encountered
+                return Err(SessionRejectError::RequiredTagMissing { tag: delimiter });
+            }
+            let group_instance = &mut group[actual_count - 1];
+            parse_group(v, msg_type, &next_field, group_instance, rg_dd)?;
+        } else if rg_dd.is_msg_field(msg_type, next_field.tag()) {
+            // An ordinary (non-delimiter, non-group) field belonging to the current instance.
+            // Deliberately not calling validate_tag_for_msgtype here (or in the delimiter/
+            // nested-group branches above): this `else if` condition already *is* that
+            // check — `rg_dd.is_msg_field(...)` just evaluated to true to reach this
+            // branch, so re-validating membership here would only ever hit the Ok(())
+            // path; the tag_not_defined_for_msg/undefined_tag_err branches are provably
+            // unreachable. Same reasoning covers the delimiter branch above: the
+            // delimiter tag is always the group's own first declared field (that's how
+            // `rg.delimiter()` is derived from the XML), so it's unconditionally a member
+            // too. The one place a field genuinely hasn't been validated yet by anything
+            // is the final `else` below — and that's exactly why it doesn't try to
+            // validate it itself, just hands it back to the caller (parse_header/
+            // parse_body/an outer parse_group) to check in its own context instead.
+            if actual_count == 0 {
+                // means first field not found i.e. delimiter
+                return Err(SessionRejectError::RequiredTagMissing { tag: delimiter });
+            }
+            // verify the order of fields, 1-based rank
+            let offset = field_order.iter().position(|f| *f == next_field.tag()).unwrap() + 1;
+            if offset < previous_offset {
+                // in groups, fields have an order. if a next_field (under-process) ranks is less than last offset
+                // means the field is out of order. for e.g. if the order [W, Z] and we have already gotten
+                // Z (previous_offset = 2), and then we get W whose offset/rank is 1 in order then its out of order
+                return Err(SessionRejectError::RepeatingGroupsOutOfOrder {
+                    tag: next_field.tag(),
+                });
+            }
+            let group_instance = &mut group[actual_count - 1];
+            group_instance.insert_field(next_field);
+            previous_offset = offset;
+        } else {
+            // This field belongs to whatever comes after the group (the rest of the body, or
+            // the trailer) — not part of this group at all. Put it back and stop; the caller
+            // that invoked parse_group resumes consuming the queue from here.
+            // its not a group field, push back and come out
+            v.push_front(next_field);
+            break;
+        }
+    }
+    // Now that we've stopped (either the queue ran dry, or we hit a non-group field),
+    // confirm the number of instances we actually built matches what was declared —
+    // catches a declared count that's too *high* (too-low was already caught above).
+    if actual_count != declared_count as usize {
+        // means actual repeating groups are less then declared count
+        return Err(SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup {
+            tag: group_count_tag,
+        });
+    }
+    // at here, the group's parsing is complete, check if any required tag is missing for each instance
+    for count in 0..declared_count as usize {
+        let group_instance = &group[count];
+        validate_required_tag_missing(msg_type, group_instance, rg_dd)?
+    }
+    Ok(())
+}
+
+// Consumes header fields from the front of the queue until it sees the first field that
+// *isn't* a header field, at which point it pushes that field back (see `from_vec`'s
+// comment on this hand-off pattern) and returns — leaving the rest of the queue for
+// `parse_body`.
+fn parse_header(
+    v: &mut VecDeque<StringField>,
+    header: &mut FieldMap,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    // Spec rule: BeginString(8), BodyLength(9), MsgType(35) must be the literal first three
+    // fields of every message, in this order — already checked in from_vec (which also
+    // needs it to safely index into the first-three/last fields for body-length/checksum
+    // verification, so it runs before this function is even called).
+    while let Some(fld) = v.pop_front() {
+        if !dd.is_header_field(fld.tag()) {
+            // start of body
+            v.push_front(fld);
+            return Ok(());
+        } else if dd.is_msg_group(HEADER_ID, fld.tag()) {
+            // The header's own repeating group (NoHops) — HEADER_ID is used here as the
+            // "message type" so parse_group can look group info up in the header's own section
+            // of the dictionary rather than a real message type's.
+            validate_tag_for_duplicacy(fld.tag(), header)?;
+            parse_group(v, HEADER_ID, &fld, header, dd)?;
+        } else {
+            validate_tag_for_duplicacy(fld.tag(), header)?;
+            header.insert_field(fld);
+        }
+    }
+    Ok(())
+}
+
+// Consumes body fields (and body-level repeating groups) until it sees the first
+// trailer field, then pushes that field back and returns — same hand-off pattern as
+// parse_header, this time at the body/trailer boundary.
+fn parse_body(
+    v: &mut VecDeque<StringField>,
+    msg: &mut Message,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    // MsgType (35) was already parsed into the header by parse_header; read it back out to
+    // know which message-type-specific dictionary rules apply to everything below.
+    let msg_type = match msg.get_msg_type() {
+        Ok(s) => s,
+        Err(_) => return Err(SessionRejectError::RequiredTagMissing { tag: 35 }),
+    };
+    // first check for a valid msgtype
+    validate_known_msg_type(&msg_type, dd)?;
+    while let Some(fld) = v.pop_front() {
+        validate_body_field(fld.tag(), dd)?;
+        if dd.is_trailer_field(fld.tag()) {
+            // Normal, expected end-of-body signal: hand the trailer field back to parse_trailer.
+            v.push_front(fld);
+            return Ok(());
+        }
+        if dd.is_msg_group(msg_type.as_str(), fld.tag()) {
+            validate_tag_for_duplicacy(fld.tag(), msg.body())?;
+            parse_group(v, &msg_type, &fld, &mut msg.body, dd)?;
+        } else {
+            validate_tag_for_msgtype(fld.tag(), &msg_type, dd)?;
+            validate_tag_for_duplicacy(fld.tag(), msg.body())?;
+            msg.body_mut().insert_field(fld);
+        }
+    }
+    Ok(())
+}
+
+// Consumes everything left in the queue as trailer fields. Unlike parse_header/
+// parse_body, there's no "next section" to hand off to — the trailer is always last —
+// so any field here that *isn't* a trailer field is simply invalid, not a hand-off
+// signal.
+fn parse_trailer(
+    v: &mut VecDeque<StringField>,
+    trailer: &mut FieldMap,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    while let Some(fld) = v.pop_front() {
+        validate_trailer_field(fld.tag(), dd)?;
+        validate_tag_for_duplicacy(fld.tag(), trailer)?;
+        trailer.insert_field(fld);
+    }
+    Ok(())
+}
+
+// Post-parse sweep over every field in the message — header, body, trailer, and every group
+// instance at any depth (FieldMap::iter recurses) — running two per-value checks on each:
+// its value parses as the tag's declared type, and (if the tag is an enum) its value is in
+// the allowed set. Emits IncorrectDataFormatForValue / ValueOutOfRange.
+fn validate_field_values(message: &Message, dd: &DataDictionary) -> SessionResult<()> {
+    for field in message
+        .header()
+        .iter()
+        .into_iter()
+        .chain(message.body().iter())
+        .chain(message.trailer().iter())
+    {
+        validate_tag_value_for_type(field.tag(), field.value(), dd)?;
+        validate_tag_for_value_range(field.tag(), field.value(), dd)?;
+    }
+    Ok(())
+}
+
+// Is `tag` allowed to appear in a message of type `msg_type`? Ok if it's one of that message
+// type's declared fields. Otherwise distinguishes "known tag, just not for this message type"
+// (TagNotDefinedForMsgType, 373=2 — the field_type lookup succeeds) from "not a tag the
+// dictionary knows at all" (InvalidTag, 373=0). The latter uses InvalidTag rather than the
+// near-synonymous UndefinedTag (373=3) to match FIX 4.3 Vol 2 §14a, which prescribes reason 0
+// ("Invalid tag number") for a tag not defined in the specification; see the UndefinedTag
+// variant's note in fix_errors.rs.
+fn validate_tag_for_msgtype(tag: u32, msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
+    if dd.is_msg_field(msg_type, tag) {
+        return Ok(());
+    } else if dd.get_field_type(tag).is_some() {
+        // this field exist, since the field_type is defined. But may be not for this message type
+        return Err(SessionRejectError::TagNotDefinedForMsgType { tag });
+    }
+    Err(SessionRejectError::InvalidTag { tag })
+}
+
+// Is the value of MsgType(35) a message type the dictionary defines? -> InvalidMessageType
+// (373=11). Delegates to the dictionary's own membership predicate so the "what counts as a
+// valid message type" knowledge lives in one place. Runs early in parse_body, before the
+// body-field loop, so an unknown type isn't first mislabelled as TagNotDefinedForMsgType.
+fn validate_known_msg_type(msg_type: &str, dd: &DataDictionary) -> SessionResult<()> {
+    if dd.is_valid_msg_type(msg_type) {
+        Ok(())
+    } else {
+        Err(SessionRejectError::InvalidMessageType)
+    }
+}
+
+// Rejects a non-group tag that already appears in this section -> TagAppearsMoreThanOnce
+// (373=13). Must run *before* the field is inserted: FieldMap stores flat fields in an
+// IndexMap, whose `insert` silently overwrites a duplicate, so a duplicate can only be caught
+// at insert time — a post-parse sweep (unlike validate_field_values) would already see the
+// collapsed single entry. Only called from the header/body top-level loops, not inside a group
+// instance, where a repeating delimiter tag is expected and handled by parse_group.
+fn validate_tag_for_duplicacy(tag: u32, field_map: &FieldMap) -> SessionResult<()> {
+    // A repeating-group count tag also lands in `fields` (set_group calls set_field), so this
+    // one check covers both plain fields and a duplicated group count tag — no separate
+    // `field_map.group` lookup needed.
+    if field_map.fields.contains_key(&tag) {
+        return Err(SessionRejectError::TagAppearsMoreThanOnce { tag });
+    }
+    Ok(())
+}
+
+// A header field appearing after the body has started is an ordering violation -> the body has
+// already consumed every header field in parse_header, so this is not a hand-off signal (that's
+// the trailer case) but a genuine out-of-order field. -> TagSpecifiedOutOfOrder (373=14).
+fn validate_body_field(tag: u32, dd: &DataDictionary) -> SessionResult<()> {
+    if dd.is_header_field(tag) {
+        return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
+    }
+    Ok(())
+}
+
+// The trailer is the last section, so any field here that isn't a declared trailer field is
+// out of order (there's no next section to hand it off to). -> TagSpecifiedOutOfOrder (373=14).
+fn validate_trailer_field(tag: u32, dd: &DataDictionary) -> SessionResult<()> {
+    if !dd.is_trailer_field(tag) {
+        return Err(SessionRejectError::TagSpecifiedOutOfOrder { tag });
+    }
+    Ok(())
+}
+
+// Enum-membership check: if `tag` declares a set of allowed values in the dictionary, is
+// `value` one of them? -> ValueOutOfRange on a miss. Tags with no declared value set are
+// unconstrained (any value is Ok).
+fn validate_tag_for_value_range(
+    tag: u32,
+    value: &String,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    match dd.get_field_values(tag) {
+        Some(value_set) => {
+            if value_set.contains(value) {
+                return Ok(());
+            }
+            Err(SessionRejectError::ValueOutOfRange { tag })
+        }
+        None => Ok(()),
+    }
+}
+
+// Type-format check: does `value` parse as the tag's declared FIX data type? Numeric families
+// must parse as i64/f64, Char must be a single char, Boolean must be exactly "Y"/"N"; the
+// string-shaped categories are accepted as-is (their sub-grammars aren't validated here).
+// -> IncorrectDataFormatForValue on a bad parse.
+fn validate_tag_value_for_type(tag: u32, value: &String, dd: &DataDictionary) -> SessionResult<()> {
+    match dd.get_field_type(tag) {
+        Some(fix_type) => {
+            // Grouped by which Rust primitive the FIX spec's "Data Types" section (Vol 1)
+            // says each category is built from, not by FIX category name — several
+            // categories share the same underlying parse rule.
+            let parsed_correctly = match fix_type {
+                // "int field (see definition of int above)" for all four of these.
+                FixType::Int
+                | FixType::Length
+                | FixType::NumInGroup
+                | FixType::Seqnum
+                | FixType::Tagnum => value.parse::<i64>().is_ok(),
+                // "float field (see definition of float above)" for all five of these.
+                // f64, not f32: spec requires accommodating up to 15 significant digits,
+                // which f32 (~7 significant decimal digits) can't reliably hold.
+                FixType::Float
+                | FixType::Amt
+                | FixType::Percentage
+                | FixType::Price
+                | FixType::PriceOffset
+                | FixType::Qty => value.parse::<f64>().is_ok(),
+                FixType::Char => value.chars().count() == 1,
+                // Boolean is a char restricted to exactly 'Y'/'N' per the spec — not
+                // Rust's bool parsing, which accepts "true"/"false", neither valid here.
+                FixType::Boolean => value == "Y" || value == "N",
+                // String-shaped categories (each has its own date/ISO-code sub-grammar,
+                // e.g. UtcTimestamp's YYYYMMDD-HH:MM:SS[.sss]) — not validated here, out
+                // of scope for this pass per TASKS.md's "numeric/Boolean, etc." wording.
+                FixType::Data
+                | FixType::Str
+                | FixType::Country
+                | FixType::Currency
+                | FixType::Exchange
+                | FixType::LocalMktDate
+                | FixType::MonthYear
+                | FixType::MultipleValueString
+                | FixType::UtcDate
+                | FixType::UtcTimeOnly
+                | FixType::UtcTimestamp
+                | FixType::Unknown => true,
+            };
+            if parsed_correctly {
+                Ok(())
+            } else {
+                Err(SessionRejectError::IncorrectDataFormatForValue { tag })
+            }
+        }
+        // Same as the earlier tag-membership check: by the time this runs, the tag's
+        // membership has already been validated upstream, so get_field_type returning
+        // None here shouldn't actually be reachable in practice.
+        None => Err(SessionRejectError::UndefinedTag { tag }),
+    }
+}
+
+// Are all of `msg_type`'s required tags present in `field_map`? -> RequiredTagMissing on the
+// first gap. Called once per section against the relevant "message type" key: the real msg
+// type for the body, HEADER_ID for the header, and the group's own type for each group
+// instance (so it doubles as the per-instance required-field check inside parse_group).
+fn validate_required_tag_missing(
+    msg_type: &str,
+    field_map: &FieldMap,
+    dd: &DataDictionary,
+) -> SessionResult<()> {
+    let required_fields = dd.get_msg_required_field(msg_type);
+    match required_fields {
+        Some(req_fields) => {
+            let current_fields: Vec<u32> =
+                field_map.iter().into_iter().map(|s: &StringField| s.tag()).collect();
+            for f in req_fields.iter() {
+                if !current_fields.contains(f) {
+                    return Err(SessionRejectError::RequiredTagMissing { tag: *f });
+                }
+            }
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod message_test {
+    use super::*;
+    #[cfg(test)]
+    use crate::core::dictionary::*;
+    use crate::errors::SessionRejectError;
+    use assert_matches::*;
+    use lazy_static::*;
+
+    const MSG_STR: &str = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004|";
+    lazy_static! {
+        static ref DD: DataDictionary = DataDictionary::from_xml("resources/FIX43.xml");
+    }
+
+    fn soh_replaced_str(s: &str) -> String {
+        let mut buff = [0u8; 1];
+        s.replace('|', SOH.encode_utf8(&mut buff))
+    }
+
+    #[test]
+    fn test_seq_num_from_raw_extracts_msgseqnum() {
+        // Pulls MsgSeqNum(34) from a raw string without a full parse. The "9" in
+        // "49=..." must not false-match tag 34's neighbourhood.
+        let raw = soh_replaced_str(MSG_STR);
+        assert_eq!(seq_num_from_raw(&raw), Some("0"));
+    }
+
+    #[test]
+    fn test_seq_num_from_raw_absent_returns_none() {
+        // A (malformed) message with no tag 34 at all.
+        let raw = soh_replaced_str("8=FIX.4.3|35=A|49=BANZAI|56=FIXIMULATOR|10=000|");
+        assert_eq!(seq_num_from_raw(&raw), None);
+    }
+
+    #[test]
+    fn msg_test_simple_no_group() {
+        let msg = Message::from_str(&soh_replaced_str(MSG_STR), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "A");
+        assert_eq!(msg.get_header_field::<String>(8).unwrap(), "FIX.4.3");
+    }
+
+    #[test]
+    fn msg_test_with_header_group() {
+        // header having a group, verify that its parsed
+        // header with NoHops repeating group
+        let msg_with_header: &str = "8=FIX.4.3|9=124|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|627=1|628=hopcompid|629=20221006-08:43:36.522|630=0|98=0|108=30|10=244|";
+        let msg = Message::from_str(&soh_replaced_str(msg_with_header), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert!(msg.header().get_group(627).is_some());
+        let header_group = msg.header().get_group(627).unwrap();
+        assert_eq!(header_group.delim(), 628);
+        assert_eq!(header_group.size(), 1);
+        assert_eq!(header_group[0].get_field::<String>(628).unwrap(), "hopcompid");
+        assert_eq!(header_group[0].get_field::<String>(629).unwrap(), "20221006-08:43:36.522");
+        assert_eq!(header_group[0].get_field::<u32>(630).unwrap(), 0);
+    }
+
+    #[test]
+    fn msg_test_with_body_group() {
+        // message body having groups
+        let msg_body_with_repeating_group = "8=FIX.4.4|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=013|";
+        let msg = Message::from_str(&soh_replaced_str(msg_body_with_repeating_group), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "W");
+        assert!(msg.body().get_group(268).is_some());
+        let md_entries_grp = msg.body().get_group(268).unwrap();
+        assert_eq!(md_entries_grp.delim(), 269);
+        assert_eq!(md_entries_grp.size(), 2);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(269).unwrap(), 0);
+        assert_eq!(md_entries_grp[0].get_field::<f32>(270).unwrap(), 8490.07);
+        assert_eq!(md_entries_grp[0].get_field::<u32>(271).unwrap(), 10);
+
+        assert_eq!(md_entries_grp[1].get_field::<u32>(269).unwrap(), 1);
+        assert_eq!(md_entries_grp[1].get_field::<f32>(270).unwrap(), 8519.57);
+        assert_eq!(md_entries_grp[1].get_field::<u32>(271).unwrap(), 20);
+    }
+
+    #[test]
+    fn msg_test_with_group_and_subgroups() {
+        // body having repeating groups having subgroups
+        let new_order_list = "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222|";
+        let msg = Message::from_str(&soh_replaced_str(new_order_list), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_msg_type().unwrap(), "E");
+        assert!(msg.body().get_group(73).is_some());
+        let no_orders_grp = msg.body().get_group(73).unwrap();
+        assert_eq!(no_orders_grp.delim(), 11);
+        assert_eq!(no_orders_grp.size(), 2);
+        assert_eq!(no_orders_grp[0].get_field::<String>(11).unwrap(), "ClientOrderId1");
+        assert_eq!(no_orders_grp[0].get_field::<u32>(67).unwrap(), 1);
+
+        let no_alloc_subgrp = no_orders_grp[0].get_group(78);
+        assert!(no_alloc_subgrp.is_some());
+        let no_alloc_subgrp = no_alloc_subgrp.unwrap();
+        assert_eq!(no_alloc_subgrp.size(), 2);
+        assert_eq!(no_alloc_subgrp[0].get_field::<String>(79).unwrap(), "AllocAct11");
+        assert_eq!(no_alloc_subgrp[0].get_field::<u32>(80).unwrap(), 10);
+
+        assert_eq!(no_alloc_subgrp[1].get_field::<String>(79).unwrap(), "AllocAct12");
+        assert_eq!(no_alloc_subgrp[1].get_field::<u32>(80).unwrap(), 20);
+
+        assert_eq!(no_orders_grp[1].get_field::<String>(11).unwrap(), "ClientOrderId2");
+        assert_eq!(no_orders_grp[1].get_field::<u32>(67).unwrap(), 2);
+
+        let no_alloc_subgrp2 = no_orders_grp[1].get_group(78);
+        assert!(no_alloc_subgrp2.is_some());
+        let no_alloc_subgrp2 = no_alloc_subgrp2.unwrap();
+        assert_eq!(no_alloc_subgrp2.size(), 1);
+        assert_eq!(no_alloc_subgrp2[0].get_field::<String>(79).unwrap(), "AllocAct21");
+        assert_eq!(no_alloc_subgrp2[0].get_field::<u32>(80).unwrap(), 30);
+    }
+
+    fn assert_round_trip(fixture: &str) {
+        // wire format always ends with an SOH-terminated checksum field; a couple of the
+        // fixtures above omit the trailing delimiter, so normalize before comparing.
+        let mut expected = soh_replaced_str(fixture);
+        if !expected.ends_with(SOH) {
+            expected.push(SOH);
+        }
+        let msg = Message::from_str(&expected, &DD);
+        assert!(msg.is_ok());
+        assert_eq!(msg.unwrap().to_string(), expected);
+    }
+
+    #[test]
+    fn msg_test_round_trip_no_group() {
+        assert_round_trip(MSG_STR);
+    }
+
+    #[test]
+    fn msg_test_round_trip_header_group() {
+        assert_round_trip(
+            "8=FIX.4.3|9=124|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|627=1|628=hopcompid|629=20221006-08:43:36.522|630=0|98=0|108=30|10=244|",
+        );
+    }
+
+    #[test]
+    fn msg_test_round_trip_body_group() {
+        assert_round_trip(
+            "8=FIX.4.4|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=013|",
+        );
+    }
+
+    #[test]
+    fn msg_test_round_trip_group_and_subgroups() {
+        assert_round_trip(
+            "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222",
+        );
+    }
+
+    #[test]
+    fn msg_test_required_field_missing_at_group_level() {
+        // MassQuote (35=i): NoQuoteSets(296) group's own required fields are
+        // QuoteSetID(302) and TotQuoteEntries(304), on top of its nested NoQuoteEntries(295)
+        // group. TotQuoteEntries is omitted here, so the check on this NoQuoteSets instance
+        // (rg_dd's own required set, not the top-level message's) should catch it.
+        let mass_quote = "8=FIX.4.3|9=101|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|295=1|299=QEID1|10=173|";
+        let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::RequiredTagMissing { .. });
+    }
+
+    #[test]
+    fn msg_test_required_field_missing_at_subgroup_level() {
+        // Same message type; NoQuoteSets' own required fields (QuoteSetID, TotQuoteEntries)
+        // are all present, but the nested NoQuoteEntries(295) instance is missing its field
+        // QuoteEntryID(299). Checked the whole FIX43.xml dictionary: every group nested two
+        // or more levels deep has either no required fields at all, or exactly one, and that
+        // one is always the group's own delimiter (NoQuoteEntries here is no exception —
+        // QuoteEntryID is both its only required field and its delimiter). So omitting it
+        // doesn't surface as "instance present but missing a required field" — the instance
+        // never gets recognized as started at all, which is IncorrectNumInGroupCountForRepeatingGroup
+        // (0 instances found vs. 1 declared), not RequiredTagMissing. This still exercises
+        // the recursive parse_group call reaching NoQuoteEntries correctly and propagating a
+        // real error back up through NoQuoteSets — just not this specific reason.
+        let mass_quote = "8=FIX.4.3|9=97|35=i|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|117=QID1|296=1|302=QSID1|304=1|295=1|10=091|";
+        let msg = Message::from_str(&soh_replaced_str(mass_quote), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { .. }
+        );
+    }
+
+    #[test]
+    fn msg_test_required_field_missing_no_group() {
+        // TestRequest (35=1) has no groups at all — its only field, TestReqID(112), is
+        // required and omitted here. This exercises the plain from_vec-level body check
+        // (validate_required_tag_missing called directly on msg.body(), not via parse_group),
+        // for a message type that never goes anywhere near a repeating group.
+        let test_request =
+            "8=FIX.4.3|9=60|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|10=217|";
+        let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::RequiredTagMissing { .. });
+    }
+
+    #[test]
+    fn msg_test_trailer_with_more_fields() {
+        // trailer having all of the trailer's declared fields (SignatureLength,
+        // Signature, CheckSum), not just the mandatory CheckSum, and verifying they're
+        // all parsed into the trailer correctly.
+        let test_request = "8=FIX.4.3|9=97|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|93=15|89=abc123signature|10=000|";
+        let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
+        assert!(msg.is_ok());
+        let msg = msg.unwrap();
+        assert_eq!(msg.get_trailer_field::<u32>(93).unwrap(), 15);
+        assert_eq!(msg.get_trailer_field::<String>(89).unwrap(), "abc123signature");
+        assert_eq!(msg.get_trailer_field::<String>(10).unwrap(), "000");
+    }
+
+    #[test]
+    fn msg_test_invalid_tag() {
+        // TestRequest(35=1) with an extra tag (99999) that isn't defined anywhere in the
+        // FIX43.xml dictionary at all — validate_tag_for_msgtype's fallback branch. Per FIX 4.3
+        // Vol 2 §14a a tag not defined in the specification is reason 0 (InvalidTag), not the
+        // near-synonymous UndefinedTag (373=3), which the spec's behaviour table never emits.
+        let test_request = "8=FIX.4.3|9=86|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|99999=garbage|10=213|";
+        let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidTag { .. });
+    }
+
+    #[test]
+    fn msg_test_tag_not_defined_for_msgtype() {
+        // TestRequest(35=1) with Price(44) added — a real FIX tag (used by plenty of
+        // other message types, e.g. NewOrderSingle) but not one of TestRequest's own
+        // declared fields, so it should be rejected as "known tag, wrong message type"
+        // rather than "undefined tag".
+        let test_request = "8=FIX.4.3|9=81|35=1|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|112=TESTID1|44=15.75|10=082|";
+        let msg = Message::from_str(&soh_replaced_str(test_request), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagNotDefinedForMsgType { .. });
+    }
+
+    #[test]
+    fn msg_test_value_out_of_enum_range() {
+        // Logon(35=A) with EncryptMethod(98) set to 9 — a well-formed int, but not one
+        // of the dictionary's declared enum values for this tag (0-6 per FIX43.xml).
+        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=9|108=30|10=013|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::ValueOutOfRange { .. });
+    }
+
+    #[test]
+    fn msg_test_incorrect_data_format() {
+        // Logon(35=A) with MsgSeqNum(34) — a header field of type SEQNUM — set to a
+        // non-numeric string instead of an integer.
+        let logon = "8=FIX.4.3|9=74|35=A|34=abc|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=252|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::IncorrectDataFormatForValue { .. });
+    }
+
+    #[test]
+    fn msg_test_invalid_checksum() {
+        // Same Logon fixture as MSG_STR, with the checksum's last digit flipped
+        // (004 -> 005) — body length (9=72) is still correct, so this should be caught
+        // specifically by the checksum comparison, not the body-length one.
+        let logon = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=005|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidChecksum);
+    }
+
+    #[test]
+    fn msg_test_invalid_body_length() {
+        // Same Logon fixture, with the body length's last digit flipped (72 -> 73).
+        // Body length is checked before checksum in from_vec, so this is caught first
+        // even though the checksum field itself is left correct for the original body.
+        let logon = "8=FIX.4.3|9=73|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::InvalidBodyLength);
+    }
+
+    #[test]
+    fn msg_test_invalid_msg_type() {
+        // MsgType(35) whose value ("ZZ") is not a message type FIX43.xml defines. Built via
+        // the message builder so BodyLength(9) and CheckSum(10) are correct and all required
+        // header fields are present — so the *only* thing wrong is the message type itself,
+        // and the reject is InvalidMessageType (373=11) rather than a body-length/checksum,
+        // required-field, or (crucially) TagNotDefinedForMsgType error.
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "ZZ");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_len();
+        msg.set_checksum();
+        let parsed = Message::from_str(&msg.to_string(), &DD);
+        assert!(parsed.is_err());
+        assert_matches!(parsed.unwrap_err(), SessionRejectError::InvalidMessageType);
+    }
+
+    // Duplicate-tag matrix (TagAppearsMoreThanOnce, 373=13). The rule is "a non-group tag may
+    // appear only once in a section"; a repeating group's delimiter/member tags legitimately
+    // recur once per instance and must NOT trip the check.
+
+    #[test]
+    fn msg_test_duplicate_non_group_tag_rejected() {
+        // (a) Logon(35=A) with SenderCompID(49) present twice in the header — the second
+        // occurrence is a duplicate. BodyLength/CheckSum are correct for the duplicated wire so
+        // parsing gets past from_vec's structural checks and reaches parse_header's per-field check.
+        let logon = "8=FIX.4.3|9=82|35=A|34=0|49=BANZAI|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=101|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagAppearsMoreThanOnce { tag: 49 });
+    }
+
+    #[test]
+    fn msg_test_repeating_group_member_tags_are_not_duplicates() {
+        // (b) + (c) MarketDataSnapshotFullRefresh(35=W) with NoMDEntries(268=2): the count tag
+        // 268 appears once (c), and the delimiter MDEntryType(269), MDEntryPx(270) and
+        // MDEntrySize(271) each recur once per instance (b). None of these is a duplicate — the
+        // repeated fields live in separate group instances, not the same section — so it parses.
+        let w = "8=FIX.4.3|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=012|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_ok(), "repeated group member tags must not be treated as duplicates");
+        assert_eq!(msg.unwrap().body().get_group(268).unwrap().size(), 2);
+    }
+
+    #[test]
+    fn msg_test_duplicate_group_count_tag_rejected() {
+        // (d) Same W, but NoMDEntries(268) count tag appears twice — two separate group blocks.
+        // The count tag is a non-group tag (set_group also records it in `fields`), so the
+        // second 268 is a duplicate. Rejected as the second 268 is popped, before its own
+        // instances are parsed.
+        let w = "8=FIX.4.3|9=140|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=1|269=0|270=8490.07|271=10|268=1|269=1|270=8519.57|271=20|10=023|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagAppearsMoreThanOnce { tag: 268 });
+    }
+
+    #[test]
+    fn msg_test_header_field_in_body_out_of_order() {
+        // Audit gap: TagSpecifiedOutOfOrder (373=14) from validate_body_field. PossDupFlag(43) is
+        // an (optional) header field placed in the body after 108 — since parse_header already
+        // consumed every header field, a header field reappearing in the body is out of order.
+        let logon = "8=FIX.4.3|9=77|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|43=Y|10=008|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagSpecifiedOutOfOrder { tag: 43 });
+    }
+
+    #[test]
+    fn msg_test_non_trailer_field_in_trailer_out_of_order() {
+        // Audit gap: TagSpecifiedOutOfOrder (373=14) from validate_trailer_field. After the
+        // trailer starts (93/89), a non-trailer field (Symbol 55) appears — the trailer is the
+        // last section, so anything that isn't a trailer field there is out of order.
+        let logon = "8=FIX.4.3|9=91|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|93=3|89=abc|55=IBM|10=056|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(msg.unwrap_err(), SessionRejectError::TagSpecifiedOutOfOrder { tag: 55 });
+    }
+
+    #[test]
+    fn msg_test_repeating_group_fields_out_of_order() {
+        // Audit gap: RepeatingGroupsOutOfOrder (373=15). Within a NoMDEntries instance the
+        // declared order is 269, 270, 271; here 271 precedes 270, so 270 arrives with a lower
+        // rank than the field before it.
+        let w = "8=FIX.4.3|9=109|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=1|269=0|271=10|270=8490.07|10=123|";
+        let msg = Message::from_str(&soh_replaced_str(w), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::RepeatingGroupsOutOfOrder { tag: 270 }
+        );
+    }
+
+    #[test]
+    fn msg_test_tag_specified_without_value() {
+        // Audit gap: TagSpecifiedWithoutValue (373=4). HeartBtInt(108) with an empty value. The
+        // tokenizer in from_str catches this before from_vec, so BodyLength/CheckSum are irrelevant.
+        let logon = "8=FIX.4.3|9=60|35=A|34=1|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|108=|10=000|";
+        let msg = Message::from_str(&soh_replaced_str(logon), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::TagSpecifiedWithoutValue { tag: 108 }
+        );
+    }
+
+    // --- SOH-in-data (task 1.6) -------------------------------------------------------------
+    // A DATA-typed field's value is read by byte count from its length field, so it may legally
+    // contain SOH. Fixtures are built via the message builder so BodyLength(9)/CheckSum(10) are
+    // computed over the real bytes (embedded SOH included) — hand-writing them would be error
+    // prone. Positive cases assert the exact round-tripped value; negative cases assert the
+    // parser *rejects rather than panics* (the exact reject reason is still open, so they check
+    // `is_err()` and note the expected reason in a comment — tighten to assert_matches once settled).
+
+    // Build a Logon(35=A) carrying an optional body data field `data_tag` (+ its length field
+    // `len_tag`), with all required Logon/header fields present. `len` is what the length field
+    // announces — pass the true byte length for a well-formed message, or a wrong value to force
+    // a rejection. `include_len = false` omits the length field entirely.
+    fn logon_with_data_field(
+        len_tag: u32,
+        data_tag: u32,
+        data: &str,
+        len: usize,
+        include_len: bool,
+    ) -> String {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        if include_len {
+            // length must precede the data field on the wire (insertion order is preserved)
+            msg.set_body_field(len_tag, len.to_string());
+        }
+        msg.set_body_field(data_tag, data);
+        msg.set_body_len();
+        msg.set_checksum();
+        msg.to_string()
+    }
+
+    #[test]
+    fn msg_test_soh_in_data_field() {
+        // Core positive: RawData(96) whose value contains an SOH. RawDataLength(95) announces the
+        // byte count, so the tokenizer must read exactly that many bytes rather than splitting on
+        // the embedded SOH. The parsed value must equal the original, SOH and all.
+        let raw = format!("user{}pass", SOH); // 9 bytes incl. the embedded SOH
+        let wire = logon_with_data_field(95, 96, &raw, raw.len(), true);
+        let msg = Message::from_str(&wire, &DD).expect("data field with embedded SOH should parse");
+        assert_eq!(msg.get_body_field::<String>(96).unwrap(), raw);
+    }
+
+    #[test]
+    fn msg_test_soh_in_data_field_signature_special_case() {
+        // Signature(89) is the one field whose length is NOT tag-1: it lives in SignatureLength(93).
+        // Signature is a trailer field, so this also exercises the data path in the trailer.
+        let sig = format!("sig{}bytes", SOH);
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        msg.set_trailer_field(93, sig.len().to_string()); // SignatureLength precedes Signature
+        msg.set_trailer_field(89, &sig);
+        msg.set_body_len();
+        msg.set_checksum();
+        let parsed = Message::from_str(&msg.to_string(), &DD)
+            .expect("Signature(89) with embedded SOH should parse via SignatureLength(93)");
+        assert_eq!(parsed.get_trailer_field::<String>(89).unwrap(), sig);
+    }
+
+    #[test]
+    fn msg_test_data_field_missing_length_rejected() {
+        // Negative: RawData(96) present but RawDataLength(95) absent — the tokenizer can't know how
+        // many bytes to read, so it must reject rather than guess/mis-read.
+        // (Current impl -> SessionRejectError::Other.)
+        let wire = logon_with_data_field(95, 96, "abc", 3, false);
+        assert!(
+            Message::from_str(&wire, &DD).is_err(),
+            "data field without its length must reject"
+        );
+    }
+
+    #[test]
+    fn msg_test_data_field_length_too_short_rejected() {
+        // Negative: declared length is shorter than the value, so the byte after the value isn't an
+        // SOH. Must reject (the "end must land on SOH" guard), not silently mis-frame the rest.
+        let wire = logon_with_data_field(95, 96, "abcdef", 3, true);
+        assert!(Message::from_str(&wire, &DD).is_err(), "short data length must reject");
+    }
+
+    #[test]
+    fn msg_test_data_field_length_overruns_buffer_rejected() {
+        // Negative: declared length runs past the end of the message. Must reject via the bounds
+        // check, NOT panic on an out-of-range slice.
+        let wire = logon_with_data_field(95, 96, "abc", 999, true);
+        assert!(Message::from_str(&wire, &DD).is_err(), "overrunning data length must reject");
+    }
+
+    #[test]
+    fn msg_test_data_field_non_numeric_length_rejected() {
+        // Negative: the length field's value isn't a number. Must reject.
+        // (Current impl -> IncorrectDataFormatForValue { tag: 95 }.)
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "A");
+        msg.set_header_field(34, "1");
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        msg.set_body_field(95, "xyz"); // non-numeric RawDataLength
+        msg.set_body_field(96, "abc");
+        msg.set_body_len();
+        msg.set_checksum();
+        assert!(
+            Message::from_str(&msg.to_string(), &DD).is_err(),
+            "non-numeric data length must reject"
+        );
+    }
+
+    #[test]
+    fn msg_test_missing_trailing_soh_rejected() {
+        // Correctness check for the strict tokenizer: every field must be SOH-terminated, the last
+        // one included — without it there's no way to delimit the next field. This is MSG_STR with
+        // the trailing SOH removed (note: no `|` at the end), so the final field 10=004 has no
+        // terminator and must be rejected rather than parsed.
+        let no_trailing_soh = "8=FIX.4.3|9=72|35=A|34=0|49=BANZAI|52=20221006-08:43:36.522|56=FIXIMULATOR|98=0|108=30|10=004";
+        let msg = Message::from_str(&soh_replaced_str(no_trailing_soh), &DD);
+        assert!(msg.is_err(), "a message not ending in SOH must be rejected");
+        assert_matches!(msg.unwrap_err(), SessionRejectError::Other { .. });
+    }
+
+    // Descoped per QFJ (which doesn't emit 373=17 either): a SOH inside a NON-data field just
+    // splits the field early and surfaces as some other parse error, not NonDataFieldIncludeSOHChar.
+    #[test]
+    #[ignore = "NonDataFieldIncludeSOHChar (373=17) not implemented; QFJ doesn't emit it either"]
+    fn msg_test_soh_in_non_data_field() {}
+}

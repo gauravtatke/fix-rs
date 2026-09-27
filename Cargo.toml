@@ -1,32 +1,44 @@
 [package]
 name = "fix-rs"
 version = "0.1.0"
-edition = "2021"
-build="build/main.rs"
+edition = "2024"
+build = "build/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# Clippy lint configuration (package-wide, all targets). correctness = deny (these
+# are real bugs — fail the lint), the other default groups = warn. Together these
+# five groups are clippy::all; they're disjoint (each lint is in exactly one group),
+# so listing them needs no `priority`. pedantic/nursery/cargo/restriction stay at
+# their default (allow) — opt in later if wanted.
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
+
 [dependencies]
-roxmltree = "0.14.1"
-chrono = "0.4.22"
-chrono-tz = { version = "0.6", features = [ "filter-by-regex" ] }
-indexmap = "1.9.1"
-thiserror = "1.0.31"
+roxmltree = "0.21.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["filter-by-regex", "serde"] }
+indexmap = "2.14.0"
+thiserror = "2.0.18"
 serde = { version = "1.0", features = ["derive"] }
-getset = "0.1.2"
-tokio = { version = "1.21.1", features = ["full"] }
-derive_builder = "0.11.2"
-dashmap = "5.4.0"
+toml = "1.1.4"
+getset = "0.1.7"
+derive_builder = "0.20.2"
+log = "0.4.33"
+env_logger = "0.11.11"
+rust_decimal = "1"
+rust_decimal_macros = "1"
 
 [build-dependencies]
-roxmltree = "0.14.1"
-# yaserde = "0.8.0"
-# yaserde_derive = "0.8.0"
-xml-rs = "0.8.4"
-handlebars = "4.3.1"
+roxmltree = "0.21.1"
+handlebars = "6.4.3"
 serde = { version = "1.0", features = ["derive"] }
-heck = "0.4.0"
+heck = "0.5.0"
 
 [dev-dependencies]
-lazy_static = "1.4.0"
+lazy_static = "1.5.0"
 assert_matches = "1.5.0"

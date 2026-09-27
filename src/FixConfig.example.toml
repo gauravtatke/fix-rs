@@ -1,0 +1,54 @@
+# fix-rs configuration — reference template documenting every supported key.
+#
+# The real config is `src/FixConfig.toml` (loaded by main.rs). Copy the parts you need from here.
+# Parser (src/session/settings.rs): a single [Default] block followed by one or more [[Session]]
+# blocks. Each session inherits [Default] and overrides it with its own keys. Missing required
+# keys / bad values panic at startup (Properties validation), so config errors surface immediately.
+
+[Default]
+# --- identity / protocol ---
+begin_string       = "FIX.4.3"             # REQUIRED. one of FIX.4.2 / FIX.4.3 / FIX.4.4
+data_dictionary    = "resources/FIX43.xml" # optional; default derived from begin_string
+heartbeat_interval = 30                    # optional, seconds; default 30
+
+# --- session schedule (optional; start/end must be paired, or all omitted) ---
+# weekday: full or short name, any case ("Monday", "mon", "FRIDAY"); time: "HH:MM:SS";
+# timezone: an IANA / chrono-tz name ("UTC", "US/Eastern", "America/New_York"); default UTC
+# start_day  = "Monday"
+# end_day    = "Friday"
+# start_time = "08:00:00"
+# end_time   = "16:00:00"
+# timezone   = "US/Eastern"
+
+# --- reset behavior (optional; all default false) ---
+# reset_on_logon      = false  # reset seq nums to 1 each logon (initiators also send 141=Y)
+# reset_on_logout     = false
+# reset_on_disconnect = false
+
+# ---------------------------------------------------------------------------
+# One [[Session]] per session. Keys here override [Default]. Each session is
+# identified by (begin_string, sender_comp_id, target_comp_id [+ optional sub/location ids]).
+# ---------------------------------------------------------------------------
+
+# Example ACCEPTOR — listens for inbound connections.
+[[Session]]
+connection_type    = "acceptor"   # REQUIRED: "acceptor" | "initiator"
+sender_comp_id     = "EXEC"       # REQUIRED
+target_comp_id     = "BANZAI"     # REQUIRED
+socket_accept_port = 9878         # REQUIRED for acceptor
+# optional identity refinements (each becomes part of the SessionID when present):
+# sender_sub_id      = "..."
+# sender_location_id = "..."
+# target_sub_id      = "..."
+# target_location_id = "..."
+# session_qualifier  = "..."
+
+# Example INITIATOR — dials out to a peer acceptor.
+[[Session]]
+connection_type     = "initiator" # REQUIRED
+sender_comp_id      = "BANZAI"    # REQUIRED
+target_comp_id      = "EXEC"      # REQUIRED
+socket_connect_host = "127.0.0.1" # REQUIRED for initiator
+socket_connect_port = 9879        # REQUIRED for initiator
+reconnect_interval  = 5           # optional, seconds; initiator-only; default 30
+reset_on_logon      = true        # per-session override of a [Default] value

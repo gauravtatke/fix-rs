@@ -1,0 +1,372 @@
+use std::num::ParseIntError;
+
+// FIX-level reject reasons raised during message parsing/validation. This enum
+// IS the error type (it derives `Error`) — each variant carries exactly the
+// context it needs: the offending `tag` for field-level problems, a free-form
+// `msg` for the catch-all cases, and nothing for whole-message problems.
+//
+// `InvalidBodyLength`/`InvalidChecksum` are *garbled-message* markers, not
+// Reject(35=3) reasons — a garbled message can't be trusted enough to reference
+// in a Reject, so the FIX-correct handling is to drop it. They have no tag-373
+// wire code (see `code`).
+//
+// No `Copy` because `Other`/`InvalidUnsupportedAppVersion` own a `String`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionRejectError {
+    #[error("Invalid tag number: {tag}")]
+    InvalidTag { tag: u32 },
+    #[error("Required tag missing: {tag}")]
+    RequiredTagMissing { tag: u32 },
+    #[error("Tag {tag} not defined for this message type")]
+    TagNotDefinedForMsgType { tag: u32 },
+    /// SessionRejectReason 3 ("Undefined Tag"). Overlaps with `InvalidTag` (reason 0): the FIX
+    /// 4.3 code list defines both, but the spec's validation rules (Vol 2 §14a) only ever
+    /// prescribe reason 0 for a tag not defined in the specification, and no rule prescribes 3.
+    /// So this variant is effectively vestigial — the parser emits `InvalidTag` for the unknown-
+    /// tag case, and the only remaining `UndefinedTag` reference is an unreachable branch in
+    /// `validate_tag_value_for_type`. Kept (with its 373=3 code) so a Reject we *receive*
+    /// carrying reason 3 can still be represented.
+    #[error("Undefined tag: {tag}")]
+    UndefinedTag { tag: u32 },
+    #[error("Tag {tag} specified without a value")]
+    TagSpecifiedWithoutValue { tag: u32 },
+    #[error("Value out of range for tag {tag}")]
+    ValueOutOfRange { tag: u32 },
+    #[error("Incorrect data format for tag {tag}")]
+    IncorrectDataFormatForValue { tag: u32 },
+    #[error("Decryption problem")]
+    DecryptionProblem,
+    #[error("Signature problem")]
+    SignatureProblem,
+    #[error("CompID problem")]
+    CompIdProblem,
+    #[error("SendingTime accuracy problem")]
+    SendingTimeAccuracyProblem,
+    #[error("Invalid message type")]
+    InvalidMessageType,
+    #[error("XML validation error")]
+    XmlValidationError,
+    #[error("Tag {tag} appears more than once")]
+    TagAppearsMoreThanOnce { tag: u32 },
+    #[error("Tag {tag} specified out of required order")]
+    TagSpecifiedOutOfOrder { tag: u32 },
+    #[error("Repeating group fields out of order near tag {tag}")]
+    RepeatingGroupsOutOfOrder { tag: u32 },
+    #[error("Incorrect NumInGroup count for repeating group (tag {tag})")]
+    IncorrectNumInGroupCountForRepeatingGroup { tag: u32 },
+    #[error("Non-data field {tag} contains an SOH delimiter")]
+    NonDataFieldIncludeSOHChar { tag: u32 },
+    #[error("Invalid or unsupported application version: {msg}")]
+    InvalidUnsupportedAppVersion { msg: String },
+    #[error("{msg}")]
+    Other { msg: String },
+    #[error("Invalid body length")]
+    InvalidBodyLength,
+    #[error("Invalid checksum")]
+    InvalidChecksum,
+}
+
+impl SessionRejectError {
+    /// The FIX 4.3 SessionRejectReason (tag 373) wire code for this reason.
+    ///
+    /// Mapping is by name, not enum position. `Other` uses 99 (a real "Other"
+    /// code); `InvalidUnsupportedAppVersion` uses 18 (a FIXT/4.4+ code, harmless
+    /// on 4.3 since it isn't produced there).
+    ///
+    /// `InvalidBodyLength`/`InvalidChecksum` have no tag-373 code — they are
+    /// garbled-message markers that get dropped, never rejected — so they map to
+    /// a sentinel (`u32::MAX`) that should never reach the wire. The match is
+    /// left exhaustive (no `_` arm) on purpose: adding a new reason will fail to
+    /// compile until its code is decided here.
+    pub fn code(&self) -> u32 {
+        match self {
+            SessionRejectError::InvalidTag { .. } => 0,
+            SessionRejectError::RequiredTagMissing { .. } => 1,
+            SessionRejectError::TagNotDefinedForMsgType { .. } => 2,
+            SessionRejectError::UndefinedTag { .. } => 3,
+            SessionRejectError::TagSpecifiedWithoutValue { .. } => 4,
+            SessionRejectError::ValueOutOfRange { .. } => 5,
+            SessionRejectError::IncorrectDataFormatForValue { .. } => 6,
+            SessionRejectError::DecryptionProblem => 7,
+            SessionRejectError::SignatureProblem => 8,
+            SessionRejectError::CompIdProblem => 9,
+            SessionRejectError::SendingTimeAccuracyProblem => 10,
+            SessionRejectError::InvalidMessageType => 11,
+            SessionRejectError::XmlValidationError => 12,
+            SessionRejectError::TagAppearsMoreThanOnce { .. } => 13,
+            SessionRejectError::TagSpecifiedOutOfOrder { .. } => 14,
+            SessionRejectError::RepeatingGroupsOutOfOrder { .. } => 15,
+            SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { .. } => 16,
+            SessionRejectError::NonDataFieldIncludeSOHChar { .. } => 17,
+            SessionRejectError::InvalidUnsupportedAppVersion { .. } => 18,
+            SessionRejectError::Other { .. } => 99,
+            SessionRejectError::InvalidBodyLength | SessionRejectError::InvalidChecksum => u32::MAX,
+        }
+    }
+
+    /// The offending tag, for a Reject's RefTagID (371) — `None` for reasons
+    /// that aren't about a specific tag.
+    pub fn ref_tag(&self) -> Option<u32> {
+        match self {
+            SessionRejectError::InvalidTag { tag }
+            | SessionRejectError::RequiredTagMissing { tag }
+            | SessionRejectError::TagNotDefinedForMsgType { tag }
+            | SessionRejectError::UndefinedTag { tag }
+            | SessionRejectError::TagSpecifiedWithoutValue { tag }
+            | SessionRejectError::ValueOutOfRange { tag }
+            | SessionRejectError::IncorrectDataFormatForValue { tag }
+            | SessionRejectError::TagAppearsMoreThanOnce { tag }
+            | SessionRejectError::TagSpecifiedOutOfOrder { tag }
+            | SessionRejectError::RepeatingGroupsOutOfOrder { tag }
+            | SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { tag }
+            | SessionRejectError::NonDataFieldIncludeSOHChar { tag } => Some(*tag),
+            _ => None,
+        }
+    }
+
+    /// Free-form text for a Reject's Text (58) — `None` unless the reason
+    /// carries a message.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            SessionRejectError::InvalidUnsupportedAppVersion { msg }
+            | SessionRejectError::Other { msg } => Some(msg.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether this reason marks a *garbled* message (bad body length or
+    /// checksum) that must be dropped rather than rejected. The parse-side
+    /// classification for 7.3: `is_garbled()` → drop the message and keep the
+    /// connection; anything else → send a Reject(35=3).
+    pub fn is_garbled(&self) -> bool {
+        matches!(self, SessionRejectError::InvalidBodyLength | SessionRejectError::InvalidChecksum)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum XmlError {
+    #[error("Could not parse the document")]
+    DocumentNotParsed(#[from] roxmltree::Error),
+    #[error("Node {} not found", .0)]
+    XmlNodeNotFound(String),
+    #[error("Could not parse field {field} into u32: {:?}", .source)]
+    FieldNotParsed {
+        source: ParseIntError,
+        field: String,
+    },
+    #[error("Duplicate field {}", .0)]
+    DuplicateField(String),
+    #[error("Duplicate message {}", .0)]
+    DuplicateMessage(String),
+    #[error("Attribute {} not found", .0)]
+    AttributeNotFound(String),
+    #[error("Unknown xml tag {}", .0)]
+    UnknownXmlTag(String),
+}
+
+pub enum InvalidMessage {
+    FieldDoesNotHaveDelimiter,
+    MessageDoesNotHaveSOH,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigParseError {
+    #[error("Invalid TOML: {0}")]
+    InvalidToml(#[from] toml::de::Error),
+    #[error("Missing [Default] section")]
+    MissingDefaultSection,
+    #[error("Session block {index} is not a valid table")]
+    InvalidSessionBlock { index: usize },
+    #[error("Failed to deserialize session block {index}: {source}")]
+    SessionDeserialize {
+        index: usize,
+        source: toml::de::Error,
+    },
+    #[error("Failed to deserialize [Default] section: {0}")]
+    DefaultDeserialize(toml::de::Error),
+    #[error("Invalid field={field} value={value}")]
+    InvalidFieldValue { field: String, value: String },
+    #[error("Missing required field {field}")]
+    MissingRequiredField { field: String },
+    #[error("Validation failed: {msg}")]
+    ValidationFailed { msg: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FieldError {
+    #[error("Tag not found: {tag}")]
+    TagNotFound { tag: u32 },
+    #[error("Could not parse field value into the requested type: {tag}")]
+    InvalidFormat { tag: u32 },
+}
+
+/// Error from adopting a raw `Message` as a typed message (`TryFrom<Message>` in the
+/// `crate::fixNN` modules). Version-neutral, so it lives here in the shared errors module
+/// and is kept separate from the engine's session errors — the only conversion failure is
+/// "this message isn't the type you asked for."
+#[derive(Debug, PartialEq, Eq)]
+pub enum TypedError {
+    WrongMsgType { expected: &'static str, got: String },
+}
+
+// The single, typed error for the whole inbound-processing path (next_message and
+// its helpers). Every fallible step converges here so next_message can classify
+// recoverable-vs-fatal in one place (7.3c) instead of erasing types into Box<dyn
+// Error>. Distinct from SessionRejectReason, which covers FIX-level Reject(3)
+// reasons produced during message *parsing* (before a Message exists).
+//
+// The first block are native session-verification failures; the last three are
+// foreign errors folded in via #[from] so `?` converts them automatically:
+#[derive(Debug, thiserror::Error)]
+pub enum InboundMsgError {
+    #[error("BeginString mismatch: expected {expected} got {received}")]
+    BeginStringMismatch { expected: String, received: String },
+    #[error("Message type {msg_type} not valid for current session state")]
+    InvalidStateForMsgType { msg_type: String },
+    #[error("CompID mismatch: expected sender={expected_sender} target={expected_target}")]
+    CompIdMismatch {
+        expected_sender: String,
+        expected_target: String,
+    },
+    #[error("MsgSeqNum too low: received {received} expected {expected}")]
+    SeqNumTooLow { received: u32, expected: u32 },
+    #[error("Missing header field tag={tag}")]
+    MissingHeaderField { tag: u32 },
+    #[error("Not in session time")]
+    OutOfSessionTime,
+    // App vetoed the logon in on_admin_msg_received. Self-contained (carries its
+    // own reason) → #[from] is the right tool. Classifies as fatal in 7.3c
+    // (generate_logout + disconnect).
+    #[error(transparent)]
+    LogonRejected(#[from] RejectLogon),
+    // send_app_message failed while replying on THIS session (the pipe broke
+    // mid-response). SessionNotFound can't occur here (no registry lookup) and
+    // NotLoggedOn only in a disconnect race → classifies as fatal (disconnect).
+    #[error(transparent)]
+    SendErr(#[from] SendError),
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("Do not send")]
+pub struct DonotSend;
+
+// The application's veto of a logon, raised from on_admin_msg_received. A newtype
+// over the reason string; the reason surfaces on the wire as the Logout's Text(58)
+// via Display. Build with RejectLogon::new(reason).
+#[derive(Debug, thiserror::Error)]
+#[error("Reject logon: {0}")]
+pub struct RejectLogon(String);
+
+impl RejectLogon {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BusinessMsgReject {
+    #[error("Other error")]
+    Other,
+    #[error("Unknown id")]
+    UnknownId,
+    #[error("Unknown security")]
+    UnknownSecurity,
+    #[error("Unknown message type: {msg_type}")]
+    UnknownMessageTye { msg_type: String },
+    #[error("Application not available")]
+    ApplicationNotAvailable,
+    #[error("Conditionally required field is missing: {tag}")]
+    MissingConditionallyRequiredField { tag: u32 },
+    #[error("Not authorized")]
+    NotAuthorized,
+    #[error("DeliverTo firm not available at this time")]
+    DeliverToFirmNotAvailableAtThisTime,
+    #[error("Invalid price increment")]
+    InvalidPriceIncrement,
+}
+
+impl BusinessMsgReject {
+    pub fn code(&self) -> u32 {
+        match self {
+            BusinessMsgReject::Other => 0,
+            BusinessMsgReject::UnknownId => 1,
+            BusinessMsgReject::UnknownSecurity => 2,
+            BusinessMsgReject::UnknownMessageTye { .. } => 3,
+            BusinessMsgReject::ApplicationNotAvailable => 4,
+            BusinessMsgReject::MissingConditionallyRequiredField { .. } => 5,
+            BusinessMsgReject::NotAuthorized => 6,
+            BusinessMsgReject::DeliverToFirmNotAvailableAtThisTime => 7,
+            BusinessMsgReject::InvalidPriceIncrement => 18,
+        }
+    }
+}
+
+// Failure modes for an outbound app-message send driven from outside the engine
+// (the fix-rs analogue of QFJ's Session.sendToTarget returning false /
+// throwing SessionNotFound).
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum SendError {
+    #[error("No session found for the given SessionId")]
+    SessionNotFound,
+    #[error("Session is not logged on; message not sent")]
+    NotLoggedOn,
+}
+
+#[cfg(test)]
+mod session_reject_reason_tests {
+    use super::SessionRejectError;
+
+    #[test]
+    fn test_is_garbled_true_for_bodylength_and_checksum() {
+        assert!(SessionRejectError::InvalidBodyLength.is_garbled());
+        assert!(SessionRejectError::InvalidChecksum.is_garbled());
+    }
+
+    #[test]
+    fn test_is_garbled_false_for_reject_reasons() {
+        // A representative field-level reason and a message-level one — neither
+        // is garbled, both should be rejected (not dropped).
+        assert!(!SessionRejectError::ValueOutOfRange { tag: 55 }.is_garbled());
+        assert!(!SessionRejectError::InvalidMessageType.is_garbled());
+        assert!(!SessionRejectError::Other { msg: "boom".into() }.is_garbled());
+    }
+
+    #[test]
+    fn test_code_maps_reason_to_tag373_wire_value() {
+        // Spot-check the by-name mapping, including the two whose enum position
+        // differs from their wire code (UndefinedTag=3, TagNotDefinedForMsgType=2).
+        assert_eq!(SessionRejectError::InvalidTag { tag: 1 }.code(), 0);
+        assert_eq!(SessionRejectError::TagNotDefinedForMsgType { tag: 44 }.code(), 2);
+        assert_eq!(SessionRejectError::UndefinedTag { tag: 99 }.code(), 3);
+        assert_eq!(SessionRejectError::ValueOutOfRange { tag: 98 }.code(), 5);
+        assert_eq!(SessionRejectError::Other { msg: "x".into() }.code(), 99);
+    }
+
+    #[test]
+    fn test_garbled_reasons_have_sentinel_code() {
+        // These never reach the wire (they're dropped), so code() is a sentinel.
+        assert_eq!(SessionRejectError::InvalidBodyLength.code(), u32::MAX);
+        assert_eq!(SessionRejectError::InvalidChecksum.code(), u32::MAX);
+    }
+
+    #[test]
+    fn test_ref_tag_present_for_field_reasons_absent_otherwise() {
+        assert_eq!(SessionRejectError::RequiredTagMissing { tag: 35 }.ref_tag(), Some(35));
+        assert_eq!(SessionRejectError::UndefinedTag { tag: 99 }.ref_tag(), Some(99));
+        // reasons not about a specific tag carry no RefTagID
+        assert_eq!(SessionRejectError::SignatureProblem.ref_tag(), None);
+        assert_eq!(SessionRejectError::Other { msg: "x".into() }.ref_tag(), None);
+    }
+
+    #[test]
+    fn test_text_present_only_for_message_bearing_reasons() {
+        assert_eq!(SessionRejectError::Other { msg: "bad".into() }.text(), Some("bad"));
+        assert_eq!(
+            SessionRejectError::InvalidUnsupportedAppVersion { msg: "v9".into() }.text(),
+            Some("v9")
+        );
+        // tag-bearing / bare reasons have no Text
+        assert_eq!(SessionRejectError::ValueOutOfRange { tag: 55 }.text(), None);
+        assert_eq!(SessionRejectError::InvalidChecksum.text(), None);
+    }
+}
