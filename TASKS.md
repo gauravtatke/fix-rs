@@ -12,6 +12,15 @@ Milestones M1 and M2 are broken down in real detail (they're next up). M3–M6 a
 enough to start planning from, but expect to re-break them into smaller tasks (same way M1 is broken down here) once
 M1/M2 are done and we know what the message/config layers actually look like.
 
+> **Repository restructure (2026-09-27) — path mapping.** The source tree was reorganized into layered modules and
+> split into a **library (`fix_rs`) + demo binary**; the crate root is now `src/lib.rs` (it carries the build-script
+> `include!`), and `src/main.rs` is the demo binary. Task text written before this uses the old paths — map them as:
+> `src/fix43/`→`src/messages/fix43/`, `src/common.rs`→`src/convert.rs`, `src/fix_errors.rs`→`src/errors.rs`,
+> `src/message.rs`→`src/core/message.rs`, `src/data_dictionary.rs`→`src/core/dictionary.rs`,
+> `src/network.rs`→`src/transport/{registry,timer}.rs`, `src/io/`→`src/transport/sync/` (`fix_message_reader`→`reader`,
+> `tcp_responder`→`responder`), `src/session/session_and_state.rs`→`src/session/mod.rs`, `session_settings.rs`→
+> `settings.rs`, `session_id.rs`→`id.rs`, `session_schedule.rs`→`schedule.rs`. `src/types.rs` was deleted.
+
 ---
 
 ## M1 — Harden the message/dictionary layer
@@ -159,9 +168,12 @@ references are the golden target the generator must reproduce (diffed by the fre
   tests (incl. 18-digit exactness where `f64` rounds, non-leap Feb 29, exponent reject). Also
   flipped `c_indexed`'s MDEntryPx/MDEntrySize from the `f64` placeholder to `Decimal`.
 
-- [~] **3.3 — Hand-write a couple of field enums (Claude).** `EncryptMethod` done
-  (`src/fix43/fields.rs`). **Remaining:** `Side`, `OrdType` reference enums to lock the shape before
-  generating; also settle the D11 enum-sharing question (shared-union vs per-version).
+- [x] **3.3 — Hand-write a couple of field enums (Claude). DONE (2026-09-27).** `EncryptMethod`
+  (INT), plus `Side` (12 values) and `OrdType` (23 values) as CHAR enums in
+  `messages/fix43/fields.rs` — values sourced exactly from `FIX43.xml`, `to_fix -> char` /
+  `from_fix(char) -> Option`, tests round-trip every variant + reject unknowns. **D11 enum-sharing
+  resolved: per-version** (not a shared union) — preserves D3's invalid-value-unrepresentable per
+  version; see the D11 enum-sharing note in the design log.
 
 - [ ] **3.4 — Standalone codegen binary skeleton (USER).**
   A `cargo run` gen binary (xtask-style) that parses `FIX43.xml` → data model → emits committed
