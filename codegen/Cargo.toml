@@ -1,0 +1,15 @@
+[package]
+name = "codegen"
+version = "0.1.0"
+edition = "2024"
+
+# Standalone typed-message generator: parses resources/FIX43.xml and emits committed Rust source
+# into the engine crate's src/. Run with `cargo run -p codegen`; drift is caught by the freshness
+# test (`cargo test -p codegen`). Deps here stay out of the published `fix_rs` engine crate.
+[dependencies]
+roxmltree = "0.21.1"
+heck = "0.5.0"
+
+# Inherit the workspace-wide clippy lints (defined in the root Cargo.toml).
+[lints]
+workspace = true

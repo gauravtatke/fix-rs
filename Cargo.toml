@@ -6,17 +6,27 @@ build = "build/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# Clippy lint configuration (package-wide, all targets). correctness = deny (these
-# are real bugs — fail the lint), the other default groups = warn. Together these
-# five groups are clippy::all; they're disjoint (each lint is in exactly one group),
-# so listing them needs no `priority`. pedantic/nursery/cargo/restriction stay at
-# their default (allow) — opt in later if wanted.
-[lints.clippy]
+# This root package is also the workspace root; `codegen` is the standalone typed-message
+# generator (kept out of the engine crate so its deps don't leak into `fix_rs`).
+[workspace]
+members = ["codegen"]
+resolver = "3"
+
+# Clippy lint configuration, defined once at the workspace level so every member (fix-rs +
+# codegen) inherits it via `[lints] workspace = true`. correctness = deny (these are real bugs —
+# fail the lint), the other default groups = warn. Together these five groups are clippy::all;
+# they're disjoint (each lint is in exactly one group), so listing them needs no `priority`.
+# pedantic/nursery/cargo/restriction stay at their default (allow) — opt in later if wanted.
+[workspace.lints.clippy]
 correctness = "deny"
 suspicious = "warn"
 style = "warn"
 complexity = "warn"
 perf = "warn"
+
+# The root package (fix-rs) opts into the workspace lints above.
+[lints]
+workspace = true
 
 [dependencies]
 roxmltree = "0.21.1"
