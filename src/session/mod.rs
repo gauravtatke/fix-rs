@@ -10,8 +10,8 @@ pub use settings::*;
 
 use crate::application::Application;
 use crate::core::dictionary::DataDictionary;
-use crate::errors::{BusinessMsgReject, InboundMsgError, SendError, SessionRejectError};
 use crate::core::message::Message;
+use crate::errors::{BusinessMsgReject, InboundMsgError, SendError, SessionRejectError};
 use crate::session::schedule::SessionSchedule;
 use getset::{CopyGetters, Getters, Setters};
 use log::{error, info, warn};
@@ -1919,7 +1919,8 @@ mod session_tests {
         ];
         for (label, wire) in cases {
             let (mut session, mock_state) = make_harness_session();
-            let flow = crate::transport::sync::connection::process_inbound_msg(&mut session, &soh(wire));
+            let flow =
+                crate::transport::sync::connection::process_inbound_msg(&mut session, &soh(wire));
             assert_eq!(flow, ControlFlow::Continue(()), "{}: keep reading", label);
             assert!(mock_state.sent().is_empty(), "{}: garbled msg → no response", label);
             assert!(!mock_state.is_disconnected(), "{}: connection survives", label);
@@ -1969,7 +1970,8 @@ mod session_tests {
         ];
         for (label, wire, code, ref_seq) in cases {
             let (mut session, mock_state) = make_harness_session();
-            let flow = crate::transport::sync::connection::process_inbound_msg(&mut session, &soh(wire));
+            let flow =
+                crate::transport::sync::connection::process_inbound_msg(&mut session, &soh(wire));
             assert_eq!(flow, ControlFlow::Continue(()), "{}: recoverable, keep reading", label);
             let sent = mock_state.sent();
             assert_eq!(sent.len(), 1, "{}: exactly one Reject", label);
@@ -1993,7 +1995,10 @@ mod session_tests {
         let (mut session, mock_state) = make_harness_session();
         session.state.next_target_msg_seq_num = 0; // fixture's MsgSeqNum is 0
 
-        let flow = crate::transport::sync::connection::process_inbound_msg(&mut session, &soh(VALID_LOGON));
+        let flow = crate::transport::sync::connection::process_inbound_msg(
+            &mut session,
+            &soh(VALID_LOGON),
+        );
 
         assert_eq!(flow, ControlFlow::Continue(()));
         assert!(session.state.logon_received, "valid Logon logs the session on");

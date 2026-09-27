@@ -1,6 +1,6 @@
 use fix_rs::application::Application;
-use fix_rs::errors::{BusinessMsgReject, DonotSend, RejectLogon};
 use fix_rs::core::message::Message;
+use fix_rs::errors::{BusinessMsgReject, DonotSend, RejectLogon};
 use fix_rs::session::SessionId;
 
 pub struct SampleApp {

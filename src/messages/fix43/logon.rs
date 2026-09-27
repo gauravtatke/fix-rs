@@ -5,8 +5,8 @@
 
 use super::fields::EncryptMethod;
 use crate::convert::{fix_bool_str, parse_fix_bool};
-use crate::errors::{FieldError, TypedError};
 use crate::core::message::Message;
+use crate::errors::{FieldError, TypedError};
 // Tags come from the shared, version-neutral registry (crate::tags) — a tag number means
 // the same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags::{

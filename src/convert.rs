@@ -212,7 +212,15 @@ mod tests {
 
     #[test]
     fn date_rejects_impossible_and_malformed() {
-        for bad in ["20250229", "20261301", "20260931", "2026-09-27", "202609", "nope", ""] {
+        for bad in [
+            "20250229",
+            "20261301",
+            "20260931",
+            "2026-09-27",
+            "202609",
+            "nope",
+            "",
+        ] {
             assert!(
                 matches!(parse_fix_date(bad, 75), Err(FieldError::InvalidFormat { tag: 75 })),
                 "expected {bad:?} to be rejected"
@@ -235,7 +243,10 @@ mod tests {
     fn time_only_rejects_impossible_and_malformed() {
         for bad in ["25:00:00", "14:60:00", "14-30-00", "nope", ""] {
             assert!(
-                matches!(parse_fix_time_only(bad, 273), Err(FieldError::InvalidFormat { tag: 273 })),
+                matches!(
+                    parse_fix_time_only(bad, 273),
+                    Err(FieldError::InvalidFormat { tag: 273 })
+                ),
                 "expected {bad:?} to be rejected"
             );
         }

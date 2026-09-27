@@ -1,7 +1,7 @@
-use crate::transport::sync::reader::FixMessageReader;
 use crate::core::message;
 use crate::core::message::Message;
 use crate::session::Session;
+use crate::transport::sync::reader::FixMessageReader;
 use log::{info, warn};
 use std::error::Error;
 use std::net::{SocketAddr, TcpStream};

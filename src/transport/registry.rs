@@ -1,5 +1,5 @@
-use crate::errors::SendError;
 use crate::core::message::Message;
+use crate::errors::SendError;
 use crate::session::{Session, SessionId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

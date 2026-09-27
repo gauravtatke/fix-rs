@@ -1,9 +1,9 @@
+use crate::core::message::{self, Message};
+use crate::session::Session;
+use crate::transport::SessionMap;
 use crate::transport::sync::connection;
 use crate::transport::sync::reader::FixMessageReader;
 use crate::transport::sync::responder::TcpResponder;
-use crate::core::message::{self, Message};
-use crate::transport::SessionMap;
-use crate::session::Session;
 use log::{info, warn};
 use std::error::Error;
 use std::net::{SocketAddr, TcpListener, TcpStream};

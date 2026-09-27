@@ -290,7 +290,6 @@ impl IndexMut<usize> for Group {
     }
 }
 
-
 #[derive(Debug, Default, Clone, MutGetters, Getters)]
 #[getset(get = "pub", get_mut = "pub")]
 pub struct Message {
