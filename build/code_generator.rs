@@ -121,9 +121,8 @@ fn get_enum_variant(field_type: &str, enum_val: &str, description: &str) -> Stri
 }
 
 fn add_fields_to_spec(field_node: &Node, spec: &mut XmlFixSpec) {
-    for field in field_node
-        .children()
-        .filter(|node| node.is_element() && node.has_tag_name("field"))
+    for field in
+        field_node.children().filter(|node| node.is_element() && node.has_tag_name("field"))
     {
         let ftype = field.attribute("type").unwrap();
         let fld_type = get_primitive_type(ftype);
