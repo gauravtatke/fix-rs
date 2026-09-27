@@ -1,6 +1,6 @@
-use crate::io::fix_message_reader::FixMessageReader;
-use crate::message;
-use crate::message::Message;
+use crate::transport::sync::reader::FixMessageReader;
+use crate::core::message;
+use crate::core::message::Message;
 use crate::session::Session;
 use log::{info, warn};
 use std::error::Error;

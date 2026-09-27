@@ -5,44 +5,68 @@ document, not a fixed spec.
 
 ## Goals
 
-1. **Learn Rust and become proficient in it.** Current level: between beginner and intermediate. This is a primary goal,
-   not a side effect — code choices should favor idiomatic Rust and understanding over speed of delivery.
-2. **Build a fully functional FIX protocol implementation in Rust.**
+1. **Build a good, robust, well-engineered FIX protocol implementation in Rust** — usable, functionally correct,
+   maintainable. This is the primary driver. **Design and technology decisions are made on product merit** (API
+   usability, correctness/safety, robustness, maintainability, performance, fit with the existing engine) — nothing
+   else. Two clarifications on what this means: (a) where a pattern is **idiomatic**, that counts as *evidence of*
+   maintainability — idiom feeds the criteria, it just isn't the tiebreaker; (b) "well-engineered" includes **simplicity
+   proportional to the need** (YAGNI) — the best design for the current scope, not the most general one possible.
+
+2. **Learn Rust and become proficient in it.** Current level: between beginner and intermediate. This is a real goal but
+   an *output* of the work, not an input to design decisions:
+   - **Learning never selects a design.** We pick the best design for the product; whatever Rust it requires is the
+     learning. We don't choose an option because it teaches a concept, or avoid one because it's already known.
+   - **Whatever we build, we build idiomatically.** Idiomatic Rust still matters — but at the *implementation* level,
+     because it *is* good engineering (clear, maintainable). It is not a decision point when choosing a design pattern
+     at the broader level.
+   - **Exceptions exist**; we decide case-by-case when one comes up (e.g. a deliberate, scoped learning detour).
 
 ## Scope
 
-### V1
+The work is organized as three **development phases** (v1 → v1.1 → v1.2) that culminate in the first public
+**release, v1.0**. So "v1/v1.1/v1.2" are internal milestones toward shipping, not separate releases; **v1.0 is cut once
+v1.2 is complete** (v1.0 = v1 + v1.1 + v1.2). Everything here is FIX **4.3** only and **synchronous** by design (FIX 4.4
+and async/Tokio are post-1.0 — see v2); config is `toml` + `serde::Deserialize` (QuickFIX/J's one `[Default]` + N
+per-session override merge).
 
-- FIX **4.3** only to start. FIX 4.4 is deferred until the architecture is proven on one version — the dictionary-driven
-  design should port to a second XML dictionary with minimal changes, but that's a later milestone, not v1 core.
-- **Synchronous** network architecture, deliberately, for learning purposes (understanding blocking IO, threads, etc.
-  before reaching for async).
-- Config loaded via `toml` + `serde::Deserialize` (replacing the current hand-rolled INI-style parser), modeling
-  QuickFIX/J's "one `[Default]` block + N per-session override blocks" merge pattern.
-- "Done" bar for v1 is a **happy path**: Logon, Heartbeat, TestRequest, and Logout working end-to-end between an
-  initiator and an acceptor, plus two typed application-level messages exchanged end-to-end — `MarketDataRequest` (35=V,
-  subscribe) and `MarketDataSnapshotFullRefresh` (35=W, response). No resend request / gap fill / sequence number
-  persistence in v1.
+### v1 — engine + happy path (DONE)
 
-### V1.1 and beyond
+- Session happy path end-to-end between an initiator and an acceptor: Logon, Heartbeat, TestRequest, Logout.
+- `MarketDataRequest` (35=V, subscribe) → `MarketDataSnapshotFullRefresh` (35=W, response).
+- **`NewOrderSingle` (35=D) placed, accepted and rejected via the `ExecutionReport` (35=8) flow** (moved in from the old
+  v1.1 scope — it was delivered live in M6).
+- Also landed in this phase beyond the original "done" bar: automatic session-level error responses (Reject/Logout/drop,
+  M7) and initiator support with auto-reconnect (M8).
+- **Not** in v1: resend request / gap fill / sequence-number persistence (that's v1.2).
 
-- **v1.1**: `NewOrderSingle` placed, accepted and rejected (`ExecutionReport` flow).
-- **v1.2+**: other message types, plus protocol robustness — resend request, gap fill, sequence number persistence.
+### v1.1 — typed message codegen
 
-### V2 (future)
+- Generate per-message-type structs (`Logon`, `NewOrderSingle`, `MarketDataRequest`, `MarketDataSnapshotFullRefresh`, …)
+  with typed field accessors, replacing today's raw `Message`/tag-lookup API (milestone **M3**). This is an
+  architecture/refactor phase — it changes how messages are *typed*, it does not add protocol functionality.
 
-- Introduce **Tokio** and the async stack as a feature enhancement on top of a working synchronous v1.
+### v1.2 — protocol robustness
+
+- Message store + **ResendRequest / gap fill / sequence-number persistence** — closes the too-high-seq path that is
+  currently stubbed (just logs a warning) across M4/M5/M7. Plus additional application message types as needed.
+
+### Release v1.0
+
+- Cut when **v1.2 is complete**. v1.0 is the first public release: a **typed, robust, synchronous FIX 4.3 engine**
+  (acceptor + initiator) with the happy path, order/execution flow, automatic error responses, and full
+  resend/sequence robustness.
+
+### v2 (post-1.0, future)
+
+- Introduce **Tokio** and the async stack as an enhancement on top of the working synchronous v1.0.
 - **Structured logging infrastructure**: replace direct `log::info!` calls with a proper `Log` trait
   (incoming/outgoing/event categories, per-session context) and an async logging backend. On low-latency paths,
   synchronous logging can stall the message-processing thread — the logger should hand off formatted output to a
   dedicated writer thread (or ring buffer) so the hot path never blocks on I/O. Design should support pluggable backends
   (screen, file, network) similar to QFJ's `LogFactory`/`Log` abstraction.
+- FIX **4.4** (prove the dictionary-driven design ports to a second XML dictionary).
 
-Note: the current codebase (as of the initial CLAUDE.md pass) already has a Tokio-based async prototype in `src/io/`,
-`src/network.rs`, etc. That predates this roadmap and is experimental — it does not reflect the v1 synchronous direction
-and can be discarded/rewritten as needed.
-
-See **[TASKS.md](TASKS.md)** for the v1 work broken into independently-pickupable tasks (milestones M1–M6).
+See **[TASKS.md](TASKS.md)** for the work broken into independently-pickupable tasks (milestones M1–M8).
 
 ## Inspiration
 
@@ -62,9 +86,11 @@ architecture where the Rust tech stack calls for it.
 
 ## Current project state
 
-**v1 is complete** — M1, M2, M4, M5, and M6 are all done. M3 (typed message codegen) was deferred by design; v1 uses the
-raw `Message` API instead. M7 (automatic session-level error responses, post-v1) is done except one deferred sub-task.
-See **[TASKS.md](TASKS.md)** for the per-task detail.
+**The v1 phase is complete** — M1, M2, M4, M5, and M6 are all done, and the two post-v1 milestones that fold into the v1
+phase are done too: M7 (automatic session-level error responses, except one deferred sub-task) and M8 (initiator support
++ auto-reconnect, live-verified). M3 (typed message codegen) is **not** part of the v1 phase — it is now the **v1.1**
+phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robustness). See **[TASKS.md](TASKS.md)** for
+the per-task detail.
 
 - **M1 (message/dictionary layer hardening) is done.** Tasks 1.1–1.6 complete. `Message`/`FieldMap` parsing is fully
   dictionary-driven with all validation going through `SessionRejectError`. 1.6 (SOH-in-Data-field handling) landed via
@@ -72,9 +98,10 @@ See **[TASKS.md](TASKS.md)** for the per-task detail.
   emit it either).
 - **M2 (config rewrite) is done.** `toml`+`serde` based config with default/session merge. Hand-rolled parser deleted.
   14 config tests.
-- **M3 (typed message codegen) is not started — deferred by design.** Would rework build-time codegen to emit
+- **M3 (typed message codegen) is not started — it is the v1.1 phase.** Would rework build-time codegen to emit
   per-message-type structs (`Logon`, `NewOrderSingle`, …) with typed accessors, matching the roadmap's two-layer goal.
-  v1 shipped on the raw `Message` API instead, so this is a post-v1 architectural improvement, not a blocker.
+  The v1 phase shipped on the raw `Message` API instead; M3 is the next phase toward the v1.0 release, not a blocker for
+  what already works.
 - **M4 (session state machine) is done.** `SessionState`, `SessionId`, `Application` trait, `Responder` trait,
   `Session::verify`, admin message builders (`generate_logon`/`logout`/`heartbeat`/`test_request`), inbound dispatch
   (`next_message`), and timer logic (`next_tick`). All testable without real sockets via `MockResponder`.
@@ -95,13 +122,16 @@ See **[TASKS.md](TASKS.md)** for the per-task detail.
 
 ## What's open next
 
-Everything above is post-v1. In rough order of value:
+The v1 phase is done; the remaining phases lead to the **v1.0 release**, in order:
 
-- **M3 — typed message codegen.** Biggest architectural piece and the one v1 milestone skipped by design; heavy on
-  Rust-learning (build-time codegen, trait design). Aligns with roadmap goal #2's two-layer shape.
-- **v1.2 protocol robustness** — message store + ResendRequest / gap fill / sequence-number persistence. Biggest
-  *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning).
-- **7.6 (b)** — scripted TCP simulator for true end-to-end coverage of the acceptor/IO seam (deferred).
+- **v1.1 — M3 typed message codegen** (next up). Biggest architectural piece and the roadmap's two-layer shape; heavy on
+  Rust-learning (build-time codegen, trait design). Still a sketch in TASKS.md — needs breaking into concrete tasks
+  first.
+- **v1.2 — protocol robustness.** Message store + ResendRequest / gap fill / sequence-number persistence. Biggest
+  *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning). **v1.0 releases
+  when this lands.**
+- **7.6 (b)** — scripted TCP simulator for true end-to-end coverage of the acceptor/IO seam (deferred from M7;
+  independent of the phase order, can slot in whenever).
 
 **M8 (initiator support) is done.** fix-rs dials out and completes Logon + heartbeat + clean reconnect against the QFJ
 executor (verified live 2026-09-20). 8.5 (auto-reconnect loop) landed: `IoInitiator::start()` retries forever on a

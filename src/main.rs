@@ -3,17 +3,18 @@
 include!(concat!(env!("OUT_DIR"), "/mod.rs"));
 
 mod application;
-mod data_dictionary;
-mod fix_errors;
-mod io;
-mod message;
-mod network;
+mod convert;
+mod messages;
+mod errors;
+mod transport;
+mod core;
 mod sample_app;
 mod session;
+mod tags;
 
-use crate::io::acceptor::IoAcceptor;
-use crate::io::initiator::IoInitiator;
-use crate::network::{SOCKET_ACCEPT_HOST_IP, SessionMap};
+use crate::transport::sync::acceptor::IoAcceptor;
+use crate::transport::sync::initiator::IoInitiator;
+use crate::transport::{SOCKET_ACCEPT_HOST_IP, SessionMap};
 use crate::sample_app::SampleApp;
 use crate::session::{ConnectionType, SessionProperties};
 use std::collections::HashSet;
@@ -52,7 +53,7 @@ fn main() {
         })
         .collect::<HashSet<SocketAddr>>();
     log::info!("Created {} session(s)", session_map.len());
-    let timer_handle = network::start_timer(session_map.clone());
+    let timer_handle = crate::transport::start_timer(session_map.clone());
     let mut start_handle = Vec::new();
     for addr in socket_accept_addrs {
         log::info!("Starting acceptor on {}", addr);

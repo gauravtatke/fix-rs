@@ -1,8 +1,8 @@
-use crate::io::connection;
-use crate::io::fix_message_reader::FixMessageReader;
-use crate::io::tcp_responder::TcpResponder;
-use crate::message::{self, Message};
-use crate::network::SessionMap;
+use crate::transport::sync::connection;
+use crate::transport::sync::reader::FixMessageReader;
+use crate::transport::sync::responder::TcpResponder;
+use crate::core::message::{self, Message};
+use crate::transport::SessionMap;
 use crate::session::Session;
 use log::{info, warn};
 use std::error::Error;

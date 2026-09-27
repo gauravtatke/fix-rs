@@ -1,6 +1,6 @@
-use crate::io::connection::run_connection;
-use crate::io::fix_message_reader::FixMessageReader;
-use crate::io::tcp_responder::TcpResponder;
+use crate::transport::sync::connection::run_connection;
+use crate::transport::sync::reader::FixMessageReader;
+use crate::transport::sync::responder::TcpResponder;
 use crate::session::{Session, SessionId};
 use getset::Getters;
 use log::{info, warn};

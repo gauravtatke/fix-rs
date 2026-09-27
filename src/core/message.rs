@@ -5,9 +5,9 @@ use std::fmt::Display;
 use std::ops::{Index, IndexMut};
 use std::str::FromStr;
 
-use crate::data_dictionary::{DataDictionary, FixType, HEADER_ID};
+use crate::core::dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::fields::*;
-use crate::fix_errors::{FieldError, SessionRejectError};
+use crate::errors::{FieldError, SessionRejectError};
 use crate::session::{SessionId, SessionIdBuilder};
 
 type SessionResult<T> = Result<T, SessionRejectError>;
@@ -141,6 +141,43 @@ impl FieldMap {
         self.group.get(&tag)
     }
 
+    pub fn get_group_mut(&mut self, tag: Tag) -> Option<&mut Group> {
+        self.group.get_mut(&tag)
+    }
+
+    /// Append a new empty instance to repeating group `count_tag` (creating the group with
+    /// delimiter `delim` if absent), keep the count field and `Group::value` in sync, and
+    /// return the new instance to fill. Lets a caller build a group incrementally without
+    /// managing the count itself — fixing the `set_group`/`add_group` desync footgun.
+    pub fn add_group_instance(&mut self, count_tag: Tag, delim: Tag) -> &mut FieldMap {
+        {
+            let group =
+                self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
+            group.add_group(FieldMap::new());
+            group.value = group.fields.len() as u32;
+        }
+        let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
+        self.set_field(count_tag, n.to_string());
+        self.group.get_mut(&count_tag).and_then(|g| g.fields.last_mut()).expect("just pushed")
+    }
+
+    /// Append a pre-built instance to repeating group `count_tag`, keeping the count in sync.
+    pub fn push_group_instance(&mut self, count_tag: Tag, delim: Tag, instance: FieldMap) {
+        {
+            let group =
+                self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
+            group.add_group(instance);
+            group.value = group.fields.len() as u32;
+        }
+        let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
+        self.set_field(count_tag, n.to_string());
+    }
+
+    /// Borrowed iteration over the instances of repeating group `count_tag` (empty if absent).
+    pub fn group_instances(&self, count_tag: Tag) -> impl Iterator<Item = &FieldMap> {
+        self.group.get(&count_tag).into_iter().flat_map(|g| g.fields.iter())
+    }
+
     pub fn set_field_order(&mut self, f_order: &[Tag]) {
         self.field_order = f_order.to_vec();
     }
@@ -228,6 +265,16 @@ impl Group {
     pub fn size(&self) -> u32 {
         self.fields.len() as u32
     }
+
+    /// The group's instances as a slice — lets a typed layer read them by index/iteration
+    /// (e.g. `as_slice().get(i)` wrapped in a borrowed view facade; see `fix43::group_variants`).
+    pub fn as_slice(&self) -> &[FieldMap] {
+        &self.fields
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [FieldMap] {
+        &mut self.fields
+    }
 }
 
 impl Index<usize> for Group {
@@ -293,6 +340,30 @@ impl Message {
 
     fn add_group(&mut self, tag: Tag, grp: Group) {
         self.body.group.insert(tag, grp);
+    }
+
+    /// Append + fill a body repeating-group instance (see `FieldMap::add_group_instance`).
+    pub fn add_body_group_instance(&mut self, count_tag: Tag, delim: Tag) -> &mut FieldMap {
+        self.body.add_group_instance(count_tag, delim)
+    }
+
+    /// Append a pre-built body repeating-group instance.
+    pub fn push_body_group_instance(&mut self, count_tag: Tag, delim: Tag, instance: FieldMap) {
+        self.body.push_group_instance(count_tag, delim, instance)
+    }
+
+    /// Borrowed iteration over a body repeating group's instances.
+    pub fn body_group_instances(&self, count_tag: Tag) -> impl Iterator<Item = &FieldMap> {
+        self.body.group_instances(count_tag)
+    }
+
+    /// The body repeating group `count_tag`, for slice/index access to its instances.
+    pub fn body_group(&self, count_tag: Tag) -> Option<&Group> {
+        self.body.get_group(count_tag)
+    }
+
+    pub fn body_group_mut(&mut self, count_tag: Tag) -> Option<&mut Group> {
+        self.body.get_group_mut(count_tag)
     }
 
     fn calc_checksum(&self) -> u32 {
@@ -981,8 +1052,8 @@ fn validate_required_tag_missing(
 mod message_test {
     use super::*;
     #[cfg(test)]
-    use crate::data_dictionary::*;
-    use crate::fix_errors::SessionRejectError;
+    use crate::core::dictionary::*;
+    use crate::errors::SessionRejectError;
     use assert_matches::*;
     use lazy_static::*;
 

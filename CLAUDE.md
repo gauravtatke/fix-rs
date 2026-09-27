@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 fix-rs is a work-in-progress FIX protocol engine implementation in Rust (inspired by QuickFIX/J — reference checkout at
 `/Users/gauravtatke/quickfixj`). See **[ROADMAP.md](ROADMAP.md)** for the project's actual goals, scope, and current
 state before making architectural decisions — notably: v1 targets FIX 4.3/4.4 with a **synchronous** network
-architecture by design (async/Tokio is an explicit v2 goal, not now), and this is as much a Rust-learning project as a
-protocol implementation, so idiomatic/educational code matters as much as functionality.
+architecture by design (async/Tokio is an explicit v2 goal, not now). It is also a Rust-learning project, but per the
+roadmap's refined goals, **design decisions are made on product merit, not on learning value** — learning is an output,
+not an input; whatever design is best for the product gets built the idiomatic way. See ROADMAP.md "Goals".
 
 The rest of this file (below) documents the *existing* code as of the initial pass, which is a Tokio-based async
 prototype — that predates and conflicts with the v1 synchronous direction in the roadmap. Treat it as experimental

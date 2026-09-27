@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use crate::fix_errors::{BusinessMsgReject, DonotSend, RejectLogon};
-use crate::message::*;
+use crate::errors::{BusinessMsgReject, DonotSend, RejectLogon};
+use crate::core::message::*;
 use crate::session::*;
 
 // Naming: on_<admin|app>_msg_<sending|received>.

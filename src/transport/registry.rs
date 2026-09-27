@@ -1,12 +1,8 @@
-use crate::fix_errors::SendError;
-use crate::message::Message;
+use crate::errors::SendError;
+use crate::core::message::Message;
 use crate::session::{Session, SessionId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-
-pub(crate) const SOCKET_ACCEPT_HOST_IP: &str = "127.0.0.1";
 
 /// Immutable, thread-safe registry of all configured sessions.
 ///
@@ -71,28 +67,11 @@ impl FromIterator<(SessionId, Session)> for SessionMap {
     }
 }
 
-/// Spawns a background thread that ticks every session once per second.
-/// Each tick drives session-level timers (heartbeat, logon timeout, etc.) and
-/// then drains any unsolicited outbound messages the app has queued
-/// (`poll_outbound`) — e.g. a streaming market-data feed.
-pub fn start_timer(session_map: SessionMap) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(1));
-            for session_arc in session_map.values() {
-                let mut session = session_arc.lock().unwrap();
-                session.next_tick();
-                let _ = session.poll_outbound();
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod session_map_tests {
     use super::*;
     use crate::application::DefaultApplication;
-    use crate::data_dictionary::DataDictionary;
+    use crate::core::dictionary::DataDictionary;
 
     use crate::session::schedule::SessionSchedule;
     use crate::session::state::SessionState;

@@ -1,4 +1,4 @@
-use crate::message::SOH;
+use crate::core::message::SOH;
 use std::io::{self, BufRead, BufReader, Read};
 
 const CHECKSUM_PREFIX: &[u8; 3] = b"10=";

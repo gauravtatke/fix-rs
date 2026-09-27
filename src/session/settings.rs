@@ -1,5 +1,5 @@
 use crate::application::Application;
-use crate::fix_errors::ConfigParseError;
+use crate::errors::ConfigParseError;
 use crate::session::*;
 use chrono::{NaiveTime, Weekday};
 use chrono_tz::Tz;

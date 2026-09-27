@@ -1,6 +1,6 @@
 use crate::application::Application;
-use crate::fix_errors::{BusinessMsgReject, DonotSend, RejectLogon};
-use crate::message::Message;
+use crate::errors::{BusinessMsgReject, DonotSend, RejectLogon};
+use crate::core::message::Message;
 use crate::session::SessionId;
 
 pub struct SampleApp {

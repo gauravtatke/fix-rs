@@ -200,6 +200,15 @@ pub enum FieldError {
     InvalidFormat { tag: u32 },
 }
 
+/// Error from adopting a raw `Message` as a typed message (`TryFrom<Message>` in the
+/// `crate::fixNN` modules). Version-neutral, so it lives here in the shared errors module
+/// and is kept separate from the engine's session errors — the only conversion failure is
+/// "this message isn't the type you asked for."
+#[derive(Debug, PartialEq, Eq)]
+pub enum TypedError {
+    WrongMsgType { expected: &'static str, got: String },
+}
+
 // The single, typed error for the whole inbound-processing path (next_message and
 // its helpers). Every fallible step converges here so next_message can classify
 // recoverable-vs-fatal in one place (7.3c) instead of erasing types into Box<dyn
