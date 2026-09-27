@@ -66,7 +66,7 @@ per-session override merge).
   (screen, file, network) similar to QFJ's `LogFactory`/`Log` abstraction.
 - FIX **4.4** (prove the dictionary-driven design ports to a second XML dictionary).
 
-See **[TASKS.md](TASKS.md)** for the work broken into independently-pickupable tasks (milestones M1–M8).
+The work is broken into independently-pickupable tasks (milestones M1–M8) in `TASKS.md` (kept on the dev branch).
 
 ## Inspiration
 
@@ -89,8 +89,8 @@ architecture where the Rust tech stack calls for it.
 **The v1 phase is complete** — M1, M2, M4, M5, and M6 are all done, and the two post-v1 milestones that fold into the v1
 phase are done too: M7 (automatic session-level error responses, except one deferred sub-task) and M8 (initiator support
 + auto-reconnect, live-verified). M3 (typed message codegen) is **not** part of the v1 phase — it is now the **v1.1**
-phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robustness). See **[TASKS.md](TASKS.md)** for
-the per-task detail.
+phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robustness). Per-task detail lives in
+`TASKS.md` (kept on the dev branch).
 
 - **M1 (message/dictionary layer hardening) is done.** Tasks 1.1–1.6 complete. `Message`/`FieldMap` parsing is fully
   dictionary-driven with all validation going through `SessionRejectError`. 1.6 (SOH-in-Data-field handling) landed via
