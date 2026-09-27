@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 
 const FILE_PATH: &str = "resources/FIX43.xml";
-const FIX_CONFIG_PATH: &str = "src/FixCfg.toml";
+const FIX_CONFIG_PATH: &str = "src/FixConfig.toml";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
