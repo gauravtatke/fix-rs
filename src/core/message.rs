@@ -1576,4 +1576,240 @@ mod message_test {
     #[test]
     #[ignore = "NonDataFieldIncludeSOHChar (373=17) not implemented; QFJ doesn't emit it either"]
     fn msg_test_soh_in_non_data_field() {}
+
+    // Group-count cardinality on a simple one-level group (NoMDEntries in a 35=W message):
+    // declared-vs-actual, too MANY actual instances. The existing IncorrectNumInGroup tests only
+    // reach this via a nested group's "instance not recognized" path; this hits the direct
+    // one-level mismatch. 268 declares 1 but two instances (269/270/271) are present.
+    #[test]
+    fn msg_test_group_count_fewer_than_instances_rejected() {
+        let too_many = "8=FIX.4.3|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=1|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=011|";
+        let msg = Message::from_str(&soh_replaced_str(too_many), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { .. }
+        );
+    }
+
+    // Same one-level group, the other direction: declared-vs-actual, too FEW actual instances.
+    // 268 declares 3 but only two instances are present.
+    #[test]
+    fn msg_test_group_count_greater_than_instances_rejected() {
+        let too_few = "8=FIX.4.3|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=3|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=013|";
+        let msg = Message::from_str(&soh_replaced_str(too_few), &DD);
+        assert!(msg.is_err());
+        assert_matches!(
+            msg.unwrap_err(),
+            SessionRejectError::IncorrectNumInGroupCountForRepeatingGroup { .. }
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Serialization / write path (Display + set_body_len + set_checksum + field ordering).
+    //
+    // These build a message via the setter/group API (NOT by parsing) and assert the emitted
+    // wire form — the round-trip tests above only ever re-serialize a *parsed* message, so the
+    // build path's ordering, body-length and checksum computation were untested.
+    //
+    // BodyLength(9) and CheckSum(10) are cross-checked by an **independent positional oracle**
+    // that recomputes them straight from the emitted bytes per the FIX definition, rather than
+    // re-running the engine's own arithmetic:
+    //   - BodyLength = byte count from the first byte after BodyLength's SOH up to and including
+    //     the SOH immediately preceding CheckSum.
+    //   - CheckSum = sum of every byte up to (and including) that SOH, mod 256, zero-padded to 3.
+    // ------------------------------------------------------------------------------------------
+
+    fn split_fields(wire: &str) -> Vec<(u32, &str)> {
+        wire.split(SOH)
+            .filter(|s| !s.is_empty())
+            .map(|f| {
+                let (t, v) = f.split_once('=').expect("each field is tag=value");
+                (t.parse::<u32>().expect("numeric tag"), v)
+            })
+            .collect()
+    }
+
+    fn tags_in_order(wire: &str) -> Vec<u32> {
+        split_fields(wire).into_iter().map(|(t, _)| t).collect()
+    }
+
+    fn field_value(wire: &str, tag: u32) -> Option<String> {
+        split_fields(wire).into_iter().find(|(t, _)| *t == tag).map(|(_, v)| v.to_string())
+    }
+
+    // FIX BodyLength: bytes between BodyLength's terminating SOH (exclusive) and CheckSum's
+    // leading SOH (inclusive). Computed positionally from the wire, independent of calc_body_len.
+    fn oracle_body_length(wire: &str) -> usize {
+        let soh = SOH.to_string();
+        let nine = wire.find(&format!("{soh}9=")).expect("BodyLength present");
+        let nine_soh = wire[nine + 1..].find(SOH).expect("BodyLength terminated") + nine + 1;
+        let first = nine_soh + 1;
+        let ten = wire.rfind(&format!("{soh}10=")).expect("CheckSum present") + 1;
+        ten - first
+    }
+
+    // FIX CheckSum: sum of all bytes up to and including the SOH before CheckSum, mod 256.
+    fn oracle_checksum(wire: &str) -> u32 {
+        let soh = SOH.to_string();
+        let ten = wire.rfind(&format!("{soh}10=")).expect("CheckSum present") + 1;
+        wire.as_bytes()[..ten].iter().map(|&b| b as u32).sum::<u32>() % 256
+    }
+
+    // Assert the embedded BodyLength(9)/CheckSum(10) agree with the independent recomputation,
+    // and that CheckSum is exactly three zero-padded digits.
+    fn assert_wire_self_consistent(wire: &str) {
+        let embedded_len: usize =
+            field_value(wire, 9).expect("9 present").parse().expect("9 numeric");
+        assert_eq!(embedded_len, oracle_body_length(wire), "BodyLength(9) mismatch: {wire:?}");
+        let embedded_cksum = field_value(wire, 10).expect("10 present");
+        assert_eq!(
+            embedded_cksum,
+            format!("{:03}", oracle_checksum(wire)),
+            "CheckSum(10) mismatch: {wire:?}"
+        );
+    }
+
+    // (a) Scalar-only: header order + body length + checksum from a built message.
+    #[test]
+    fn serialize_scalar_only_orders_header_and_computes_len_checksum() {
+        // Insert header fields in scrambled order. Only 8/9/35 are order-pinned (Message::new's
+        // field_order); the remaining header fields keep INSERTION order, body fields likewise,
+        // and CheckSum is last.
+        let mut msg = Message::new();
+        msg.set_header_field(49, "BANZAI");
+        msg.set_header_field(56, "FIXIMULATOR");
+        msg.set_header_field(34, "0");
+        msg.set_header_field(52, "20221006-08:43:36.522");
+        msg.set_header_field(35, "A"); // inserted late — must still lead (after 8,9)
+        msg.set_header_field(8, "FIX.4.3"); // inserted late — must be first
+        msg.set_body_field(98, "0");
+        msg.set_body_field(108, "30");
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        // 8,9,35 pinned first; then 49,56,34,52 in insertion order; body 98,108; CheckSum last.
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 49, 56, 34, 52, 98, 108, 10]);
+        assert_wire_self_consistent(&wire);
+    }
+
+    // (b) Hypothetical message with an explicitly declared field order for some tags.
+    #[test]
+    fn serialize_respects_declared_field_order_unranked_last() {
+        // Declare a body field order for 55/44/40; insert them scrambled and interleave unranked
+        // tags (58/59). Ranked tags emit in the declared order; unranked sort after, keeping
+        // their insertion order (field_rank -> usize::MAX, stable sort).
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "X");
+        msg.set_body_field(40, "2"); // ranked #3
+        msg.set_body_field(58, "note"); // unranked
+        msg.set_body_field(55, "MSFT"); // ranked #1
+        msg.set_body_field(59, "0"); // unranked
+        msg.set_body_field(44, "10"); // ranked #2
+        msg.body_mut().set_field_order(&[55, 44, 40]);
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 55, 44, 40, 58, 59, 10]);
+        assert_wire_self_consistent(&wire);
+    }
+
+    // (c) One level of repeating group: count tag precedes the flattened instances.
+    #[test]
+    fn serialize_one_level_group_count_then_instances() {
+        // MarketDataSnapshotFullRefresh-ish: NoMDEntries(268), delimiter MDEntryType(269).
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "W");
+        msg.set_body_field(55, "MSFT");
+        {
+            let group = msg.body_mut().set_group(268, 2, 269);
+            group[0].set_field(269, "0");
+            group[0].set_field(270, "93.25");
+            group[0].set_field(271, "100");
+            group[1].set_field(269, "1");
+            group[1].set_field(270, "93.30");
+            group[1].set_field(271, "200");
+        }
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        // Count 268 emitted, then each instance flattened delimiter-first, in order.
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 55, 268, 269, 270, 271, 269, 270, 271, 10]);
+        assert_eq!(field_value(&wire, 268).as_deref(), Some("2"));
+        // Self-consistency proves body_len/checksum counted the group bytes too.
+        assert_wire_self_consistent(&wire);
+    }
+
+    // (c-edge) A group with no instances added never appears on the wire.
+    #[test]
+    fn serialize_group_never_populated_emits_no_count() {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "W");
+        msg.set_body_field(55, "MSFT");
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 55, 10]);
+        assert!(!tags_in_order(&wire).contains(&268));
+        assert_wire_self_consistent(&wire);
+    }
+
+    // (c-edge) Pin current behavior: set_group(_, 0, _) still writes a bare "268=0" with no
+    // instances. FIX normally omits a zero-count group — flagged for the set_group hardening
+    // follow-up (design log D9). This test documents today's behavior so a future fix is a
+    // deliberate change, not a silent one.
+    #[test]
+    fn serialize_group_count_zero_emits_bare_count_field() {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "W");
+        msg.body_mut().set_group(268, 0, 269);
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        assert_eq!(field_value(&wire, 268).as_deref(), Some("0"));
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 10]);
+        assert_wire_self_consistent(&wire);
+    }
+
+    // (d) Nested repeating groups: NoQuoteSets(296)/QuoteSetID(302) containing NoQuoteEntries(295).
+    #[test]
+    fn serialize_nested_groups_orders_counts_and_instances() {
+        // MassQuote (35=i). Outer instance carries scalars (302,304) then the nested group (295).
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "i");
+        msg.set_body_field(117, "Q1");
+        {
+            let sets = msg.body_mut().set_group(296, 1, 302);
+            let set0 = &mut sets[0];
+            set0.set_field(302, "SET-A");
+            set0.set_field(304, "2"); // TotQuoteEntries
+            let entries = set0.set_group(295, 2, 299);
+            entries[0].set_field(299, "E0");
+            entries[0].set_field(132, "1.2345");
+            entries[1].set_field(299, "E1");
+            entries[1].set_field(132, "1.2360");
+        }
+        msg.set_body_len();
+        msg.set_checksum();
+
+        let wire = msg.to_string();
+        // outer count 296 -> set instance (302,304, nested count 295 -> its instances) -> CheckSum
+        assert_eq!(
+            tags_in_order(&wire),
+            vec![8, 9, 35, 117, 296, 302, 304, 295, 299, 132, 299, 132, 10]
+        );
+        assert_eq!(field_value(&wire, 296).as_deref(), Some("1"));
+        assert_eq!(field_value(&wire, 295).as_deref(), Some("2"));
+        assert_wire_self_consistent(&wire);
+    }
 }
