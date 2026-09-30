@@ -195,8 +195,10 @@ references are the golden target the generator must reproduce (diffed by the fre
       variant names from `FieldValue.description` (heck UpperCamelCase), `to_fix`/`from_fix` keyed on
       the FIX type (`char` for CHAR, `i32` for INT — see EncryptMethod/Side/OrdType). Identifier
       sanitization: Rust keywords → raw idents or rename, digit-leading descriptions → prefix. Done:
-      regenerated `messages/fix43/fields.rs` reproduces the hand-written EncryptMethod/Side/OrdType
-      (then all constrained fields), freshness green, engine compiles.
+      regenerated `messages/fix43/generated/fields.rs` reproduces the hand-written
+      EncryptMethod/Side/OrdType (then all constrained fields), freshness green, engine compiles.
+      **Emit into `messages/fix43/generated/` (generator-owned subtree, incl. its `mod.rs` index);
+      hand-written tests live in `messages/fix43/tests/` and are never generated — design log D4c.**
 
 - [~] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups).**
   DONE (seeded 2026-09-26, by Claude alongside 3.7): `FieldMap::add_group_instance` (append +
@@ -225,7 +227,10 @@ references are the golden target the generator must reproduce (diffed by the fre
     - [ ] **3.8b — Emit `Logon`** (the old 3.4 "Logon byte-identical" first goal). Facade over
       `Message`: named natural-type accessors (via the `convert` map + enums), `has_*`,
       `TryFrom<Message>` (checks 35=A) + `From<_> for Message`, `message()`/`message_mut()`. Reproduce
-      the 3.1 hand-write. Done: generated `Logon` + its tests pass, freshness green.
+      the 3.1 hand-write — now the *pure* `messages/fix43/generated/logon.rs` (its tests were
+      extracted to `messages/fix43/tests/logon.rs`, D4c), so the generated file is the byte-for-byte
+      target. Done: generated `Logon` compiles, the hand-written `tests/logon.rs` still passes against
+      it, freshness green.
     - [ ] **3.8c — Emit remaining admin messages.** Heartbeat/TestRequest/Logout/Reject/
       ResendRequest/SequenceReset. Done: each has typed accessors + `TryFrom`/`Into`, tests green.
 

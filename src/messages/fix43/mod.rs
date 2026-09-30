@@ -10,11 +10,19 @@
 //! accessors taking each field's natural Rust type (D2), real enums for value-constrained
 //! fields (D3), `Result` getters (D5), and `TryFrom<Message>` / `From<_> for Message`
 //! seams.
+//!
+//! Layout: the machine-generated code lives in `generated/` (the codegen binary owns that
+//! whole subtree; the freshness test diffs it). The hand-written tests that validate it live
+//! in `tests/` — kept out of `generated/` so the generator's targets are pure, reproducible
+//! code, and so the tests stay an independent oracle rather than being generated themselves.
 
-pub mod fields;
-pub mod logon;
+mod generated;
+pub use generated::*;
 
-// Public surface of this version module; consumed once the app migrates to typed
-// messages (task 3.10), so unused for now.
+// Flattened public surface (`fix43::Logon`, `fix43::EncryptMethod`); consumed once the app
+// migrates to typed messages (task 3.10), so unused for now.
 #[allow(unused_imports)]
-pub use self::{fields::EncryptMethod, logon::Logon};
+pub use generated::{fields::EncryptMethod, logon::Logon};
+
+#[cfg(test)]
+mod tests;

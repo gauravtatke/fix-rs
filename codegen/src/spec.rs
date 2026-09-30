@@ -50,8 +50,8 @@ pub struct FieldValue {
 /// Parse a FIX dictionary XML (e.g. `resources/FIX43.xml`) into a [`FixSpec`].
 pub fn parse(xml_path: &Path) -> FixSpec {
     let text = std::fs::read_to_string(xml_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", xml_path.display()));
-    let doc = Document::parse(&text).expect("FIX dictionary XML failed to parse");
+        .unwrap_or_else(|e| panic!("{} should be readable: {e}", xml_path.display()));
+    let doc = Document::parse(&text).expect("FIX dictionary XML should be well-formed");
     let root = doc.root_element();
 
     let begin_string = format!(
@@ -61,31 +61,52 @@ pub fn parse(xml_path: &Path) -> FixSpec {
         root.attribute("minor").unwrap_or("?"),
     );
 
-    let fields = lookup(&doc, "fields")
+    let fields: Vec<FieldDef> = lookup(&doc, "fields")
         .children()
         .filter(|n| n.is_element() && n.has_tag_name("field"))
         .map(parse_field)
         .collect();
 
-    FixSpec { begin_string, fields }
+    FixSpec {
+        begin_string,
+        fields,
+    }
 }
 
 fn parse_field(field: Node) -> FieldDef {
-    let name = field.attribute("name").expect("field has a name").to_owned();
-    let tag = field
-        .attribute("number")
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or_else(|| panic!("field {name} has no numeric tag"));
-    let fix_type = field.attribute("type").expect("field has a type").to_owned();
+    let name =
+        field.attribute("name").expect("every <field> should have a name attribute").to_owned();
+    let tag = field.attribute("number").and_then(|s| s.parse::<u32>().ok()).unwrap_or_else(|| {
+        panic!("field {name} should have a numeric `number` attribute (its tag)")
+    });
+    let fix_type = field
+        .attribute("type")
+        .unwrap_or_else(|| panic!("field {name} should have a type attribute"))
+        .to_owned();
     let values = field
         .children()
         .filter(|n| n.is_element() && n.has_tag_name("value"))
         .map(|v| FieldValue {
-            code: v.attribute("enum").expect("value has an enum code").to_owned(),
-            description: v.attribute("description").expect("value has a description").to_owned(),
+            code: v
+                .attribute("enum")
+                .unwrap_or_else(|| {
+                    panic!("every <value> of field {name} should have an enum attribute")
+                })
+                .to_owned(),
+            description: v
+                .attribute("description")
+                .unwrap_or_else(|| {
+                    panic!("every <value> of field {name} should have a description attribute")
+                })
+                .to_owned(),
         })
         .collect();
-    FieldDef { name, tag, fix_type, values }
+    FieldDef {
+        name,
+        tag,
+        fix_type,
+        values,
+    }
 }
 
 /// Find a top-level child element of the document root by tag name (case-insensitive).
@@ -93,5 +114,5 @@ fn lookup<'a, 'i>(doc: &'a Document<'i>, name: &str) -> Node<'a, 'i> {
     doc.root_element()
         .children()
         .find(|n| n.tag_name().name().eq_ignore_ascii_case(name))
-        .unwrap_or_else(|| panic!("<{name}> section not found in dictionary"))
+        .unwrap_or_else(|| panic!("dictionary should have a <{name}> section"))
 }
