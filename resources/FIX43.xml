@@ -1,3 +1,12 @@
+<!--
+  FIX 4.3 data dictionary for fix-rs.
+
+  Source: QuickFIX/J quickfixj-messages-fix43/src/main/resources/FIX43.xml
+          (QFJ_RELEASE_2_2_0-1663-g73e45dbe).
+  MODIFIED by fix-rs: every change is marked with a "MODIFIED:" comment at the change.
+  The unmodified original is the first commit of this file (git log resources/FIX43.xml).
+  Rationale: design log D12.
+-->
 <fix major="4" minor="3">
   <header>
     <field name="BeginString" required="Y" />
@@ -3845,17 +3854,30 @@
       <value enum="A4" description="EXACT_MATCH_PLUS_TWO_BADGES" />
       <value enum="A5" description="EXACT_MATCH_PLUS_EXECUTION_TIME" />
       <value enum="AQ" description="COMPARED_RECORDS_RESULTING_FROM_STAMPED_ADVISORIES_OR_SPECIALIST_ACCEPTS" />
-      <value description="SUMMARIZED_MATCH_USING_A1_TO_A5" enum="S5" />
-      <value enum="M1" description="EXACT_MATCH_MINUS_BADGES_AND_EXECUTION_TIME" />
-      <value enum="M2" description="SUMMARIZED_MATCH_MINUS_BADGES_AND_TIMES" />
-      <value enum="MT" description="OCS_LOCKED_IN" />
-      <value description="ACT_M1_MATCH" enum="M1" />
-      <value description="ACT_M2_MATCH" enum="M2" />
+      <!--
+      MODIFIED: QFJ listed only S5 ("SUMMARIZED_MATCH_USING_A1_TO_A5"). FIX 4.3 Vol 6 (tag 574) defines
+      "S1 to S5 = Summarized Match using A1 to A5 exact match criteria", so S1-S4 were rejected as invalid.
+      Added S1-S4 and gave each code its own description (S<n> uses A<n> criteria).
+      -->
+      <value enum="S1" description="SUMMARIZED_MATCH_USING_A1" />
+      <value enum="S2" description="SUMMARIZED_MATCH_USING_A2" />
+      <value enum="S3" description="SUMMARIZED_MATCH_USING_A3" />
+      <value enum="S4" description="SUMMARIZED_MATCH_USING_A4" />
+      <value enum="S5" description="SUMMARIZED_MATCH_USING_A5" />
+      <!--
+      MODIFIED: QFJ listed M1, M2 and MT twice. FIX 4.3 Vol 6 (tag 574) gives these codes different
+      meanings per market: NYSE/AMEX (M1 exact match minus badges and times, M2 summarized match minus
+      badges and times, MT OCS locked in) vs NASDAQ (M1 ACT M1 match, M2 ACT M2 match, MT non-ACT).
+      One code can only be listed once (strict loader; one enum variant), so each is collapsed into a
+      single market-neutral description.
+      -->
+      <value enum="M1" description="M1_MATCH" />
+      <value enum="M2" description="M2_MATCH" />
+      <value enum="MT" description="OCS_LOCKED_IN_OR_NON_ACT" />
       <value enum="M3" description="ACT_ACCEPTED_TRADE" />
       <value enum="M4" description="ACT_DEFAULT_TRADE" />
       <value description="ACT_DEFAULT_AFTER_M2" enum="M5" />
       <value description="ACT_M6_MATCH" enum="M6" />
-      <value enum="MT" description="NON_ACT" />
     </field>
     <field number="575" name="OddLot" type="BOOLEAN" />
     <field number="576" name="NoClearingInstructions" type="INT" />
