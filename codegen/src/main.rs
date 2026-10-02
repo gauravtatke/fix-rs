@@ -8,10 +8,11 @@
 //! - Check for drift:    `cargo test -p codegen`  (the freshness test below)
 //!
 //! Design (see `session_context/v1.1-codegen-design-discussion.md`):
-//! - Emission is plain string building + `rustfmt` (not a template engine, not `quote`) — full
-//!   control of doc-comments and exact bytes, which the freshness diff needs.
-//! - `generate()` is a pure function `-> Vec<(path, contents)>`; the binary writes, the test
-//!   compares. One source of truth for both.
+//! - Emission: every generated file renders from a `minijinja` template (`codegen/templates/`),
+//!   which reads like the code it emits. Output always goes through `rustfmt`, so template
+//!   whitespace doesn't matter.
+//! - `OUTPUTS` is one table of `(path, emitter fn)`; the binary renders + writes each file in
+//!   turn, the test renders + compares. One source of truth for both.
 //! - Per-version generated code lives under `src/messages/fix43/generated/` (the generator owns
 //!   that whole subtree — its `mod.rs` index too; hand-written tests sit in the sibling
 //!   `src/messages/fix43/tests/`, never here — see design log D4c). Shared registries are
@@ -20,11 +21,11 @@
 #![allow(dead_code)] // scaffold: spec fields are unused until the emitters read them
 
 mod audit;
+mod emitter;
 mod naming;
 mod spec;
 
 use crate::spec::FixSpec;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Printed to stderr on a bad invocation (unknown subcommand, or `audit` without a path).
@@ -41,8 +42,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The engine crate's `src/` — where generated files land. Paths from `generate()` are relative
-/// to this.
+/// The engine crate's `src/` — where generated files land. Paths in [`OUTPUTS`] are relative to
+/// this.
 fn engine_src_root() -> PathBuf {
     workspace_root().join("src")
 }
@@ -52,49 +53,25 @@ fn fix43_xml_path() -> PathBuf {
     workspace_root().join("resources/FIX43.xml")
 }
 
-/// The whole generation as a pure function: `(path relative to engine src/, file contents)`.
-/// The binary writes these; the freshness test compares them. Keep it deterministic (stable
-/// ordering, no timestamps) so the output is diffable.
+/// An emitter: renders one generated file's contents from the parsed dictionary. Pure and
+/// deterministic (stable ordering, no timestamps) so the output is diffable.
+type Emit = fn(&FixSpec) -> String;
+
+/// Every generated file: `(path relative to engine src/, its emitter)`. The binary renders and
+/// writes these one at a time; the freshness test renders and compares them. One table, so the
+/// two can't disagree about which files exist.
 ///
-/// One entry per generated file. `tags.rs` is done; next, in order: the value enums
-/// (`messages/fix43/generated/fields.rs`), then `Logon` (`…/generated/logon.rs`), then the
-/// generated `…/generated/mod.rs` index. `tags.rs` is a shared registry at the src root, not under
-/// `generated/`. Never emit tests — they are hand-written under `messages/fix43/tests/` (D4c).
+/// Next, in order: `Logon` (`…/generated/logon.rs`), then the generated `…/generated/mod.rs`
+/// index. `tags.rs` is a shared registry at the src root, not under `generated/`. Never emit
+/// tests — they are hand-written under `messages/fix43/tests/` (D4c).
 ///
 /// Names: convert XML names through `naming.rs` (corrections first, then `heck`) — never call
 /// `heck` on a raw XML name, or the corrections are bypassed. `ToShoutySnakeCase` for tag consts,
 /// `ToSnakeCase` for accessors, `ToUpperCamelCase` for types and enum variants.
-fn generate() -> Vec<(PathBuf, String)> {
-    let spec = spec::parse(&fix43_xml_path());
-    vec![(PathBuf::from("tags.rs"), emit_tags(&spec))]
-}
-
-fn emit_tags(spec: &FixSpec) -> String {
-    let mut sorted_field_ref = spec.fields.iter().collect::<Vec<_>>();
-    sorted_field_ref.sort_by_key(|a| a.tag);
-
-    let mut output = String::with_capacity(1024);
-    // Module doc for the generated file. Each `\` at a line end continues the string literal and
-    // skips the next line's leading whitespace, so every `//!` line lands at column 0.
-    writeln!(
-        output,
-        "//! Shared FIX field-tag registry: `field name -> tag number`.\n\
-         //!\n\
-         //! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen` from the {} data\n\
-         //! dictionary; `cargo test -p codegen` fails if this file drifts from the generator's output.\n\
-         //!\n\
-         //! Version-neutral by design: FIX tag numbers are globally stable (a given number always\n\
-         //! denotes the same field), so this one registry is shared by every `messages::fixNN` module\n\
-         //! rather than duplicated per version. Sorted by tag number.\n",
-        spec.begin_string
-    )
-        .unwrap();
-    for field in sorted_field_ref {
-        writeln!(output, "pub const {}: u32 = {};", naming::const_name(&field.name), field.tag)
-            .unwrap();
-    }
-    output
-}
+const OUTPUTS: &[(&str, Emit)] = &[
+    ("tags.rs", emitter::emit_tags),
+    ("messages/fix43/generated/fields.rs", emitter::emit_field_enums),
+];
 
 /// Run `rustfmt` over generated source (stdin → stdout). Normalizes formatting so hand-emitted
 /// code and the committed files compare equal. Falls back to the unformatted input if `rustfmt`
@@ -123,19 +100,17 @@ fn rustfmt(src: &str) -> String {
     }
 }
 
+/// Render, format and write each generated file in turn, so a file is on disk before the next
+/// one is rendered.
 fn write_generated() {
+    let spec = spec::parse(&fix43_xml_path());
     let root = engine_src_root();
-    let files = generate();
-    if files.is_empty() {
-        println!("codegen: nothing to emit yet (generate() is a stub — add emit logic).");
-        return;
-    }
-    for (rel, contents) in files {
-        let path = root.join(&rel);
+    for &(rel, emit) in OUTPUTS {
+        let path = root.join(rel);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("output dir should be creatable");
         }
-        std::fs::write(&path, rustfmt(&contents)).expect("generated file should be writable");
+        std::fs::write(&path, rustfmt(&emit(&spec))).expect("generated file should be writable");
         println!("wrote {}", path.display());
     }
 }
@@ -165,20 +140,19 @@ fn main() {
 mod freshness {
     use super::*;
 
-    /// Fails if any committed generated file differs from a fresh `generate()` run — i.e. someone
-    /// hand-edited generated code or changed the generator without regenerating. Fix by running
-    /// `cargo run -p codegen` and committing the result.
-    ///
-    /// (Trivially passes while `generate()` is a stub; becomes meaningful as emitters are added.)
+    /// Fails if any committed generated file differs from a fresh render of its emitter — i.e.
+    /// someone hand-edited generated code or changed the generator without regenerating. Fix by
+    /// running `cargo run -p codegen` and committing the result.
     #[test]
     fn committed_output_is_fresh() {
+        let spec = spec::parse(&fix43_xml_path());
         let root = engine_src_root();
         let mut stale = Vec::new();
-        for (rel, contents) in generate() {
-            let expected = rustfmt(&contents);
-            let actual = std::fs::read_to_string(root.join(&rel)).unwrap_or_default();
+        for &(rel, emit) in OUTPUTS {
+            let expected = rustfmt(&emit(&spec));
+            let actual = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
             if actual != expected {
-                stale.push(rel.display().to_string());
+                stale.push(rel);
             }
         }
         assert!(

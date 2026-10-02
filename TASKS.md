@@ -182,23 +182,75 @@ references are the golden target the generator must reproduce (diffed by the fre
   (rerun generate → diff committed files → fail with "run `cargo run -p codegen` and commit").
   `codegen/src/spec.rs`: roxmltree parse of the `<fields>` section into raw-data
   `FixSpec/FieldDef/FieldValue` (ported from `build/code_generator.rs`, minus Handlebars / the buggy
-  f32 type map / the `ENVal_` prefix). **Emission = plain string-building + rustfmt** (not a template
-  engine, not `quote`). Run: `cargo run -p codegen`; check: `cargo test -p codegen`.
+  f32 type map / the `ENVal_` prefix). ~~Emission = plain string-building + rustfmt (not a template
+  engine)~~ — **superseded 2026-10-02 (design log D4d): minijinja templates** for every generated
+  file (`tags.rs.j2`, `fields.rs.j2`); `generate()` replaced by an `OUTPUTS`
+  table of `(path, emitter fn)` rendered + written one file at a time, which the freshness test
+  iterates too. Run: `cargo run -p codegen`; check: `cargo test -p codegen`.
 
 - [ ] **3.5 — Emit `tags.rs` + `fields.rs` value enums (USER).** First real emitters; both work with
   the current `<fields>`-only parser (no message parsing needed yet).
-    - [ ] **3.5a — `tags.rs`.** Every field → `pub const <NAME>: u32 = <tag>;`, **sorted by tag** for
-      a stable diff. Names via heck shouty-snake, matching the hand-written casing incl. acronyms
-      (`MDEntryPx`→`MD_ENTRY_PX`, `NoMDEntries`→`NO_MD_ENTRIES`). Done: `cargo run -p codegen`
-      regenerates `src/tags.rs`, freshness test green, engine still compiles.
-    - [ ] **3.5b — `fields.rs` enums.** Value-constrained fields → real enums (D3, per-version):
-      variant names from `FieldValue.description` (heck UpperCamelCase), `to_fix`/`from_fix` keyed on
-      the FIX type (`char` for CHAR, `i32` for INT — see EncryptMethod/Side/OrdType). Identifier
-      sanitization: Rust keywords → raw idents or rename, digit-leading descriptions → prefix. Done:
-      regenerated `messages/fix43/generated/fields.rs` reproduces the hand-written
-      EncryptMethod/Side/OrdType (then all constrained fields), freshness green, engine compiles.
+    - [x] **3.5a — `tags.rs`. DONE (2026-09-30).** Every field → `pub const <NAME>: u32 = <tag>;`,
+      **sorted by tag** for a stable diff. Names via heck shouty-snake, matching the hand-written casing
+      incl. acronyms (`MDEntryPx`→`MD_ENTRY_PX`, `NoMDEntries`→`NO_MD_ENTRIES`). `cargo run -p codegen`
+      regenerates `src/tags.rs` (all 635 FIX43 fields + generated-file header), freshness green, engine
+      compiles. Also delivered:
+        - **`codegen/src/naming.rs`** — the single XML-name → Rust-name layer. A `match` correction
+          table applied *before* heck (`NoPartyIDs`/`NoNestedPartyIDs`/`NoRoutingIDs` → `…Ids`,
+          `IOIid` → `IoiId`, `XMLnonFIX` → `XmlNonFix`, keyword `Yield` → `YieldValue`), an
+          `ACCEPTED_NAMES` list for reviewed-and-kept names (`Rule80A`, `OutMainCntryUIndex`), and
+          `const_name()`. Rule: emitters never call heck on a raw XML name. Later emitters add
+          `fn_name`/`type_name` siblings.
+        - **`cargo run -p codegen -- audit <dictionary.xml>`** (`codegen/src/audit.rs`) — reports
+          names heck may mis-case: precise (single-letter segment, Rust keyword, collision) + noisy
+          (acronym-then-lowercase, digits). Reports only; decisions go in `naming.rs`. Checked
+          FIX42/44/50SP2: the `…IDs` pattern dominates (22 hits in 5.0SP2).
+        - **Guard tests** (10 new, codegen crate): FIX43 has no undecided precise findings; final
+          (post-correction) names are clean + unique; each detector category fires; naming table
+          pinned.
+    - [~] **3.5b — `fields.rs` enums.** Value-constrained fields → real enums (D3, per-version).
+      **DONE (2026-10-02)** for the three references (EncryptMethod/Side/OrdType):
+        - `codegen/templates/fields.rs.j2` + `emitter::emit_field_enums` (minijinja, D4d). A view
+          model (`FieldEnum`/`Variant`) carries everything pre-decided — names, literals, order — so
+          the template holds layout only.
+        - **Shape (D3 addendum):** explicit `match` in both directions for every FIX type — no
+          `#[repr]` / discriminants / `as i32` (superseded the hand-written INT trick).
+          `to_fix(self) -> char | i32 | &'static str`; `from_fix(value: char | i32 | &str) ->
+          Option<Self>` as a plain match (`=> Some(..)`, `_ => None`). Variants sorted by wire code
+          (numeric for INT); doc line per enum (tag + FIX type) and per variant (wire value).
+        - **Type map:** CHAR→`char`, INT/NUMINGROUP→`i32`, STRING/MULTIPLEVALUESTRING→`&'static str`
+          (one token; splitting is the message accessor's job), anything else → panic. **BOOLEAN
+          fields are skipped** (→ `bool`, not ~21 yes/no enums).
+        - Guard: panic naming the field on a duplicate wire code or variant name within one enum.
+        - `messages/fix43/generated/fields.rs` is now generated (hand-written reference replaced;
+          all variant names identical — original at `git show fe21f06:src/messages/fix43/generated/fields.rs`); `tests/fields.rs` +
+          `tests/logon.rs` green against it, freshness green.
+      **Remaining:**
+        - `naming.rs`: `enum_name()`/`variant_name()` apply `corrected_name` before heck, plus a
+          variant-name correction table.
+        - Drop the temporary three-name filter in `emitter::value_enum_fields` → emit every
+          value-constrained field. Expect compile errors from FIX43's 17 digit-leading descriptions
+          (`5_YR`, `401K`, …) + `NEW_ORDER_s` — fix via the variant corrections. **The audit is NOT
+          extended for values (decided):** digit-leading/keyword/collision are all compile errors, so
+          `cargo build` is the guard; the audit only earns its keep for silent mis-casing.
       **Emit into `messages/fix43/generated/` (generator-owned subtree, incl. its `mod.rs` index);
       hand-written tests live in `messages/fix43/tests/` and are never generated — design log D4c.**
+    - [ ] **3.5c — Switch the dictionary to QFJ's `FIX43.xml` (design log D12).** After 3.5b. QFJ's
+      copy is at `resources/FIX43.qfj.xml` (untracked; all QFJ dictionaries copied to `resources/`).
+      A trial swap (2026-10-01) surfaced exactly:
+        - Root has no `type` attr → `DataDictionary` (`core/dictionary.rs:576`) + old `build.rs` fail.
+          Default to `"FIX"` in the loader as QFJ does (`DataDictionary.java:921`); update
+          `test_major_minor_type`.
+        - `MatchType` (574) repeats codes `M1`/`M2`/`MT` → our loader's `DuplicateField` (QFJ uses a
+          set). Tolerate in the loader; the 3.5b emitter guard will flag it for the enum.
+        - New type `DAYOFMONTH` (205, 314 — retired fields) → add to `FixType`.
+        - QFJ's `Instrument` requires `Symbol` (55): two NewOrderList test fixtures lack it
+          (`msg_test_with_group_and_subgroups`, `msg_test_round_trip_group_and_subgroups`) — fix the
+          fixtures (Claude).
+        - Codegen: `tags.rs` +20 consts; `IOIid`/`XMLnonFIX` corrections go unused; EncryptMethod
+          variants become QFJ's (`PkcsProprietary`, `Pem`).
+      With the XML-side workarounds the suite was 261/264, the 3 being exactly the DAYOFMONTH and
+      Symbol items. Done: byte-identical QFJ file in `resources/FIX43.xml`, all tests + freshness green.
 
 - [~] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups).**
   DONE (seeded 2026-09-26, by Claude alongside 3.7): `FieldMap::add_group_instance` (append +

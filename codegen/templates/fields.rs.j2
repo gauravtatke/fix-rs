@@ -1,0 +1,40 @@
+//! FIX value enums for {{ begin_string }}: one enum per value-constrained field.
+//!
+//! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen` from the {{ begin_string }}
+//! data dictionary; `cargo test -p codegen` fails if this file drifts from the generator's output.
+//!
+//! Value-constrained FIX fields become real Rust **enums** (D3) rather than loose char/int
+//! constants, so an invalid value is unrepresentable. Each enum owns its on-wire conversion:
+//! `to_fix` (variant -> wire value) and `from_fix` (wire value -> variant, `None` if unknown).
+{% for e in enums %}
+
+/// `{{ e.name }}` (tag {{ e.tag }}, FIX type {{ e.fix_type }}).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum {{ e.name }} {
+    {% for v in e.variants %}
+    /// Wire value `{{ v.code }}`.
+    {{ v.name }},
+    {% endfor %}
+}
+
+impl {{ e.name }} {
+    /// On-wire value for this variant.
+    pub fn to_fix(self) -> {{ e.rust_type }} {
+        match self {
+            {% for v in e.variants %}
+            Self::{{ v.name }} => {{ v.literal }},
+            {% endfor %}
+        }
+    }
+
+    /// Parse an on-wire value; `None` for a value outside the FIX enum.
+    pub fn from_fix(value: {{ e.arg_type }}) -> Option<Self> {
+        match value {
+            {% for v in e.variants %}
+            {{ v.literal }} => Some(Self::{{ v.name }}),
+            {% endfor %}
+            _ => None,
+        }
+    }
+}
+{% endfor %}

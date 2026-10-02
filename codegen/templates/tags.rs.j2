@@ -1,0 +1,12 @@
+//! Shared FIX field-tag registry: `field name -> tag number`.
+//!
+//! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen` from the {{ begin_string }} data
+//! dictionary; `cargo test -p codegen` fails if this file drifts from the generator's output.
+//!
+//! Version-neutral by design: FIX tag numbers are globally stable (a given number always
+//! denotes the same field), so this one registry is shared by every `messages::fixNN` module
+//! rather than duplicated per version. Sorted by tag number.
+
+{% for t in tags %}
+pub const {{ t.name }}: u32 = {{ t.number }};
+{% endfor %}

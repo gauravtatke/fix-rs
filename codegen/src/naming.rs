@@ -5,7 +5,7 @@
 //! casing functions ([`const_name`], later snake/camel siblings) always apply it — so emitters
 //! must call these, never heck on a raw XML name. The audit (`audit.rs`) finds new cases.
 
-use heck::ToShoutySnakeCase;
+use heck::{ToShoutySnakeCase, ToUpperCamelCase};
 
 /// Rust keywords (strict + reserved, 2024 edition). A snake_case accessor with one of these names
 /// won't compile without `r#` or a rename.
@@ -48,6 +48,14 @@ pub(crate) fn corrected_name(xml_name: &str) -> Option<&'static str> {
 /// constants in `tags.rs`. Applies [`corrected_name`] first (`NoPartyIDs` -> `NO_PARTY_IDS`).
 pub(crate) fn const_name(xml_name: &str) -> String {
     corrected_name(xml_name).unwrap_or(xml_name).to_shouty_snake_case()
+}
+
+pub(crate) fn variant_name(xml_name: &str) -> String {
+    corrected_name(xml_name).unwrap_or(xml_name).to_upper_camel_case()
+}
+
+pub(crate) fn enum_name(xml_name: &str) -> String {
+    corrected_name(xml_name).unwrap_or(xml_name).to_upper_camel_case()
 }
 
 #[cfg(test)]
