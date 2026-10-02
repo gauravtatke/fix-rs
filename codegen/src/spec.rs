@@ -1,6 +1,6 @@
 //! FIX dictionary parse — the codegen input model.
 //!
-//! Ported from the old `build/code_generator.rs` (roxmltree-based), but slimmed to **raw data**:
+//! Ported from the old build-script `build/code_generator.rs` (roxmltree-based; deleted in 3.9b), but slimmed to **raw data**:
 //! it stores each field's name / tag / FIX type string / value codes + descriptions, and leaves
 //! all *naming and typing* to the emit step. That's deliberate — the emitter applies `heck` casing
 //! (to match the hand-written references) and the D8 FIX-type→Rust map (`src/convert.rs`), so the

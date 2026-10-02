@@ -1,6 +1,6 @@
 //! The single place an XML name becomes a Rust name.
 //!
-//! heck mis-splits a few FIX names (acronym plurals like `IDs`, odd spellings like `IOIid`) and a
+//! heck mis-splits a few FIX names (acronym plurals like `IDs`, run-together acronyms like `IOIID`) and a
 //! few collide with Rust keywords. [`corrected_name`] fixes those *before* heck runs, and the
 //! casing functions ([`const_name`], later snake/camel siblings) always apply it — so emitters
 //! must call these, never heck on a raw XML name. The audit (`audit.rs`) finds new cases.
@@ -32,8 +32,8 @@ pub(crate) fn corrected_name(xml_name: &str) -> Option<&'static str> {
         "NoNestedPartyIDs" => Some("NoNestedPartyIds"),
         "NoPartyIDs" => Some("NoPartyIds"),
         "NoRoutingIDs" => Some("NoRoutingIds"),
-        // Lowercase `id` after an acronym: heck reads it as `IO` + `Iid` (`IO_IID`).
-        "IOIid" => Some("IoiId"),
+        // Two acronyms run together (`IOI` + `ID`): heck sees one word (`IOIID`).
+        "IOIID" => Some("IoiId"),
         // Lowercase word between acronyms: heck reads it as `XM` + `Lnon` + `FIX` (`XM_LNON_FIX`).
         "XMLnonFIX" => Some("XmlNonFix"),
         // `yield` is a reserved Rust keyword, so the snake_case getter `yield()` would not
@@ -80,7 +80,7 @@ mod tests {
             ("NoPartyIDs", "NO_PARTY_IDS"),
             ("NoNestedPartyIDs", "NO_NESTED_PARTY_IDS"),
             ("NoRoutingIDs", "NO_ROUTING_IDS"),
-            ("IOIid", "IOI_ID"),
+            ("IOIID", "IOI_ID"),
             ("XMLnonFIX", "XML_NON_FIX"),
             ("Yield", "YIELD_VALUE"),
         ];

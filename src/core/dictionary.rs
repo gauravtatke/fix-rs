@@ -9,7 +9,7 @@ use indexmap::IndexSet;
 use roxmltree::{Document, Node};
 
 type NodeMap<'a, 'i> = HashMap<String, Node<'a, 'i>>;
-type DResult<T> = Result<T, XmlError>;
+type DictResult<T> = Result<T, XmlError>;
 
 pub(crate) const HEADER_ID: &str = "header";
 pub(crate) const TRAILER_ID: &str = "trailer";
@@ -40,6 +40,7 @@ pub enum FixType {
     UtcDate,
     UtcTimeOnly,
     UtcTimestamp,
+    DayOfMonth,
     Unknown,
 }
 
@@ -71,6 +72,7 @@ impl FromStr for FixType {
             "UTCDATE" => FixType::UtcDate,
             "UTCTIMEONLY" => FixType::UtcTimeOnly,
             "UTCTIMESTAMP" => FixType::UtcTimestamp,
+            "DAYOFMONTH" => FixType::DayOfMonth,
             _ => FixType::Unknown,
         };
         Ok(value)
@@ -104,6 +106,7 @@ impl std::fmt::Display for FixType {
             FixType::UtcDate => "UTCDATE",
             FixType::UtcTimeOnly => "UTCTIMEONLY",
             FixType::UtcTimestamp => "UTCTIMESTAMP",
+            FixType::DayOfMonth => "DAYOFMONTH",
             FixType::Unknown => "UNKNOWN",
         };
         write!(f, "{}", ftype)
@@ -216,7 +219,7 @@ impl DataDictionary {
     /***************************************************************************************/
     /*********************** ALL PRIVATE METHODS BELOW *************************************/
     /***************************************************************************************/
-    fn set_field_name_number_type(&mut self, name: &str, number: u32, ty: &str) -> DResult<()> {
+    fn set_field_name_number_type(&mut self, name: &str, number: u32, ty: &str) -> DictResult<()> {
         if self.fields_by_name.contains_key(name) || self.fields_by_tag.contains_key(&number) {
             // return error
             return Err(XmlError::DuplicateField(format!("{}={}", name, number)));
@@ -237,7 +240,12 @@ impl DataDictionary {
         self.fields_order.insert(field);
     }
 
-    fn set_msg_name_type_cat(&mut self, msg_name: &str, msg_type: &str, cat: &str) -> DResult<()> {
+    fn set_msg_name_type_cat(
+        &mut self,
+        msg_name: &str,
+        msg_type: &str,
+        cat: &str,
+    ) -> DictResult<()> {
         if self.category.contains_key(msg_type) || self.types.contains_key(msg_name) {
             return Err(XmlError::DuplicateMessage(msg_name.to_string()));
         }
@@ -246,7 +254,7 @@ impl DataDictionary {
         Ok(())
     }
 
-    fn set_field_for(&mut self, msg_type: &str, fnum: u32, required: bool) -> DResult<()> {
+    fn set_field_for(&mut self, msg_type: &str, fnum: u32, required: bool) -> DictResult<()> {
         let msg_fields = self.msg_fields.entry(msg_type.to_string()).or_default();
         if msg_fields.contains(&fnum) {
             return Err(XmlError::DuplicateField(format!(
@@ -271,7 +279,7 @@ impl DataDictionary {
         self.fields_by_name.get(fname).copied()
     }
 
-    fn add_fields_and_values(&mut self, fields: Node) -> DResult<()> {
+    fn add_fields_and_values(&mut self, fields: Node) -> DictResult<()> {
         for field_node in
             fields.children().filter(|node| node.is_element() && node.has_tag_name("field"))
         {
@@ -294,7 +302,7 @@ impl DataDictionary {
         field_name: &str,
         is_required: bool,
         doc: &Document,
-    ) -> DResult<u32> {
+    ) -> DictResult<u32> {
         let field_number = lookup_field_num_with_name(field_name, doc)?;
         self.set_field_for(msg_type, field_number, is_required)?;
         self.add_fields(field_number);
@@ -308,7 +316,7 @@ impl DataDictionary {
         is_required: bool,
         components: &NodeMap,
         doc: &Document,
-    ) -> DResult<()> {
+    ) -> DictResult<()> {
         // process the group node and add fields, components, subgroup
         // for the message name and message type
         let mut group_dd = DataDictionary::default();
@@ -378,7 +386,7 @@ impl DataDictionary {
         is_required: bool,
         components: &NodeMap,
         doc: &Document,
-    ) -> DResult<u32> {
+    ) -> DictResult<u32> {
         // first_field is the first field encountered in processing the node
         // it only useful for groups where this serves as the delimiter.
         let mut first_field = 0u32;
@@ -432,7 +440,7 @@ impl DataDictionary {
         msgs_node: &Node,
         components: &NodeMap,
         doc: &Document,
-    ) -> DResult<()> {
+    ) -> DictResult<()> {
         for m_node in msgs_node
             .children()
             .filter(|n| n.is_element() && n.tag_name().name().eq_ignore_ascii_case("message"))
@@ -452,7 +460,7 @@ impl DataDictionary {
         node: &Node,
         components: &NodeMap,
         doc: &Document,
-    ) -> DResult<()> {
+    ) -> DictResult<()> {
         // adding empty hashset for msg type so that any msg which does not have fields have
         // entres. for e.g. 35=n does not have any fields. All data is contained in header
         self.msg_fields.insert(msg_type.to_string(), HashSet::new());
@@ -528,7 +536,7 @@ pub struct GroupInfo {
 /************************************************************************* */
 /************* ALL XML PARSING RELATED CODE ********************************/
 /************************************************************************* */
-fn get_attribute<'a>(attr: &str, node: &Node<'a, '_>) -> DResult<&'a str> {
+fn get_attribute<'a>(attr: &str, node: &Node<'a, '_>) -> DictResult<&'a str> {
     let requested = match node.attribute(attr) {
         Some(atr) => {
             if atr.is_empty() {
@@ -552,16 +560,16 @@ fn get_attribute<'a>(attr: &str, node: &Node<'a, '_>) -> DResult<&'a str> {
     Ok(requested)
 }
 
-fn get_name_attr<'a>(node: &Node<'a, '_>) -> DResult<&'a str> {
+fn get_name_attr<'a>(node: &Node<'a, '_>) -> DictResult<&'a str> {
     get_attribute("name", node)
 }
 
-fn get_required_attr(node: &Node) -> DResult<bool> {
+fn get_required_attr(node: &Node) -> DictResult<bool> {
     let att = get_attribute("required", node)?;
     Ok(att.eq_ignore_ascii_case("Y"))
 }
 
-fn get_number_attr(node: &Node) -> DResult<u32> {
+fn get_number_attr(node: &Node) -> DictResult<u32> {
     let number = get_attribute("number", node)?;
     match number.parse::<u32>() {
         Ok(n) => Ok(n),
@@ -572,8 +580,8 @@ fn get_number_attr(node: &Node) -> DResult<u32> {
     }
 }
 
-fn get_begin_str_from_doc(root_node: Node) -> DResult<String> {
-    let dict_type = get_attribute("type", &root_node)?;
+fn get_begin_str_from_doc(root_node: Node) -> DictResult<String> {
+    let dict_type = get_attribute("type", &root_node).unwrap_or("FIX");
     let major_version = get_attribute("major", &root_node)?;
     let minor_verion = get_attribute("minor", &root_node)?;
     Ok(format!("{}.{}.{}", dict_type, major_version, minor_verion))
@@ -582,7 +590,7 @@ fn get_begin_str_from_doc(root_node: Node) -> DResult<String> {
 fn lookup_node<'a, 'input>(
     name: &str,
     document: &'a Document<'input>,
-) -> DResult<Node<'a, 'input>> {
+) -> DictResult<Node<'a, 'input>> {
     // find the node in the document with given name
     // NOTE: this searches in children, not in descendents
     document
@@ -592,7 +600,7 @@ fn lookup_node<'a, 'input>(
         .ok_or_else(|| XmlError::XmlNodeNotFound(name.to_string()))
 }
 
-fn get_component_nodes_by_name<'a, 'i>(components: Node<'a, 'i>) -> DResult<NodeMap<'a, 'i>> {
+fn get_component_nodes_by_name<'a, 'i>(components: Node<'a, 'i>) -> DictResult<NodeMap<'a, 'i>> {
     let mut cmap: HashMap<String, Node> = HashMap::new();
     for node in components.children().filter(|cnode| cnode.is_element()) {
         let cname = get_name_attr(&node)?;
@@ -601,7 +609,7 @@ fn get_component_nodes_by_name<'a, 'i>(components: Node<'a, 'i>) -> DResult<Node
     Ok(cmap)
 }
 
-fn lookup_field_num_with_name(field_name: &str, doc: &Document) -> DResult<u32> {
+fn lookup_field_num_with_name(field_name: &str, doc: &Document) -> DictResult<u32> {
     let fields = lookup_node("fields", doc)?;
     for node in fields.children().filter(|n| n.has_attribute("number") && n.has_attribute("name")) {
         let name = get_name_attr(&node)?;
@@ -613,7 +621,7 @@ fn lookup_field_num_with_name(field_name: &str, doc: &Document) -> DResult<u32> 
     Err(XmlError::XmlNodeNotFound(field_name.to_string()))
 }
 
-fn get_field_values(node: &Node) -> DResult<HashSet<String>> {
+fn get_field_values(node: &Node) -> DictResult<HashSet<String>> {
     let mut field_values = HashSet::new();
     for val_node in node.children().filter(|n| n.is_element() && n.has_tag_name("value")) {
         let value = get_attribute("enum", &val_node)?;
@@ -741,7 +749,7 @@ mod dictionary_tests {
         fields: &str,
         msgs: &str,
         comps: &str,
-    ) -> DResult<DataDictionary> {
+    ) -> DictResult<DataDictionary> {
         // adds given fields and messages and forms the mini fix xml
         // uses this xml to create Document and parse the Document to create a datadictionary
         let mut dd = DataDictionary::default();
@@ -840,17 +848,22 @@ mod dictionary_tests {
     /****************************** TESTS START ***********************/
     #[test]
     fn test_major_minor_type() {
+        // `type` is optional and defaults to "FIX", as in QFJ (its dictionaries omit it):
+        // missing or empty both give the default.
         let fstr_type_missing = r#"<fix major="4" minor="3" servicepack="0"/>"#;
         let fstr_type_empty = r#"<fix type="" major="4" minor="3" servicepack="0"/>"#;
         let doc = Document::parse(fstr_type_missing).unwrap();
-        let result = get_begin_str_from_doc(doc.root_element());
-        assert!(result.is_err());
-        assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
+        assert_eq!(get_begin_str_from_doc(doc.root_element()).unwrap(), "FIX.4.3");
 
         let doc = Document::parse(fstr_type_empty).unwrap();
-        let result = get_begin_str_from_doc(doc.root_element());
-        assert!(result.is_err());
-        assert_matches!(result.unwrap_err(), XmlError::AttributeNotFound(_));
+        assert_eq!(get_begin_str_from_doc(doc.root_element()).unwrap(), "FIX.4.3");
+
+        // A present `type` is used as-is, not overridden by the default (e.g. FIXT session dicts).
+        let fstr_type_fixt = r#"<fix type="FIXT" major="1" minor="1" servicepack="0"/>"#;
+        let doc = Document::parse(fstr_type_fixt).unwrap();
+        assert_eq!(get_begin_str_from_doc(doc.root_element()).unwrap(), "FIXT.1.1");
+
+        // major and minor stay required: no sensible default for a version number.
 
         let fstr_major_missing = r#"<fix type="FIX" minor="3" servicepack="0"/>"#;
         let fstr_major_empty = r#"<fix type="FIX" major="" minor="3" servicepack="0"/>"#;

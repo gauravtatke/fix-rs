@@ -77,10 +77,10 @@ pub(crate) fn emit_tags(spec: &FixSpec) -> String {
 
 // ---- fields.rs (value enums) ----
 
-fn formatted_code(code: &str, ctype: &str) -> String {
-    if ctype == "INT" {
+fn formatted_code(code: &str, rust_type: &str) -> String {
+    if rust_type == "i32" {
         code.to_string()
-    } else if ctype == "CHAR" {
+    } else if rust_type == "char" {
         format!("'{}'", code)
     } else {
         format!("\"{}\"", code)
@@ -142,7 +142,8 @@ struct Variant {
 
 fn to_field_enum(fd: &FieldDef) -> FieldEnum {
     let mut sorted_values = fd.values.iter().collect::<Vec<_>>();
-    if fd.fix_type == "INT" {
+    let rust_type = formatted_rust_type(&fd.fix_type);
+    if rust_type == "i32" {
         sorted_values.sort_by_key(|v| {
             v.code.parse::<i32>().unwrap_or_else(|_| {
                 panic!("{}: INT value `{}` should parse as i32", fd.name, v.code)
@@ -151,13 +152,12 @@ fn to_field_enum(fd: &FieldDef) -> FieldEnum {
     } else {
         sorted_values.sort_by_key(|v| &v.code);
     }
-
     let variants: Vec<Variant> = sorted_values
         .iter()
         .map(|v| Variant {
             name: naming::variant_name(&v.description),
             code: v.code.clone(),
-            literal: formatted_code(&v.code, &fd.fix_type),
+            literal: formatted_code(&v.code, rust_type),
         })
         .collect();
 
@@ -184,7 +184,8 @@ fn to_field_enum(fd: &FieldDef) -> FieldEnum {
 /// Render `messages/fixNN/generated/fields.rs`: one enum (+ `to_fix`/`from_fix`) per
 /// value-constrained field, via the `fields.rs.j2` template.
 pub(crate) fn emit_field_enums(spec: &FixSpec) -> String {
-    let enums: Vec<FieldEnum> = spec.fields
+    let enums: Vec<FieldEnum> = spec
+        .fields
         .iter()
         .filter(|f| !f.values.is_empty() && f.fix_type != "BOOLEAN")
         .map(to_field_enum)

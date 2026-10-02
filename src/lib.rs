@@ -8,10 +8,6 @@
 //! (value⇄wire format) and [`tags`] (field→tag registry). Implement [`Application`] to plug in
 //! your own logic.
 
-// Old build-time per-field codegen (build/main.rs -> $OUT_DIR/fields.rs); consumed by
-// `core::message`. Removed in task 3.9 when the standalone generator replaces it.
-include!(concat!(env!("OUT_DIR"), "/mod.rs"));
-
 pub mod application;
 pub mod convert;
 pub mod core;

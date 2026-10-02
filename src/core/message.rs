@@ -7,8 +7,8 @@ use std::str::FromStr;
 
 use crate::core::dictionary::{DataDictionary, FixType, HEADER_ID};
 use crate::errors::{FieldError, SessionRejectError};
-use crate::fields::*;
 use crate::session::{SessionId, SessionIdBuilder};
+use crate::tags;
 
 type SessionResult<T> = Result<T, SessionRejectError>;
 
@@ -580,10 +580,10 @@ fn from_vec(mut v: VecDeque<StringField>, dd: &DataDictionary) -> SessionResult<
     if v.len() < 3
         || (
             // validate the first 3 fields and the last one
-            v[0].tag() != BeginString::field()
-                || v[1].tag() != BodyLength::field()
-                || v[2].tag() != MsgType::field()
-                || v[v.len() - 1].tag() != CheckSum::field()
+            v[0].tag() != tags::BEGIN_STRING
+                || v[1].tag() != tags::BODY_LENGTH
+                || v[2].tag() != tags::MSG_TYPE
+                || v[v.len() - 1].tag() != tags::CHECK_SUM
         )
     {
         return Err(SessionRejectError::Other {
@@ -977,7 +977,8 @@ fn validate_tag_value_for_type(tag: u32, value: &String, dd: &DataDictionary) ->
                 | FixType::Length
                 | FixType::NumInGroup
                 | FixType::Seqnum
-                | FixType::Tagnum => value.parse::<i64>().is_ok(),
+                | FixType::Tagnum
+                | FixType::DayOfMonth => value.parse::<i64>().is_ok(),
                 // "float field (see definition of float above)" for all five of these.
                 // f64, not f32: spec requires accommodating up to 15 significant digits,
                 // which f32 (~7 significant decimal digits) can't reliably hold.
@@ -1129,7 +1130,7 @@ mod message_test {
     #[test]
     fn msg_test_with_group_and_subgroups() {
         // body having repeating groups having subgroups
-        let new_order_list = "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222|";
+        let new_order_list = "8=FIX.4.4|9=231|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|55=AAPL|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|55=MSFT|54=1|10=132|";
         let msg = Message::from_str(&soh_replaced_str(new_order_list), &DD);
         assert!(msg.is_ok());
         let msg = msg.unwrap();
@@ -1196,7 +1197,7 @@ mod message_test {
     #[test]
     fn msg_test_round_trip_group_and_subgroups() {
         assert_round_trip(
-            "8=FIX.4.4|9=215|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|54=1|10=222",
+            "8=FIX.4.4|9=231|35=E|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|66=list_id|394=1|68=2|73=2|11=ClientOrderId1|67=1|78=2|79=AllocAct11|80=10|79=AllocAct12|80=20|55=AAPL|54=1|11=ClientOrderId2|67=2|78=1|79=AllocAct21|80=30|55=MSFT|54=1|10=132",
         );
     }
 

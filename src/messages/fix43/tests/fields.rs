@@ -52,12 +52,12 @@ fn ord_type_roundtrips_every_variant() {
         OnBasis,
         OnClose,
         LimitOnClose,
-        ForexC,
+        ForexMarket,
         PreviouslyQuoted,
         PreviouslyIndicated,
-        ForexF,
-        ForexG,
-        ForexH,
+        ForexLimit,
+        ForexSwap,
+        ForexPreviouslyQuoted,
         Funari,
         MarketIfTouched,
         MarketWithLeftoverAsLimit,
@@ -72,6 +72,12 @@ fn ord_type_roundtrips_every_variant() {
     assert_eq!(Market.to_fix(), '1');
     assert_eq!(PreviouslyQuoted.to_fix(), 'D');
     assert_eq!(Pegged.to_fix(), 'P');
+    // The FOREX family is where dictionaries disagree on names (QFJ: FOREX_MARKET…; the old
+    // QuickFIX/C++-lineage file: FOREX_C…), so pin each one's wire char.
+    assert_eq!(ForexMarket.to_fix(), 'C');
+    assert_eq!(ForexLimit.to_fix(), 'F');
+    assert_eq!(ForexSwap.to_fix(), 'G');
+    assert_eq!(ForexPreviouslyQuoted.to_fix(), 'H');
 }
 
 #[test]

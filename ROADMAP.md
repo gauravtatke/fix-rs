@@ -98,8 +98,9 @@ phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robust
   emit it either).
 - **M2 (config rewrite) is done.** `toml`+`serde` based config with default/session merge. Hand-rolled parser deleted.
   14 config tests.
-- **M3 (typed message codegen) is not started — it is the v1.1 phase.** Would rework build-time codegen to emit
-  per-message-type structs (`Logon`, `NewOrderSingle`, …) with typed accessors, matching the roadmap's two-layer goal.
+- **M3 (typed message codegen) is in progress — it is the v1.1 phase.** A standalone generator (`codegen/` crate,
+  committed output; the old build-time codegen is removed) emits the tag registry and per-field value enums so far; next
+  are per-message-type structs (`Logon`, `NewOrderSingle`, …) with typed accessors, matching the roadmap's two-layer goal.
   The v1 phase shipped on the raw `Message` API instead; M3 is the next phase toward the v1.0 release, not a blocker for
   what already works.
 - **M4 (session state machine) is done.** `SessionState`, `SessionId`, `Application` trait, `Responder` trait,
@@ -125,8 +126,7 @@ phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robust
 The v1 phase is done; the remaining phases lead to the **v1.0 release**, in order:
 
 - **v1.1 — M3 typed message codegen** (next up). Biggest architectural piece and the roadmap's two-layer shape; heavy on
-  Rust-learning (build-time codegen, trait design). Still a sketch in TASKS.md — needs breaking into concrete tasks
-  first.
+  Rust-learning (codegen, trait design). Broken into concrete tasks in TASKS.md (M3, 3.0–3.10).
 - **v1.2 — protocol robustness.** Message store + ResendRequest / gap fill / sequence-number persistence. Biggest
   *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning). **v1.0 releases
   when this lands.**

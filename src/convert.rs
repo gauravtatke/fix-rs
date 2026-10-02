@@ -12,7 +12,7 @@
 //! |-----------------------------------------------|------------------|-------------------------|
 //! | `PRICE` `AMT` `QTY` `PRICEOFFSET`             | `Decimal`        | `*_fix_decimal` (D8)    |
 //! | `FLOAT` `PERCENTAGE`                          | `f64`            | plain `FromStr`/`Display` |
-//! | `INT`                                         | `i32`            | plain                   |
+//! | `INT` `DAYOFMONTH`                            | `i32`            | plain                   |
 //! | `LENGTH` `NUMINGROUP` `SEQNUM` `TAGNUM`       | `u32`            | plain                   |
 //! | `CHAR`                                        | `char`           | plain                   |
 //! | `BOOLEAN`                                     | `bool`           | `*_fix_bool`            |

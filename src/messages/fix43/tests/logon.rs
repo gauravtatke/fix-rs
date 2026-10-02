@@ -24,9 +24,9 @@ fn set_get_roundtrip_scalar_and_enum() {
 #[test]
 fn encrypt_method_maps_to_fix_int_on_the_wire() {
     let mut logon = Logon::new();
-    logon.set_encrypt_method(EncryptMethod::PemDesMd5); // FIX value 6
+    logon.set_encrypt_method(EncryptMethod::Pem); // FIX value 6
     assert_eq!(logon.message().get_body_field::<String>(98).unwrap(), "6");
-    assert_eq!(logon.encrypt_method().unwrap(), EncryptMethod::PemDesMd5);
+    assert_eq!(logon.encrypt_method().unwrap(), EncryptMethod::Pem);
 }
 
 // A value outside the FIX enum is a malformed field, not a silent default.
