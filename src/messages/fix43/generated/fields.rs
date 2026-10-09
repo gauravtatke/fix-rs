@@ -5688,7 +5688,7 @@ pub enum NoSides {
 
 impl NoSides {
     /// On-wire value for this variant.
-    pub fn to_fix(self) -> i32 {
+    pub fn to_fix(self) -> u32 {
         match self {
             Self::OneSide => 1,
             Self::BothSides => 2,
@@ -5696,7 +5696,7 @@ impl NoSides {
     }
 
     /// Parse an on-wire value; `None` for a value outside the FIX enum.
-    pub fn from_fix(value: i32) -> Option<Self> {
+    pub fn from_fix(value: u32) -> Option<Self> {
         match value {
             1 => Some(Self::OneSide),
             2 => Some(Self::BothSides),

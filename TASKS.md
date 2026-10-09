@@ -286,6 +286,14 @@ references are the golden target the generator must reproduce (diffed by the fre
       extracted to `messages/fix43/tests/logon.rs`, D4c), so the generated file is the byte-for-byte
       target. Done: generated `Logon` compiles, the hand-written `tests/logon.rs` still passes against
       it, freshness green.
+      **Deferred from the 2026-10-09 emitter rename (decision: do with the first message that needs
+      it):** the message template's fallback accessor branch (`v.to_string()` / `get_body_field::<T>()`)
+      is only correct where Rust's `Display`/`FromStr` match FIX. Timestamp/date/time/money types
+      (`DateTime<Utc>`, `NaiveDate`, `NaiveTime`, `Decimal`) must go through the `convert.rs` helpers
+      (`*_fix_utc_timestamp`, `*_fix_date`, `*_fix_time_only`, `*_fix_decimal`), and STRING /
+      MULTIPLEVALUESTRING *enum* fields must parse as `String` and call `from_fix(&raw)` (today the
+      enum branch parses `get_body_field::<wire_type>`, which only works for `char`/`i32`/`u32`).
+      Logon/Heartbeat have none of these; NewOrderSingle (`TransactTime`, `Price`, `OrderQty`) will.
     - [ ] **3.8c — Emit remaining admin messages.** Heartbeat/TestRequest/Logout/Reject/
       ResendRequest/SequenceReset. Done: each has typed accessors + `TryFrom`/`Into`, tests green.
 

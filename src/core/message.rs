@@ -118,6 +118,12 @@ impl FieldMap {
         self.insert_field(StringField::new(tag, value));
     }
 
+    /// Whether `tag` is set in this map. A presence check only — no parse/allocation, unlike
+    /// `get_field::<T>(tag).is_ok()` (which also reports a present-but-malformed value as absent).
+    pub fn has_field(&self, tag: u32) -> bool {
+        self.fields.contains_key(&tag)
+    }
+
     pub fn get_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         if let Some(field) = self.fields.get(&tag) {
             return field.value.parse::<T>().map_err(|_| FieldError::InvalidFormat { tag });
@@ -325,6 +331,21 @@ impl Message {
 
     pub fn get_header_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
         self.header.get_field(tag)
+    }
+
+    /// Presence of a header field (see [`FieldMap::has_field`]).
+    pub fn has_header_field(&self, tag: u32) -> bool {
+        self.header.has_field(tag)
+    }
+
+    /// Presence of a body field (see [`FieldMap::has_field`]).
+    pub fn has_body_field(&self, tag: u32) -> bool {
+        self.body.has_field(tag)
+    }
+
+    /// Presence of a trailer field (see [`FieldMap::has_field`]).
+    pub fn has_trailer_field(&self, tag: u32) -> bool {
+        self.trailer.has_field(tag)
     }
 
     pub fn get_body_field<T: FromStr>(&self, tag: u32) -> Result<T, FieldError> {
@@ -1812,5 +1833,45 @@ mod message_test {
         assert_eq!(field_value(&wire, 296).as_deref(), Some("1"));
         assert_eq!(field_value(&wire, 295).as_deref(), Some("2"));
         assert_wire_self_consistent(&wire);
+    }
+
+    // ---- has_*_field: presence only --------------------------------------------------------
+
+    #[test]
+    fn has_field_reports_presence_per_section() {
+        // Present vs absent, and each section is checked only against itself: a tag set in the
+        // header is not "in the body" (and vice versa).
+        let mut msg = Message::new();
+        msg.set_header_field(49, "SENDER");
+        msg.set_body_field(108, "30");
+        msg.set_trailer_field(10, "123");
+
+        assert!(msg.has_header_field(49));
+        assert!(msg.has_body_field(108));
+        assert!(msg.has_trailer_field(10));
+
+        assert!(!msg.has_body_field(49), "header tag must not be found in the body");
+        assert!(!msg.has_header_field(108), "body tag must not be found in the header");
+        assert!(!msg.has_body_field(10), "trailer tag must not be found in the body");
+        assert!(!msg.has_body_field(98), "never-set tag is absent");
+    }
+
+    #[test]
+    fn has_field_is_presence_not_validity() {
+        // The class where presence and `get_field::<T>().is_ok()` disagree: a value that is set
+        // but doesn't parse as the caller's type is still *present*.
+        let mut msg = Message::new();
+        msg.set_body_field(108, "not-a-number");
+        assert!(msg.has_body_field(108));
+        assert!(msg.get_body_field::<u32>(108).is_err());
+    }
+
+    #[test]
+    fn has_field_sees_fields_from_a_parsed_message() {
+        // Not just the builder path: fields inserted by the parser are visible too.
+        let msg = Message::from_str(&soh_replaced_str(MSG_STR), &DD).unwrap();
+        assert!(msg.has_header_field(49));
+        assert!(msg.has_body_field(98));
+        assert!(!msg.has_body_field(141));
     }
 }

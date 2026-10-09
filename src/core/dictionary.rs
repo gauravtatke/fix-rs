@@ -79,7 +79,7 @@ impl FromStr for FixType {
     }
 }
 
-impl std::fmt::Display for FixType {
+impl fmt::Display for FixType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ftype = match self {
             FixType::Char => "CHAR",
@@ -235,7 +235,7 @@ impl DataDictionary {
     }
 
     fn add_fields(&mut self, field: u32) {
-        // this adds field to fields indexSet which in tern helps provides field order
+        // this adds field to fields indexSet which in turn helps provides field order
         // field order only important for groups, not messages
         self.fields_order.insert(field);
     }
