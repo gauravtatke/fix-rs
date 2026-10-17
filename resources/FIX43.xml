@@ -3759,7 +3759,13 @@
     </field>
     <field number="532" name="MassCancelRejectReason" type="CHAR" />
     <field number="533" name="TotalAffectedOrders" type="INT" />
-    <field number="534" name="NoAffectedOrders" type="INT" />
+    <!--
+    MODIFIED: QFJ typed NoAffectedOrders as INT, copying FIX 4.3 Vol 6 (tag 534: "int"). It is the count
+    field of the NoAffectedOrders repeating group; Vol 6 types 30 of its 33 group counts NumInGroup and only
+    534/576/580 int, an inconsistency in the spec. Changed to NUMINGROUP (wire-identical) so every
+    group count has one type.
+    -->
+    <field number="534" name="NoAffectedOrders" type="NUMINGROUP" />
     <field number="535" name="AffectedOrderID" type="STRING" />
     <field number="536" name="AffectedSecondaryOrderID" type="STRING" />
     <field number="537" name="QuoteType" type="INT">
@@ -3880,7 +3886,13 @@
       <value description="ACT_M6_MATCH" enum="M6" />
     </field>
     <field number="575" name="OddLot" type="BOOLEAN" />
-    <field number="576" name="NoClearingInstructions" type="INT" />
+    <!--
+    MODIFIED: QFJ typed NoClearingInstructions as INT, copying FIX 4.3 Vol 6 (tag 576: "int"). It is the count
+    field of the NoClearingInstructions repeating group; Vol 6 types 30 of its 33 group counts NumInGroup and only
+    534/576/580 int, an inconsistency in the spec. Changed to NUMINGROUP (wire-identical) so every
+    group count has one type.
+    -->
+    <field number="576" name="NoClearingInstructions" type="NUMINGROUP" />
     <field number="577" name="ClearingInstruction" type="INT">
       <value enum="0" description="PROCESS_NORMALLY" />
       <value enum="1" description="EXCLUDE_FROM_ALL_NETTING" />
@@ -3896,7 +3908,13 @@
     </field>
     <field number="578" name="TradeInputSource" type="STRING" />
     <field number="579" name="TradeInputDevice" type="STRING" />
-    <field number="580" name="NoDates" type="INT" />
+    <!--
+    MODIFIED: QFJ typed NoDates as INT, copying FIX 4.3 Vol 6 (tag 580: "int"). It is the count
+    field of the NoDates repeating group; Vol 6 types 30 of its 33 group counts NumInGroup and only
+    534/576/580 int, an inconsistency in the spec. Changed to NUMINGROUP (wire-identical) so every
+    group count has one type.
+    -->
+    <field number="580" name="NoDates" type="NUMINGROUP" />
     <field number="581" name="AccountType" type="INT">
       <value enum="1" description="ACCOUNT_IS_CARRIED_ON_CUSTOMER_SIDE_OF_BOOKS" />
       <value enum="2" description="ACCOUNT_IS_CARRIED_ON_NON_CUSTOMER_SIDE_OF_BOOKS" />
