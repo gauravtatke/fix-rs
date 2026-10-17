@@ -10,6 +10,7 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("tags.rs.j2", include_str!("../templates/tags.rs.j2")),
     ("fields.rs.j2", include_str!("../templates/fields.rs.j2")),
     ("message.rs.j2", include_str!("../templates/message.rs.j2")),
+    ("field_methods.rs.j2", include_str!("../templates/field_methods.rs.j2")),
 ];
 
 /// The minijinja environment every emitter renders with.

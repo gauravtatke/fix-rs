@@ -1,3 +1,4 @@
+{% import "field_methods.rs.j2" as fm %}
 {#
   One typed message facade (D1): `struct <Name> { msg: Message }` with, per field, a typed
   setter / getter / `has_*` (D2). Input: `MessageView` (emitter.rs). Plain `//` and `///`
@@ -89,50 +90,12 @@ impl {{ name }} {
 
     // --- {{ f.xml_name }} (tag {{ f.tag }}, {{ f.fix_type }}, {{ req }}) ---
 
-{% if f.variants %}
-{# Value-constrained field: the generated enum on the outside, its wire value on the wire. #}
-    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
-    pub fn set_{{ f.accessor }}(&mut self, v: fields::{{ f.value_type }}) {
-        self.msg.set_body_field(tags::{{ f.tag_const }}, v.to_fix().to_string());
-    }
+{{ fm.field_setter(f, req, "self.msg.body_mut()") }}
 
-    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` if the value isn't one
-    /// of [`fields::{{ f.value_type }}`]'s.
-    pub fn {{ f.accessor }}(&self) -> Result<fields::{{ f.value_type }}, FieldError> {
-        let n = self.msg.get_body_field::<{{ f.wire_type }}>(tags::{{ f.tag_const }})?;
-        fields::{{ f.value_type }}::from_fix(n).ok_or(FieldError::InvalidFormat { tag: tags::{{ f.tag_const }} })
-    }
-{% elif f.value_type == "bool" %}
-{# FIX booleans are `Y`/`N` on the wire, not Rust's `true`/`false`. #}
-    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}); written as `Y`/`N`.
-    pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
-        self.msg.set_body_field(tags::{{ f.tag_const }}, convert::fix_bool_str(v));
-    }
+{{ fm.field_getter(f, req, "self.msg.body()") }}
 
-    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` unless `Y`/`N`.
-    pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
-        let raw = self.msg.get_body_field::<String>(tags::{{ f.tag_const }})?;
-        convert::parse_fix_bool(&raw, tags::{{ f.tag_const }})
-    }
-{% else %}
-{# Plain field: Rust's Display / FromStr already match FIX here (see TASKS 3.8b for the types where they don't). #}
-    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
-    pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
-        self.msg.set_body_field(tags::{{ f.tag_const }}, v.to_string());
-    }
+{{ fm.field_has(f, "self.msg.body()") }}
 
-    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
-    pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
-        self.msg.get_body_field::<{{ f.value_type }}>(tags::{{ f.tag_const }})
-    }
-{% endif %}
-
-{# Every field gets has_* (D2): presence only, independent of `required`. #}
-    /// Whether `{{ f.xml_name }}` (tag {{ f.tag }}) is set. Presence only: a set but malformed
-    /// value still counts.
-    pub fn has_{{ f.accessor }}(&self) -> bool {
-        self.msg.has_body_field(tags::{{ f.tag_const }})
-    }
 {% endfor %}
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

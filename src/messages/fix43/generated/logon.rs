@@ -78,13 +78,13 @@ impl Logon {
 
     /// Set `EncryptMethod` (tag 98, required).
     pub fn set_encrypt_method(&mut self, v: fields::EncryptMethod) {
-        self.msg.set_body_field(tags::ENCRYPT_METHOD, v.to_fix().to_string());
+        self.msg.body_mut().set_field(tags::ENCRYPT_METHOD, v.to_fix().to_string());
     }
 
     /// `EncryptMethod` (tag 98, required). `Err(InvalidFormat)` if the value isn't one
     /// of [`fields::EncryptMethod`]'s.
     pub fn encrypt_method(&self) -> Result<fields::EncryptMethod, FieldError> {
-        let n = self.msg.get_body_field::<i32>(tags::ENCRYPT_METHOD)?;
+        let n = self.msg.body().get_field::<i32>(tags::ENCRYPT_METHOD)?;
         fields::EncryptMethod::from_fix(n).ok_or(FieldError::InvalidFormat {
             tag: tags::ENCRYPT_METHOD,
         })
@@ -93,153 +93,153 @@ impl Logon {
     /// Whether `EncryptMethod` (tag 98) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_encrypt_method(&self) -> bool {
-        self.msg.has_body_field(tags::ENCRYPT_METHOD)
+        self.msg.body().has_field(tags::ENCRYPT_METHOD)
     }
 
     // --- HeartBtInt (tag 108, INT, required) ---
 
     /// Set `HeartBtInt` (tag 108, required).
     pub fn set_heart_bt_int(&mut self, v: i32) {
-        self.msg.set_body_field(tags::HEART_BT_INT, v.to_string());
+        self.msg.body_mut().set_field(tags::HEART_BT_INT, v.to_string());
     }
 
     /// `HeartBtInt` (tag 108, required).
     pub fn heart_bt_int(&self) -> Result<i32, FieldError> {
-        self.msg.get_body_field::<i32>(tags::HEART_BT_INT)
+        self.msg.body().get_field::<i32>(tags::HEART_BT_INT)
     }
 
     /// Whether `HeartBtInt` (tag 108) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_heart_bt_int(&self) -> bool {
-        self.msg.has_body_field(tags::HEART_BT_INT)
+        self.msg.body().has_field(tags::HEART_BT_INT)
     }
 
     // --- RawDataLength (tag 95, LENGTH, optional) ---
 
     /// Set `RawDataLength` (tag 95, optional).
     pub fn set_raw_data_length(&mut self, v: u32) {
-        self.msg.set_body_field(tags::RAW_DATA_LENGTH, v.to_string());
+        self.msg.body_mut().set_field(tags::RAW_DATA_LENGTH, v.to_string());
     }
 
     /// `RawDataLength` (tag 95, optional).
     pub fn raw_data_length(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::RAW_DATA_LENGTH)
+        self.msg.body().get_field::<u32>(tags::RAW_DATA_LENGTH)
     }
 
     /// Whether `RawDataLength` (tag 95) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_raw_data_length(&self) -> bool {
-        self.msg.has_body_field(tags::RAW_DATA_LENGTH)
+        self.msg.body().has_field(tags::RAW_DATA_LENGTH)
     }
 
     // --- RawData (tag 96, DATA, optional) ---
 
     /// Set `RawData` (tag 96, optional).
     pub fn set_raw_data(&mut self, v: &str) {
-        self.msg.set_body_field(tags::RAW_DATA, v.to_string());
+        self.msg.body_mut().set_field(tags::RAW_DATA, v.to_string());
     }
 
     /// `RawData` (tag 96, optional).
     pub fn raw_data(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::RAW_DATA)
+        self.msg.body().get_field::<String>(tags::RAW_DATA)
     }
 
     /// Whether `RawData` (tag 96) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_raw_data(&self) -> bool {
-        self.msg.has_body_field(tags::RAW_DATA)
+        self.msg.body().has_field(tags::RAW_DATA)
     }
 
     // --- ResetSeqNumFlag (tag 141, BOOLEAN, optional) ---
 
     /// Set `ResetSeqNumFlag` (tag 141, optional); written as `Y`/`N`.
     pub fn set_reset_seq_num_flag(&mut self, v: bool) {
-        self.msg.set_body_field(tags::RESET_SEQ_NUM_FLAG, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::RESET_SEQ_NUM_FLAG, convert::fix_bool_str(v));
     }
 
     /// `ResetSeqNumFlag` (tag 141, optional). `Err(InvalidFormat)` unless `Y`/`N`.
     pub fn reset_seq_num_flag(&self) -> Result<bool, FieldError> {
-        let raw = self.msg.get_body_field::<String>(tags::RESET_SEQ_NUM_FLAG)?;
+        let raw = self.msg.body().get_field::<String>(tags::RESET_SEQ_NUM_FLAG)?;
         convert::parse_fix_bool(&raw, tags::RESET_SEQ_NUM_FLAG)
     }
 
     /// Whether `ResetSeqNumFlag` (tag 141) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_reset_seq_num_flag(&self) -> bool {
-        self.msg.has_body_field(tags::RESET_SEQ_NUM_FLAG)
+        self.msg.body().has_field(tags::RESET_SEQ_NUM_FLAG)
     }
 
     // --- MaxMessageSize (tag 383, LENGTH, optional) ---
 
     /// Set `MaxMessageSize` (tag 383, optional).
     pub fn set_max_message_size(&mut self, v: u32) {
-        self.msg.set_body_field(tags::MAX_MESSAGE_SIZE, v.to_string());
+        self.msg.body_mut().set_field(tags::MAX_MESSAGE_SIZE, v.to_string());
     }
 
     /// `MaxMessageSize` (tag 383, optional).
     pub fn max_message_size(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::MAX_MESSAGE_SIZE)
+        self.msg.body().get_field::<u32>(tags::MAX_MESSAGE_SIZE)
     }
 
     /// Whether `MaxMessageSize` (tag 383) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_max_message_size(&self) -> bool {
-        self.msg.has_body_field(tags::MAX_MESSAGE_SIZE)
+        self.msg.body().has_field(tags::MAX_MESSAGE_SIZE)
     }
 
     // --- TestMessageIndicator (tag 464, BOOLEAN, optional) ---
 
     /// Set `TestMessageIndicator` (tag 464, optional); written as `Y`/`N`.
     pub fn set_test_message_indicator(&mut self, v: bool) {
-        self.msg.set_body_field(tags::TEST_MESSAGE_INDICATOR, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::TEST_MESSAGE_INDICATOR, convert::fix_bool_str(v));
     }
 
     /// `TestMessageIndicator` (tag 464, optional). `Err(InvalidFormat)` unless `Y`/`N`.
     pub fn test_message_indicator(&self) -> Result<bool, FieldError> {
-        let raw = self.msg.get_body_field::<String>(tags::TEST_MESSAGE_INDICATOR)?;
+        let raw = self.msg.body().get_field::<String>(tags::TEST_MESSAGE_INDICATOR)?;
         convert::parse_fix_bool(&raw, tags::TEST_MESSAGE_INDICATOR)
     }
 
     /// Whether `TestMessageIndicator` (tag 464) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_test_message_indicator(&self) -> bool {
-        self.msg.has_body_field(tags::TEST_MESSAGE_INDICATOR)
+        self.msg.body().has_field(tags::TEST_MESSAGE_INDICATOR)
     }
 
     // --- Username (tag 553, STRING, optional) ---
 
     /// Set `Username` (tag 553, optional).
     pub fn set_username(&mut self, v: &str) {
-        self.msg.set_body_field(tags::USERNAME, v.to_string());
+        self.msg.body_mut().set_field(tags::USERNAME, v.to_string());
     }
 
     /// `Username` (tag 553, optional).
     pub fn username(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::USERNAME)
+        self.msg.body().get_field::<String>(tags::USERNAME)
     }
 
     /// Whether `Username` (tag 553) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_username(&self) -> bool {
-        self.msg.has_body_field(tags::USERNAME)
+        self.msg.body().has_field(tags::USERNAME)
     }
 
     // --- Password (tag 554, STRING, optional) ---
 
     /// Set `Password` (tag 554, optional).
     pub fn set_password(&mut self, v: &str) {
-        self.msg.set_body_field(tags::PASSWORD, v.to_string());
+        self.msg.body_mut().set_field(tags::PASSWORD, v.to_string());
     }
 
     /// `Password` (tag 554, optional).
     pub fn password(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::PASSWORD)
+        self.msg.body().get_field::<String>(tags::PASSWORD)
     }
 
     /// Whether `Password` (tag 554) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_password(&self) -> bool {
-        self.msg.has_body_field(tags::PASSWORD)
+        self.msg.body().has_field(tags::PASSWORD)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

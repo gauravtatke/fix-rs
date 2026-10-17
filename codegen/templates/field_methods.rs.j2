@@ -1,0 +1,79 @@
+{#
+  Per-field methods (setter / getter / has_), shared by every type that exposes a FIX field: the
+  message facades now, the repeating-group entry views next (3.9a). Macros only: this file is
+  imported (`{% import "field_methods.rs.j2" as fm %}`) and never rendered on its own, so nothing
+  outside a macro reaches the output.
+
+  Parameters, the same in every macro:
+    f        - a `FieldView` (emitter.rs): names, tag const, Rust/wire types, enum variants.
+    req      - "required" / "optional", for the doc comments only.
+    recv     - the Rust receiver to read from, as text: an expression of type `&FieldMap`
+               (`self.msg.body()` on a message, `self.inner` on an entry view).
+    recv_mut - the same for writing, of type `&mut FieldMap` (`self.msg.body_mut()`, `self.inner`).
+
+  The callers pass `f`/`req` because macros can't see the caller's loop variables.
+
+  Each FIX type is handled by one branch in `field_setter` and one in `field_getter`. The two
+  dispatches must stay in sync: a type added to one (3.8b: Decimal, timestamps, string enums) needs
+  its matching branch in the other. Branch conditions are decided in the emitter (view-model
+  fields), never by inspecting strings here (D4d).
+#}
+
+{# Setter: Rust value in, FIX wire string stored. #}
+{% macro field_setter(f, req, recv_mut) %}
+{% if f.variants %}
+{# Value-constrained field: the generated enum on the outside, its wire value on the wire. #}
+    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
+    pub fn set_{{ f.accessor }}(&mut self, v: fields::{{ f.value_type }}) {
+        {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, v.to_fix().to_string());
+    }
+{% elif f.value_type == "bool" %}
+{# FIX booleans are `Y`/`N` on the wire, not Rust's `true`/`false`. #}
+    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}); written as `Y`/`N`.
+    pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
+        {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, convert::fix_bool_str(v));
+    }
+{% else %}
+{# Plain field: Rust's Display already matches FIX here (see TASKS 3.8b for the types where it doesn't). #}
+    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
+    pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
+        {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, v.to_string());
+    }
+{% endif %}
+{% endmacro %}
+
+{# Getter: FIX wire string parsed to the Rust value. `Err(TagNotFound)` if absent,
+   `Err(InvalidFormat)` if present but not a valid value. #}
+{% macro field_getter(f, req, recv) %}
+{% if f.variants %}
+{# Parse the wire type, then map it to the enum; an unlisted value is InvalidFormat. #}
+    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` if the value isn't one
+    /// of [`fields::{{ f.value_type }}`]'s.
+    pub fn {{ f.accessor }}(&self) -> Result<fields::{{ f.value_type }}, FieldError> {
+        let n = {{ recv }}.get_field::<{{ f.wire_type }}>(tags::{{ f.tag_const }})?;
+        fields::{{ f.value_type }}::from_fix(n).ok_or(FieldError::InvalidFormat { tag: tags::{{ f.tag_const }} })
+    }
+{% elif f.value_type == "bool" %}
+{# Read the raw string and accept only `Y`/`N`. #}
+    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` unless `Y`/`N`.
+    pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
+        let raw = {{ recv }}.get_field::<String>(tags::{{ f.tag_const }})?;
+        convert::parse_fix_bool(&raw, tags::{{ f.tag_const }})
+    }
+{% else %}
+{# Plain field: Rust's FromStr already matches FIX here (see TASKS 3.8b for the types where it doesn't). #}
+    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
+    pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
+        {{ recv }}.get_field::<{{ f.value_type }}>(tags::{{ f.tag_const }})
+    }
+{% endif %}
+{% endmacro %}
+
+{# Presence check, for every field (D2), independent of `required` and of the field's type. #}
+{% macro field_has(f, recv) %}
+    /// Whether `{{ f.xml_name }}` (tag {{ f.tag }}) is set. Presence only: a set but malformed
+    /// value still counts.
+    pub fn has_{{ f.accessor }}(&self) -> bool {
+        {{ recv }}.has_field(tags::{{ f.tag_const }})
+    }
+{% endmacro %}

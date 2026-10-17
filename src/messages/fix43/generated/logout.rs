@@ -75,54 +75,54 @@ impl Logout {
 
     /// Set `Text` (tag 58, optional).
     pub fn set_text(&mut self, v: &str) {
-        self.msg.set_body_field(tags::TEXT, v.to_string());
+        self.msg.body_mut().set_field(tags::TEXT, v.to_string());
     }
 
     /// `Text` (tag 58, optional).
     pub fn text(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::TEXT)
+        self.msg.body().get_field::<String>(tags::TEXT)
     }
 
     /// Whether `Text` (tag 58) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_text(&self) -> bool {
-        self.msg.has_body_field(tags::TEXT)
+        self.msg.body().has_field(tags::TEXT)
     }
 
     // --- EncodedTextLen (tag 354, LENGTH, optional) ---
 
     /// Set `EncodedTextLen` (tag 354, optional).
     pub fn set_encoded_text_len(&mut self, v: u32) {
-        self.msg.set_body_field(tags::ENCODED_TEXT_LEN, v.to_string());
+        self.msg.body_mut().set_field(tags::ENCODED_TEXT_LEN, v.to_string());
     }
 
     /// `EncodedTextLen` (tag 354, optional).
     pub fn encoded_text_len(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::ENCODED_TEXT_LEN)
+        self.msg.body().get_field::<u32>(tags::ENCODED_TEXT_LEN)
     }
 
     /// Whether `EncodedTextLen` (tag 354) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_encoded_text_len(&self) -> bool {
-        self.msg.has_body_field(tags::ENCODED_TEXT_LEN)
+        self.msg.body().has_field(tags::ENCODED_TEXT_LEN)
     }
 
     // --- EncodedText (tag 355, DATA, optional) ---
 
     /// Set `EncodedText` (tag 355, optional).
     pub fn set_encoded_text(&mut self, v: &str) {
-        self.msg.set_body_field(tags::ENCODED_TEXT, v.to_string());
+        self.msg.body_mut().set_field(tags::ENCODED_TEXT, v.to_string());
     }
 
     /// `EncodedText` (tag 355, optional).
     pub fn encoded_text(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::ENCODED_TEXT)
+        self.msg.body().get_field::<String>(tags::ENCODED_TEXT)
     }
 
     /// Whether `EncodedText` (tag 355) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_encoded_text(&self) -> bool {
-        self.msg.has_body_field(tags::ENCODED_TEXT)
+        self.msg.body().has_field(tags::ENCODED_TEXT)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

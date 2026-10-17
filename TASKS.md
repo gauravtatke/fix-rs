@@ -263,7 +263,14 @@ references are the golden target the generator must reproduce (diffed by the fre
 
 - [~] **3.7 — Group ergonomics comparison + reference (Claude).**
   Built A/B/C/D variants to compare group build/read call sites (D9 validation). **CHOSEN =
-  `c_indexed`** (2026-09-27): facade over the message's group instances, closure builder +
+  `group_scoped`** (D9 revision, 2026-09-29; confirmed 2026-10-17), which **supersedes `c_indexed`**:
+  the message hands out a per-group view (`no_x()` / `no_x_mut()` → `Option<view>`, `set_no_x(n)`,
+  streaming `add_no_x(|e| ..)`), and `len`/`get`/`index`/`iter` (+ `_mut`) live on the **group view**,
+  not the message — a message can carry several groups, and iterating/indexing the message itself
+  would mean its fields. Instance views (`&FieldMap` / `&mut FieldMap`) carry the field accessors;
+  nesting = an instance view hosts sub-group accessors exactly like the message. Files:
+  `group_variants/{group_scoped,nested,core_raw}.rs`. Superseded record of `c_indexed`
+  (2026-09-27): facade over the message's group instances, closure builder +
   `index(i)`/`index_mut(i)` returning borrowed views *by value* + `iter`/`iter_mut`/`len` —
   **zero-copy AND zero `unsafe`**, and it recurses into nested groups (the flat variant D doesn't).
   The B-reworked lead (transparent-slice cast) was overturned for its `unsafe` (see
@@ -271,7 +278,7 @@ references are the golden target the generator must reproduce (diffed by the fre
   force the cast), but `index(i)`/`index_mut(i)` **panic on OOB** matching the trait's contract —
   sound because the parse layer validates group count == instances, so OOB is a caller bug (D5's
   `Result` still governs *field* access). Full A/B/C/D exploration preserved on branch
-  `explore/repeating-group-ergonomics`; dev keeps only `c_indexed`. `preset_md_entries(n)` +
+  `explore/repeating-group-ergonomics`; group_scoped on `feature/group-scoped-views`. `preset_md_entries(n)` +
   by-value `add(MdEntry)` prototyped then deferred to a later convenience layer. **Remaining:**
   promote the shape into the real MarketData reference (hand-written `MarketDataSnapshotFullRefresh`
   with `Decimal` money fields) once D8/3.2 lands.
@@ -299,8 +306,12 @@ references are the golden target the generator must reproduce (diffed by the fre
 
 - [~] **3.9 — Groups + app messages + remove the old `build.rs` codegen (USER).**
     - [ ] **3.9a — Groups + app messages.** Extend the parser to repeating groups (nested, via
-      component refs); emit the group facade in the **`c_indexed` shape** (closure builder,
-      `index`/`index_mut` panic-on-OOB, zero-copy, auto count, nesting by recursion) +
+      component refs); emit the group facade in the **`group_scoped` shape** (group view with
+      `len`/`get`/`index`/`iter` (+ `_mut`, `index*` panic-on-OOB), instance views with field
+      accessors, `set_no_x(n)` + streaming `add_no_x(|e| ..)` on the parent, zero-copy, auto count,
+      nesting by recursion; group types live in their message's module, inlined components; names
+      from the count field: group views `NoMsgTypes`/`NoMsgTypesMut`, instance views
+      `NoMsgTypesEntry`/`NoMsgTypesEntryMut`; first target Logon's `NoMsgTypes`) +
       `MarketDataRequest`/`MarketDataSnapshotFullRefresh` + `NewOrderSingle`/`ExecutionReport`. Done:
       generated group messages match the 3.7 shape, tests green.
     - [x] **3.9b — Remove `build.rs`. DONE (2026-10-02, Claude).** Its only consumer was

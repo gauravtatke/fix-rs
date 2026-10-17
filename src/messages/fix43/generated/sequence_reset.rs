@@ -75,37 +75,37 @@ impl SequenceReset {
 
     /// Set `GapFillFlag` (tag 123, optional); written as `Y`/`N`.
     pub fn set_gap_fill_flag(&mut self, v: bool) {
-        self.msg.set_body_field(tags::GAP_FILL_FLAG, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::GAP_FILL_FLAG, convert::fix_bool_str(v));
     }
 
     /// `GapFillFlag` (tag 123, optional). `Err(InvalidFormat)` unless `Y`/`N`.
     pub fn gap_fill_flag(&self) -> Result<bool, FieldError> {
-        let raw = self.msg.get_body_field::<String>(tags::GAP_FILL_FLAG)?;
+        let raw = self.msg.body().get_field::<String>(tags::GAP_FILL_FLAG)?;
         convert::parse_fix_bool(&raw, tags::GAP_FILL_FLAG)
     }
 
     /// Whether `GapFillFlag` (tag 123) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_gap_fill_flag(&self) -> bool {
-        self.msg.has_body_field(tags::GAP_FILL_FLAG)
+        self.msg.body().has_field(tags::GAP_FILL_FLAG)
     }
 
     // --- NewSeqNo (tag 36, SEQNUM, required) ---
 
     /// Set `NewSeqNo` (tag 36, required).
     pub fn set_new_seq_no(&mut self, v: u32) {
-        self.msg.set_body_field(tags::NEW_SEQ_NO, v.to_string());
+        self.msg.body_mut().set_field(tags::NEW_SEQ_NO, v.to_string());
     }
 
     /// `NewSeqNo` (tag 36, required).
     pub fn new_seq_no(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::NEW_SEQ_NO)
+        self.msg.body().get_field::<u32>(tags::NEW_SEQ_NO)
     }
 
     /// Whether `NewSeqNo` (tag 36) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_new_seq_no(&self) -> bool {
-        self.msg.has_body_field(tags::NEW_SEQ_NO)
+        self.msg.body().has_field(tags::NEW_SEQ_NO)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

@@ -75,18 +75,18 @@ impl Heartbeat {
 
     /// Set `TestReqID` (tag 112, optional).
     pub fn set_test_req_id(&mut self, v: &str) {
-        self.msg.set_body_field(tags::TEST_REQ_ID, v.to_string());
+        self.msg.body_mut().set_field(tags::TEST_REQ_ID, v.to_string());
     }
 
     /// `TestReqID` (tag 112, optional).
     pub fn test_req_id(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::TEST_REQ_ID)
+        self.msg.body().get_field::<String>(tags::TEST_REQ_ID)
     }
 
     /// Whether `TestReqID` (tag 112) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_test_req_id(&self) -> bool {
-        self.msg.has_body_field(tags::TEST_REQ_ID)
+        self.msg.body().has_field(tags::TEST_REQ_ID)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

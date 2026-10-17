@@ -75,67 +75,67 @@ impl Reject {
 
     /// Set `RefSeqNum` (tag 45, required).
     pub fn set_ref_seq_num(&mut self, v: u32) {
-        self.msg.set_body_field(tags::REF_SEQ_NUM, v.to_string());
+        self.msg.body_mut().set_field(tags::REF_SEQ_NUM, v.to_string());
     }
 
     /// `RefSeqNum` (tag 45, required).
     pub fn ref_seq_num(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::REF_SEQ_NUM)
+        self.msg.body().get_field::<u32>(tags::REF_SEQ_NUM)
     }
 
     /// Whether `RefSeqNum` (tag 45) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_ref_seq_num(&self) -> bool {
-        self.msg.has_body_field(tags::REF_SEQ_NUM)
+        self.msg.body().has_field(tags::REF_SEQ_NUM)
     }
 
     // --- RefTagID (tag 371, INT, optional) ---
 
     /// Set `RefTagID` (tag 371, optional).
     pub fn set_ref_tag_id(&mut self, v: i32) {
-        self.msg.set_body_field(tags::REF_TAG_ID, v.to_string());
+        self.msg.body_mut().set_field(tags::REF_TAG_ID, v.to_string());
     }
 
     /// `RefTagID` (tag 371, optional).
     pub fn ref_tag_id(&self) -> Result<i32, FieldError> {
-        self.msg.get_body_field::<i32>(tags::REF_TAG_ID)
+        self.msg.body().get_field::<i32>(tags::REF_TAG_ID)
     }
 
     /// Whether `RefTagID` (tag 371) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_ref_tag_id(&self) -> bool {
-        self.msg.has_body_field(tags::REF_TAG_ID)
+        self.msg.body().has_field(tags::REF_TAG_ID)
     }
 
     // --- RefMsgType (tag 372, STRING, optional) ---
 
     /// Set `RefMsgType` (tag 372, optional).
     pub fn set_ref_msg_type(&mut self, v: &str) {
-        self.msg.set_body_field(tags::REF_MSG_TYPE, v.to_string());
+        self.msg.body_mut().set_field(tags::REF_MSG_TYPE, v.to_string());
     }
 
     /// `RefMsgType` (tag 372, optional).
     pub fn ref_msg_type(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::REF_MSG_TYPE)
+        self.msg.body().get_field::<String>(tags::REF_MSG_TYPE)
     }
 
     /// Whether `RefMsgType` (tag 372) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_ref_msg_type(&self) -> bool {
-        self.msg.has_body_field(tags::REF_MSG_TYPE)
+        self.msg.body().has_field(tags::REF_MSG_TYPE)
     }
 
     // --- SessionRejectReason (tag 373, INT, optional) ---
 
     /// Set `SessionRejectReason` (tag 373, optional).
     pub fn set_session_reject_reason(&mut self, v: fields::SessionRejectReason) {
-        self.msg.set_body_field(tags::SESSION_REJECT_REASON, v.to_fix().to_string());
+        self.msg.body_mut().set_field(tags::SESSION_REJECT_REASON, v.to_fix().to_string());
     }
 
     /// `SessionRejectReason` (tag 373, optional). `Err(InvalidFormat)` if the value isn't one
     /// of [`fields::SessionRejectReason`]'s.
     pub fn session_reject_reason(&self) -> Result<fields::SessionRejectReason, FieldError> {
-        let n = self.msg.get_body_field::<i32>(tags::SESSION_REJECT_REASON)?;
+        let n = self.msg.body().get_field::<i32>(tags::SESSION_REJECT_REASON)?;
         fields::SessionRejectReason::from_fix(n).ok_or(FieldError::InvalidFormat {
             tag: tags::SESSION_REJECT_REASON,
         })
@@ -144,61 +144,61 @@ impl Reject {
     /// Whether `SessionRejectReason` (tag 373) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_session_reject_reason(&self) -> bool {
-        self.msg.has_body_field(tags::SESSION_REJECT_REASON)
+        self.msg.body().has_field(tags::SESSION_REJECT_REASON)
     }
 
     // --- Text (tag 58, STRING, optional) ---
 
     /// Set `Text` (tag 58, optional).
     pub fn set_text(&mut self, v: &str) {
-        self.msg.set_body_field(tags::TEXT, v.to_string());
+        self.msg.body_mut().set_field(tags::TEXT, v.to_string());
     }
 
     /// `Text` (tag 58, optional).
     pub fn text(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::TEXT)
+        self.msg.body().get_field::<String>(tags::TEXT)
     }
 
     /// Whether `Text` (tag 58) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_text(&self) -> bool {
-        self.msg.has_body_field(tags::TEXT)
+        self.msg.body().has_field(tags::TEXT)
     }
 
     // --- EncodedTextLen (tag 354, LENGTH, optional) ---
 
     /// Set `EncodedTextLen` (tag 354, optional).
     pub fn set_encoded_text_len(&mut self, v: u32) {
-        self.msg.set_body_field(tags::ENCODED_TEXT_LEN, v.to_string());
+        self.msg.body_mut().set_field(tags::ENCODED_TEXT_LEN, v.to_string());
     }
 
     /// `EncodedTextLen` (tag 354, optional).
     pub fn encoded_text_len(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::ENCODED_TEXT_LEN)
+        self.msg.body().get_field::<u32>(tags::ENCODED_TEXT_LEN)
     }
 
     /// Whether `EncodedTextLen` (tag 354) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_encoded_text_len(&self) -> bool {
-        self.msg.has_body_field(tags::ENCODED_TEXT_LEN)
+        self.msg.body().has_field(tags::ENCODED_TEXT_LEN)
     }
 
     // --- EncodedText (tag 355, DATA, optional) ---
 
     /// Set `EncodedText` (tag 355, optional).
     pub fn set_encoded_text(&mut self, v: &str) {
-        self.msg.set_body_field(tags::ENCODED_TEXT, v.to_string());
+        self.msg.body_mut().set_field(tags::ENCODED_TEXT, v.to_string());
     }
 
     /// `EncodedText` (tag 355, optional).
     pub fn encoded_text(&self) -> Result<String, FieldError> {
-        self.msg.get_body_field::<String>(tags::ENCODED_TEXT)
+        self.msg.body().get_field::<String>(tags::ENCODED_TEXT)
     }
 
     /// Whether `EncodedText` (tag 355) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_encoded_text(&self) -> bool {
-        self.msg.has_body_field(tags::ENCODED_TEXT)
+        self.msg.body().has_field(tags::ENCODED_TEXT)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).

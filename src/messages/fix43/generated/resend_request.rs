@@ -75,36 +75,36 @@ impl ResendRequest {
 
     /// Set `BeginSeqNo` (tag 7, required).
     pub fn set_begin_seq_no(&mut self, v: u32) {
-        self.msg.set_body_field(tags::BEGIN_SEQ_NO, v.to_string());
+        self.msg.body_mut().set_field(tags::BEGIN_SEQ_NO, v.to_string());
     }
 
     /// `BeginSeqNo` (tag 7, required).
     pub fn begin_seq_no(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::BEGIN_SEQ_NO)
+        self.msg.body().get_field::<u32>(tags::BEGIN_SEQ_NO)
     }
 
     /// Whether `BeginSeqNo` (tag 7) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_begin_seq_no(&self) -> bool {
-        self.msg.has_body_field(tags::BEGIN_SEQ_NO)
+        self.msg.body().has_field(tags::BEGIN_SEQ_NO)
     }
 
     // --- EndSeqNo (tag 16, SEQNUM, required) ---
 
     /// Set `EndSeqNo` (tag 16, required).
     pub fn set_end_seq_no(&mut self, v: u32) {
-        self.msg.set_body_field(tags::END_SEQ_NO, v.to_string());
+        self.msg.body_mut().set_field(tags::END_SEQ_NO, v.to_string());
     }
 
     /// `EndSeqNo` (tag 16, required).
     pub fn end_seq_no(&self) -> Result<u32, FieldError> {
-        self.msg.get_body_field::<u32>(tags::END_SEQ_NO)
+        self.msg.body().get_field::<u32>(tags::END_SEQ_NO)
     }
 
     /// Whether `EndSeqNo` (tag 16) is set. Presence only: a set but malformed
     /// value still counts.
     pub fn has_end_seq_no(&self) -> bool {
-        self.msg.has_body_field(tags::END_SEQ_NO)
+        self.msg.body().has_field(tags::END_SEQ_NO)
     }
 
     /// The underlying raw message (e.g. for fields this facade has no accessor for).
