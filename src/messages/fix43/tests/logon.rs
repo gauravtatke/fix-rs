@@ -96,6 +96,36 @@ fn try_from_rejects_wrong_msgtype() {
     );
 }
 
+// Missing 35 fails `get_msg_type` (the `Err` arm); blank `35=` parses as `Ok("")` (the mismatch
+// arm). Different arms, same outcome — pinned so a refactor of the match can't split them.
+#[test]
+fn try_from_rejects_missing_msgtype() {
+    let mut msg = Message::new();
+    msg.set_body_field(108, "30");
+    let err = Logon::try_from(msg).unwrap_err();
+    assert_eq!(
+        err,
+        TypedError::WrongMsgType {
+            expected: "A",
+            got: String::new()
+        }
+    );
+}
+
+#[test]
+fn try_from_rejects_blank_msgtype() {
+    let mut msg = Message::new();
+    msg.set_header_field(35, "");
+    let err = Logon::try_from(msg).unwrap_err();
+    assert_eq!(
+        err,
+        TypedError::WrongMsgType {
+            expected: "A",
+            got: String::new()
+        }
+    );
+}
+
 #[test]
 fn into_message_returns_inner_with_fields() {
     let mut logon = Logon::new();

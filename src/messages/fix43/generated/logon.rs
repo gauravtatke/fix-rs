@@ -13,7 +13,7 @@
 use super::fields;
 use crate::convert;
 use crate::core::message::Message;
-use crate::errors::FieldError;
+use crate::errors::{FieldError, TypedError};
 // Tags come from the shared, version-neutral registry (`crate::tags`): a tag number means the
 // same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags;
@@ -32,6 +32,34 @@ pub struct Logon {
 impl Default for Logon {
     fn default() -> Self {
         Logon::new()
+    }
+}
+
+/// Inbound seam: adopt a raw `Message` as a typed `Logon`, checking the msg type.
+impl TryFrom<Message> for Logon {
+    type Error = TypedError;
+
+    fn try_from(message: Message) -> Result<Self, Self::Error> {
+        match message.get_msg_type() {
+            Ok(mt) if mt == Self::MSG_TYPE => Ok(Self { msg: message }),
+            Ok(got) => Err(TypedError::WrongMsgType {
+                expected: Self::MSG_TYPE,
+                got,
+            }),
+            // Missing MsgType is still "not a Logon" from this facade's POV. (A blank `35=`
+            // parses as `Ok("")` and lands in the arm above, with the same `got: ""`.)
+            Err(_) => Err(TypedError::WrongMsgType {
+                expected: Self::MSG_TYPE,
+                got: String::new(),
+            }),
+        }
+    }
+}
+
+/// Outbound seam: hand the underlying `Message` back to the engine to send.
+impl From<Logon> for Message {
+    fn from(typed_msg: Logon) -> Self {
+        typed_msg.msg
     }
 }
 

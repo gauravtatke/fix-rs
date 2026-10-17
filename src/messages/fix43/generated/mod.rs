@@ -1,3 +1,9 @@
+pub mod business_message_reject;
 pub mod fields;
 pub mod heartbeat;
 pub mod logon;
+pub mod logout;
+pub mod reject;
+pub mod resend_request;
+pub mod sequence_reset;
+pub mod test_request;

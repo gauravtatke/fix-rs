@@ -82,7 +82,7 @@ fn generate(spec: &FixSpec, mut sink: impl FnMut(&str, String)) {
     let field_views: HashMap<String, FieldView> =
         spec.fields.iter().map(field_view).map(|f| (f.xml_name.clone(), f)).collect();
     let mut modules = vec!["fields".to_owned()];
-    for msg in spec.messages.iter().filter(|m| GENERATED_MESSAGES.contains(&m.name.as_str())) {
+    for msg in spec.messages.iter().filter(|m| m.category == "admin") {
         let module = naming::module_name(&msg.name);
         sink(&format!("{FIX43_GENERATED}/{module}.rs"), emit_message(spec, msg, &field_views));
         modules.push(module);
