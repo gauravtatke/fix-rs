@@ -51,14 +51,29 @@ pub(crate) fn const_name(xml_name: &str) -> String {
 }
 
 pub(crate) fn variant_name(xml_name: &str) -> String {
-    corrected_name(xml_name).unwrap_or(xml_name).to_upper_camel_case()
+    corrected_upper_camel_case(xml_name)
 }
 
 pub(crate) fn enum_name(xml_name: &str) -> String {
-    corrected_name(xml_name).unwrap_or(xml_name).to_upper_camel_case()
+    corrected_upper_camel_case(xml_name)
+}
+
+/// UpperCamel name of a repeating group, from its count field (`NoMDEntries` -> `NoMdEntries`):
+/// the generated group / entry view types (`NoMdEntries`, `NoMdEntriesEntry`, ...). Same casing as
+/// [`enum_name`], named for its use.
+pub(crate) fn group_name(xml_name: &str) -> String {
+    corrected_upper_camel_case(xml_name)
 }
 
 pub(crate) fn method_name(xml_name: &str) -> String {
+    corrected_snake_case(xml_name)
+}
+
+fn corrected_upper_camel_case(xml_name: &str) -> String {
+    corrected_name(xml_name).unwrap_or(xml_name).to_upper_camel_case()
+}
+
+fn corrected_snake_case(xml_name: &str) -> String {
     corrected_name(xml_name).unwrap_or(xml_name).to_snake_case()
 }
 
@@ -66,7 +81,7 @@ pub(crate) fn method_name(xml_name: &str) -> String {
 /// `generated/new_order_single.rs` + `pub mod new_order_single;`). Same casing as
 /// [`method_name`], named for its use.
 pub(crate) fn module_name(xml_name: &str) -> String {
-    method_name(xml_name)
+    corrected_snake_case(xml_name)
 }
 
 #[cfg(test)]

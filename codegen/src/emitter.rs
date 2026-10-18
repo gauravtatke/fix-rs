@@ -3,6 +3,7 @@ use crate::spec::{FieldDef, FixSpec, Item, MessageDef};
 use minijinja::{AutoEscape, Environment, UndefinedBehavior};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+
 // ---- Templates: one environment, every generated file renders through it. ----
 
 /// All templates, embedded at compile time (cwd-independent; editing one triggers a rebuild).
@@ -39,7 +40,9 @@ fn render(template: &str, view: &impl Serialize) -> String {
         .unwrap_or_else(|e| panic!("rendering {template} failed: {e:#}"))
 }
 
-// ---- tags.rs ----
+// ---- Views: the `Serialize` inputs the templates render (every decision already made) ----
+
+// tags.rs
 
 /// Template input for `tags.rs.j2`.
 #[derive(Debug, Serialize)]
@@ -59,27 +62,7 @@ struct TagView {
     number: u32,
 }
 
-/// Render `src/tags.rs`: one `pub const <NAME>: u32 = <tag>;` per field, via `tags.rs.j2`.
-pub(crate) fn emit_tags(spec: &FixSpec) -> String {
-    let mut tags: Vec<TagView> = spec
-        .fields
-        .iter()
-        .map(|f| TagView {
-            name: naming::const_name(&f.name),
-            number: f.tag,
-        })
-        .collect();
-    tags.sort_by_key(|t| t.number);
-    render(
-        "tags.rs.j2",
-        &TagsView {
-            begin_string: spec.begin_string.clone(),
-            tags,
-        },
-    )
-}
-
-// ---- Fields: one view per field, shared by fields.rs and every message file ----
+// Fields: one view per field, shared by fields.rs and every message file
 
 /// One FIX field as the templates see it. Built once per field by [`field_view`] and shared:
 /// `fields.rs.j2` uses the enum parts (`wire_type`, `wire_param_type`, `variants`),
@@ -130,61 +113,95 @@ struct VariantView {
     literal: String,
 }
 
-/// Rust type of a value-constrained field's wire value (`FieldView::wire_type`). Only the FIX
-/// types that carry value lists are valid; anything else panics so a new one surfaces loudly.
-fn wire_type_for(fix_type: &str) -> &'static str {
-    match fix_type {
-        "CHAR" => "char",
-        "INT" => "i32",
-        "NUMINGROUP" => "u32",
-        "STRING" | "MULTIPLEVALUESTRING" => "&'static str",
-        _ => panic!("FIX type {fix_type} has values but no wire-type mapping"),
-    }
+// fields.rs (value enums)
+
+/// Template input for `fields.rs.j2`.
+#[derive(Debug, Serialize)]
+struct FieldEnumsView {
+    /// e.g. "FIX.4.3", for the file header.
+    begin_string: String,
+    /// The fields that get an enum (non-empty `variants`), in dictionary order.
+    fields: Vec<FieldView>,
 }
 
-/// `from_fix()`'s parameter type for a wire type (`FieldView::wire_param_type`): the same type,
-/// except a `'static` string becomes any `&str`.
-fn wire_param_type(wire_type: &'static str) -> &'static str {
-    if wire_type == "&'static str" {
-        "&str"
-    } else {
-        wire_type
-    }
+// messages/fixNN/generated/<message>.rs (message facades)
+
+/// Template input for `message.rs.j2`: one message facade.
+#[derive(Debug, Serialize)]
+struct MessageView {
+    /// e.g. "FIX.4.3", for the file header.
+    begin_string: String,
+    /// The message (and struct) name, e.g. `Logon`.
+    name: String,
+    /// "admin" or "app".
+    category: String,
+    /// The MsgType (tag 35) value, e.g. `A` — `MSG_TYPE` const and the header stamp.
+    msg_type: String,
+    /// The message's own fields after resolving components, in order (group members excluded:
+    /// they are in `groups`).
+    fields: Vec<MessageFieldView>,
+    /// The message's top-level repeating groups, in order; nested groups hang off each one.
+    groups: Vec<GroupView>,
 }
 
-/// The getter's return type for a field *without* a value enum (`FieldView::value_type`): the
-/// D8 FIX-type -> Rust-type map documented in `src/convert.rs`.
-fn value_type_for(fix_type: &str) -> &'static str {
-    match fix_type {
-        "PRICE" | "AMT" | "QTY" | "PRICEOFFSET" => "Decimal",
-        "FLOAT" | "PERCENTAGE" => "f64",
-        "LENGTH" | "NUMINGROUP" | "SEQNUM" | "TAGNUM" | "DAYOFMONTH" => "u32",
-        "BOOLEAN" => "bool",
-        "INT" => "i32",
-        "CHAR" => "char",
-        "STRING"
-        | "DATA"
-        | "COUNTRY"
-        | "CURRENCY"
-        | "EXCHANGE"
-        | "MONTHYEAR"
-        | "MULTIPLEVALUESTRING" => "String",
-        "UTCTIMESTAMP" => "DateTime<Utc>",
-        "UTCDATE" | "LOCALMKTDATE" => "NaiveDate",
-        "UTCTIMEONLY" => "NaiveTime",
-        _ => panic!("FIX type {fix_type} has no Rust type mapping"),
-    }
+/// A field as it appears in one particular message: the shared [`FieldView`] plus this
+/// message's effective `required` (which differs between messages, so it isn't on `FieldView`).
+#[derive(Debug, Serialize)]
+struct MessageFieldView {
+    /// Effective required-ness in this message, per [`resolve_items`].
+    required: bool,
+    /// The field itself.
+    field: FieldView,
 }
 
-/// A wire code written as a Rust literal of `wire_type` (`VariantView::literal`): integers bare,
-/// `char` in single quotes, strings in double quotes.
-fn rust_literal(code: &str, wire_type: &str) -> String {
-    match wire_type {
-        "i32" | "u32" => code.to_string(),
-        "char" => format!("'{code}'"),
-        _ => format!("\"{code}\""),
-    }
+/// One repeating group as it appears in one particular message (D1: group types live in their
+/// message's module), recursive for nested groups. Named after the group's count field.
+#[derive(Debug, Serialize)]
+struct GroupView {
+    /// UpperCamel name, e.g. `NoMsgTypes`. Also the prefix of the four generated view types:
+    /// `NoMsgTypes` / `NoMsgTypesMut` (the group) and `NoMsgTypesEntry` / `NoMsgTypesEntryMut`
+    /// (one instance).
+    type_name: String,
+    /// snake_case name, e.g. `no_msg_types`: the parent's `no_x()` / `no_x_mut()` / `set_no_x(n)` /
+    /// `add_no_x(..)` methods.
+    method_name: String,
+    /// `tags::` const of the count field (NumInGroup), e.g. `NO_MSG_TYPES`.
+    count_tag_const: String,
+    /// `tags::` const of the delimiter, e.g. `REF_MSG_TYPE`: the group's first member, which the
+    /// spec requires to be a field. Always `field_order[0]`.
+    delim_tag_const: String,
+    /// The instance's wire order: `tags::` consts of every member in dictionary order (a field's
+    /// own tag, a nested group's count tag), e.g. `[REF_MSG_TYPE, MSG_DIRECTION]`. Passed to
+    /// `add_group_instance` / `set_group`, which set it on each instance so it serializes in this
+    /// order whatever order its fields are set in (FIX 4.3 Vol 1 §4).
+    field_order: Vec<String>,
+    /// Effective required-ness of the group as an entry of its parent, per [`resolve_items`].
+    required: bool,
+    /// The group's own fields, in order (nested group members excluded: they are in `groups`).
+    fields: Vec<MessageFieldView>,
+    /// Groups nested directly in this one, in order. Splitting `fields` from `groups` loses their
+    /// relative order, which methods don't need; the wire order is in `field_order`.
+    groups: Vec<GroupView>,
 }
+
+// ---- Shared model: the resolved message / group body the views are built from ----
+
+/// One entry of a message / group body after [`resolve_items`]: component references are
+/// inlined and `required` is effective (contrast [`Item`], the raw XML entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Member {
+    Field {
+        name: String,
+        required: bool,
+    },
+    Group {
+        name: String,
+        required: bool,
+        members: Vec<Member>,
+    },
+}
+
+// ---- View builders: XML definitions -> views (names, Rust types, literals, required flags) ----
 
 /// Build the [`FieldView`] for one field definition. A field gets variants when it has a value
 /// list and isn't BOOLEAN; then its `value_type` is the generated enum, otherwise the D8 type.
@@ -253,98 +270,60 @@ pub(crate) fn field_view(fd: &FieldDef) -> FieldView {
     }
 }
 
-// ---- fields.rs (value enums) ----
-
-/// Template input for `fields.rs.j2`.
-#[derive(Debug, Serialize)]
-struct FieldEnumsView {
-    /// e.g. "FIX.4.3", for the file header.
-    begin_string: String,
-    /// The fields that get an enum (non-empty `variants`), in dictionary order.
-    fields: Vec<FieldView>,
+/// Rust type of a value-constrained field's wire value (`FieldView::wire_type`). Only the FIX
+/// types that carry value lists are valid; anything else panics so a new one surfaces loudly.
+fn wire_type_for(fix_type: &str) -> &'static str {
+    match fix_type {
+        "CHAR" => "char",
+        "INT" => "i32",
+        "NUMINGROUP" => "u32",
+        "STRING" | "MULTIPLEVALUESTRING" => "&'static str",
+        _ => panic!("FIX type {fix_type} has values but no wire-type mapping"),
+    }
 }
 
-/// Render `messages/fixNN/generated/fields.rs`: one enum (+ `to_fix`/`from_fix`) per
-/// value-constrained field, via the `fields.rs.j2` template.
-pub(crate) fn emit_field_enums(spec: &FixSpec) -> String {
-    let fields: Vec<FieldView> =
-        spec.fields.iter().map(field_view).filter(|f| !f.variants.is_empty()).collect();
-    let view = FieldEnumsView {
-        begin_string: spec.begin_string.clone(),
-        fields,
-    };
-    render("fields.rs.j2", &view)
+/// `from_fix()`'s parameter type for a wire type (`FieldView::wire_param_type`): the same type,
+/// except a `'static` string becomes any `&str`.
+fn wire_param_type(wire_type: &'static str) -> &'static str {
+    if wire_type == "&'static str" {
+        "&str"
+    } else {
+        wire_type
+    }
 }
 
-// ---- messages/fixNN/generated/<message>.rs (message facades) ----
-
-/// Template input for `message.rs.j2`: one message facade.
-#[derive(Debug, Serialize)]
-struct MessageView {
-    /// e.g. "FIX.4.3", for the file header.
-    begin_string: String,
-    /// The message (and struct) name, e.g. `Logon`.
-    name: String,
-    /// "admin" or "app".
-    category: String,
-    /// The MsgType (tag 35) value, e.g. `A` — `MSG_TYPE` const and the header stamp.
-    msg_type: String,
-    /// The message's fields after resolving components, in order. (Groups are not emitted yet.)
-    fields: Vec<MessageFieldView>,
-    /// Top-level repeating groups this message has but the facade doesn't emit yet (doc note).
-    omitted_groups: Vec<String>,
+/// The getter's return type for a field *without* a value enum (`FieldView::value_type`): the
+/// D8 FIX-type -> Rust-type map documented in `src/convert.rs`.
+fn value_type_for(fix_type: &str) -> &'static str {
+    match fix_type {
+        "PRICE" | "AMT" | "QTY" | "PRICEOFFSET" => "Decimal",
+        "FLOAT" | "PERCENTAGE" => "f64",
+        "LENGTH" | "NUMINGROUP" | "SEQNUM" | "TAGNUM" | "DAYOFMONTH" => "u32",
+        "BOOLEAN" => "bool",
+        "INT" => "i32",
+        "CHAR" => "char",
+        "STRING"
+        | "DATA"
+        | "COUNTRY"
+        | "CURRENCY"
+        | "EXCHANGE"
+        | "MONTHYEAR"
+        | "MULTIPLEVALUESTRING" => "String",
+        "UTCTIMESTAMP" => "DateTime<Utc>",
+        "UTCDATE" | "LOCALMKTDATE" => "NaiveDate",
+        "UTCTIMEONLY" => "NaiveTime",
+        _ => panic!("FIX type {fix_type} has no Rust type mapping"),
+    }
 }
 
-/// A field as it appears in one particular message: the shared [`FieldView`] plus this
-/// message's effective `required` (which differs between messages, so it isn't on `FieldView`).
-#[derive(Debug, Serialize)]
-struct MessageFieldView {
-    /// Effective required-ness in this message, per [`resolve_items`].
-    required: bool,
-    /// The field itself.
-    field: FieldView,
-}
-
-/// Render one message facade (`messages/fixNN/generated/<message>.rs`) via `message.rs.j2`.
-/// `field_views` holds every field's [`FieldView`], keyed by dictionary name.
-///
-/// Panics if the message references a field the dictionary doesn't define.
-pub(crate) fn emit_message(
-    spec: &FixSpec,
-    msg: &MessageDef,
-    field_views: &HashMap<String, FieldView>,
-) -> String {
-    let mut members = Vec::new();
-    resolve_items(spec, &msg.items, true, &mut members);
-    let fields: Vec<MessageFieldView> = members
-        .iter()
-        .filter_map(|m| match m {
-            Member::Field { name, required } => Some(MessageFieldView {
-                required: *required,
-                field: field_views
-                    .get(name)
-                    .unwrap_or_else(|| panic!("message {} uses undefined field `{name}`", msg.name))
-                    .clone(),
-            }),
-            Member::Group { .. } => None,
-        })
-        .collect();
-    let omitted_groups = members
-        .iter()
-        .filter_map(|m| match m {
-            Member::Group { name, .. } => Some(name.clone()),
-            Member::Field { .. } => None,
-        })
-        .collect();
-    let view = MessageView {
-        begin_string: spec.begin_string.clone(),
-        name: msg.name.clone(),
-        category: msg.category.clone(),
-        msg_type: msg.msg_type.clone(),
-        fields,
-        omitted_groups,
-    };
-    render("message.rs.j2", &view)
+/// A wire code written as a Rust literal of `wire_type` (`VariantView::literal`): integers bare,
+/// `char` in single quotes, strings in double quotes.
+fn rust_literal(code: &str, wire_type: &str) -> String {
+    match wire_type {
+        "i32" | "u32" => code.to_string(),
+        "char" => format!("'{code}'"),
+        _ => format!("\"{code}\""),
+    }
 }
 
 /// Inline component references and compute each member's effective `required`, matching the
@@ -386,19 +365,170 @@ fn resolve_items(spec: &FixSpec, items: &[Item], present: bool, out: &mut Vec<Me
     }
 }
 
-/// One entry of a message / group body after [`resolve_items`]: component references are
-/// inlined and `required` is effective (contrast [`Item`], the raw XML entry).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Member {
-    Field {
-        name: String,
-        required: bool,
-    },
-    Group {
-        name: String,
-        required: bool,
-        members: Vec<Member>,
-    },
+/// The [`FieldView`] of dictionary field `name`. The single lookup every message/group view
+/// goes through, so tag consts and accessor data all come from the same view `tags.rs` and
+/// `fields.rs` were generated from. A group's name is its count field, so this resolves count
+/// tags too.
+///
+/// Panics, naming the message, if the dictionary doesn't define `name`.
+fn lookup_field<'a>(
+    name: &str,
+    msg: &MessageDef,
+    field_views: &'a HashMap<String, FieldView>,
+) -> &'a FieldView {
+    field_views
+        .get(name)
+        .unwrap_or_else(|| panic!("message {} uses undefined field `{name}`", msg.name))
+}
+
+/// A field as it appears in `msg`: its shared [`FieldView`] plus its effective `required` there.
+fn member_to_field_view(
+    name: &str,
+    required: bool,
+    msg: &MessageDef,
+    field_views: &HashMap<String, FieldView>,
+) -> MessageFieldView {
+    MessageFieldView {
+        required,
+        field: lookup_field(name, msg, field_views).clone(),
+    }
+}
+
+/// A repeating group as it appears in `msg` (`name` is its count field), with its members split
+/// into `fields` and nested `groups` (recursively) and its wire order kept in `field_order`.
+///
+/// Panics, naming the group and message, if its first member isn't a field (the delimiter), or
+/// if a member isn't defined in the dictionary.
+fn member_to_group_view(
+    name: &str,
+    required: bool,
+    members: &[Member],
+    msg: &MessageDef,
+    field_views: &HashMap<String, FieldView>,
+) -> GroupView {
+    let group_fields: Vec<MessageFieldView> = members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Field { name, required } => {
+                Some(member_to_field_view(name, *required, msg, field_views))
+            }
+            _ => None,
+        })
+        .collect();
+    let subgroups: Vec<GroupView> = members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Group {
+                name,
+                required,
+                members,
+            } => Some(member_to_group_view(name, *required, members, msg, field_views)),
+            _ => None,
+        })
+        .collect();
+    let delim_tag_const = match members.first() {
+        Some(Member::Field { name, .. }) => lookup_field(name, msg, field_views).tag_const.clone(),
+        _ => panic!(
+            "group `{name}` in message `{}`: first member must be a field (the delimiter)",
+            msg.name
+        ),
+    };
+    // A field contributes its own tag, a nested group its count tag (its name): either way the
+    // member's name is a dictionary field.
+    let field_order = members
+        .iter()
+        .map(|m| match m {
+            Member::Field { name, .. } | Member::Group { name, .. } => {
+                lookup_field(name, msg, field_views).tag_const.clone()
+            }
+        })
+        .collect();
+    GroupView {
+        type_name: naming::group_name(name),
+        method_name: naming::method_name(name),
+        required,
+        fields: group_fields,
+        count_tag_const: lookup_field(name, msg, field_views).tag_const.clone(),
+        delim_tag_const,
+        groups: subgroups,
+        field_order,
+    }
+}
+
+// ---- Emitters: one per generated file kind; each builds its view and renders it ----
+
+/// Render `src/tags.rs`: one `pub const <NAME>: u32 = <tag>;` per field, via `tags.rs.j2`.
+pub(crate) fn emit_tags(spec: &FixSpec) -> String {
+    let mut tags: Vec<TagView> = spec
+        .fields
+        .iter()
+        .map(|f| TagView {
+            name: naming::const_name(&f.name),
+            number: f.tag,
+        })
+        .collect();
+    tags.sort_by_key(|t| t.number);
+    render(
+        "tags.rs.j2",
+        &TagsView {
+            begin_string: spec.begin_string.clone(),
+            tags,
+        },
+    )
+}
+
+/// Render `messages/fixNN/generated/fields.rs`: one enum (+ `to_fix`/`from_fix`) per
+/// value-constrained field, via the `fields.rs.j2` template.
+pub(crate) fn emit_field_enums(spec: &FixSpec) -> String {
+    let fields: Vec<FieldView> =
+        spec.fields.iter().map(field_view).filter(|f| !f.variants.is_empty()).collect();
+    let view = FieldEnumsView {
+        begin_string: spec.begin_string.clone(),
+        fields,
+    };
+    render("fields.rs.j2", &view)
+}
+
+/// Render one message facade (`messages/fixNN/generated/<message>.rs`) via `message.rs.j2`.
+/// `field_views` holds every field's [`FieldView`], keyed by dictionary name.
+///
+/// Panics if the message references a field the dictionary doesn't define.
+pub(crate) fn emit_message(
+    spec: &FixSpec,
+    msg: &MessageDef,
+    field_views: &HashMap<String, FieldView>,
+) -> String {
+    let mut members = Vec::new();
+    resolve_items(spec, &msg.items, true, &mut members);
+    let fields: Vec<MessageFieldView> = members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Field { name, required } => {
+                Some(member_to_field_view(name, *required, msg, field_views))
+            }
+            Member::Group { .. } => None,
+        })
+        .collect();
+    let groups = members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Group {
+                name,
+                required,
+                members,
+            } => Some(member_to_group_view(name, *required, members, msg, field_views)),
+            _ => None,
+        })
+        .collect();
+    let view = MessageView {
+        begin_string: spec.begin_string.clone(),
+        name: msg.name.clone(),
+        category: msg.category.clone(),
+        msg_type: msg.msg_type.clone(),
+        fields,
+        groups,
+    };
+    render("message.rs.j2", &view)
 }
 
 #[cfg(test)]

@@ -9,11 +9,6 @@
 //!
 //! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen` from the {{ begin_string }}
 //! data dictionary; `cargo test -p codegen` fails if this file drifts from the generator's output.
-{% if omitted_groups %}
-//!
-//! Not generated yet (repeating groups come later): {% for g in omitted_groups %}`{{ g }}`{% if not loop.last %}, {% endif %}{% endfor %}.
-//! Until then, reach them through [`{{ name }}::message`] / [`{{ name }}::message_mut`].
-{% endif %}
 
 {# One fixed import block for every message. Modules for functions and consts (`tags::X`,
    `convert::f`, `fields::Enum`) so every use site says where a name comes from; types used in

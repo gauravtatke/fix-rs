@@ -257,7 +257,7 @@ references are the golden target the generator must reproduce (diffed by the fre
 
 - [~] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups).**
   DONE (seeded 2026-09-26, by Claude alongside 3.7): `FieldMap::add_group_instance` (append +
-  auto-bump count — fixes the set_group/add_group desync), `push_group_instance`, `group_instances`,
+  auto-bump count — fixes the set_group/add_group desync), `group_instances`,
   `get_group_mut`; `Group::as_slice/as_mut_slice`; `Message::body_group*` (`src/message.rs`).
   Remaining: any extra helpers the generator needs once the group shape is finalized.
 

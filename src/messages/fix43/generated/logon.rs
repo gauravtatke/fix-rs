@@ -3,9 +3,6 @@
 //!
 //! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen` from the FIX.4.3
 //! data dictionary; `cargo test -p codegen` fails if this file drifts from the generator's output.
-//!
-//! Not generated yet (repeating groups come later): `NoMsgTypes`.
-//! Until then, reach them through [`Logon::message`] / [`Logon::message_mut`].
 
 // Every generated message imports the same set; not every message uses all of it.
 #![allow(unused_imports)]
