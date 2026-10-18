@@ -131,13 +131,23 @@ impl FieldMap {
         Err(FieldError::TagNotFound { tag })
     }
 
-    pub fn set_group(&mut self, tag: u32, value: u32, rep_grp_delimiter: u32) -> &mut Group {
+    /// Create repeating group `tag` with `value` empty instances, fill them by index, and set
+    /// the count field to `value`. Each instance gets `order` (the group's dictionary field
+    /// order, as for [`FieldMap::add_group_instance`]), so it serializes in that order whatever
+    /// order its fields are set in; `order[0]` is the delimiter. Panics if `order` is empty.
+    ///
+    /// Additive, not idempotent: on an existing group it appends `value` more instances while
+    /// the count field says `value`. Use it once per group, and don't mix it with
+    /// `add_group_instance` on the same group.
+    pub fn set_group(&mut self, tag: u32, value: u32, order: &[u32]) -> &mut Group {
         self.set_field(tag, value.to_string());
-        let group =
-            self.group.entry(tag).or_insert_with(|| Group::new(rep_grp_delimiter, tag, value));
-        // create group instances and insert into group
-        for i in 0..value {
-            group.add_group(FieldMap::new());
+        let delim =
+            *order.first().expect("set_group: order must not be empty (order[0] is the delimiter)");
+        let group = self.group.entry(tag).or_insert_with(|| Group::new(delim, tag, value));
+        for _ in 0..value {
+            let mut instance = FieldMap::new();
+            instance.set_field_order(order);
+            group.add_group(instance);
         }
         group
     }
@@ -150,32 +160,31 @@ impl FieldMap {
         self.group.get_mut(&tag)
     }
 
-    /// Append a new empty instance to repeating group `count_tag` (creating the group with
-    /// delimiter `delim` if absent), keep the count field and `Group::value` in sync, and
-    /// return the new instance to fill. Lets a caller build a group incrementally without
-    /// managing the count itself — fixing the `set_group`/`add_group` desync footgun.
-    pub fn add_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
+    /// Append a new empty instance to repeating group `count_tag`, keep the count field and
+    /// `Group::value` in sync, and return the new instance to fill. Lets a caller build a group
+    /// incrementally without managing the count itself — fixing the `set_group`/`add_group`
+    /// desync footgun.
+    ///
+    /// `order` is the group's dictionary field order (fields, plus nested groups' count tags).
+    /// It is set on the new instance, so the instance serializes in that order whatever order
+    /// its fields are set in — the same order `parse_group` gives parsed instances. Pass a
+    /// different order to override it (e.g. for a custom dictionary). `order[0]` is the group's
+    /// delimiter, used if this call creates the group. Panics if `order` is empty.
+    pub fn add_group_instance(&mut self, count_tag: u32, order: &[u32]) -> &mut FieldMap {
         {
+            let delim = *order
+                .first()
+                .expect("add_group_instance: order must not be empty (order[0] is the delimiter)");
             let group =
                 self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
-            group.add_group(FieldMap::new());
+            let mut new_group_instance = FieldMap::new();
+            new_group_instance.set_field_order(order);
+            group.add_group(new_group_instance);
             group.value = group.fields.len() as u32;
         }
         let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
         self.set_field(count_tag, n.to_string());
         self.group.get_mut(&count_tag).and_then(|g| g.fields.last_mut()).expect("just pushed")
-    }
-
-    /// Append a pre-built instance to repeating group `count_tag`, keeping the count in sync.
-    pub fn push_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
-        {
-            let group =
-                self.group.entry(count_tag).or_insert_with(|| Group::new(delim, count_tag, 0));
-            group.add_group(instance);
-            group.value = group.fields.len() as u32;
-        }
-        let n = self.group.get(&count_tag).map(|g| g.value).unwrap_or(0);
-        self.set_field(count_tag, n.to_string());
     }
 
     /// Borrowed iteration over the instances of repeating group `count_tag` (empty if absent).
@@ -360,14 +369,10 @@ impl Message {
         self.body.group.insert(tag, grp);
     }
 
-    /// Append + fill a body repeating-group instance (see `FieldMap::add_group_instance`).
-    pub fn add_body_group_instance(&mut self, count_tag: u32, delim: u32) -> &mut FieldMap {
-        self.body.add_group_instance(count_tag, delim)
-    }
-
-    /// Append a pre-built body repeating-group instance.
-    pub fn push_body_group_instance(&mut self, count_tag: u32, delim: u32, instance: FieldMap) {
-        self.body.push_group_instance(count_tag, delim, instance)
+    /// Append a body repeating-group instance, ordered by `order` (see
+    /// `FieldMap::add_group_instance`).
+    pub fn add_body_group_instance(&mut self, count_tag: u32, order: &[u32]) -> &mut FieldMap {
+        self.body.add_group_instance(count_tag, order)
     }
 
     /// Borrowed iteration over a body repeating group's instances.
@@ -677,7 +682,8 @@ fn parse_group(
     let rg_dd = rg.data_dictionary();
     // The dictionary-declared field order *within one instance* of this group — used both
     // to enforce "fields inside a group instance must appear in declared order" below, and
-    // (via `set_field_order`) to sort each instance back into that order on output.
+    // (passed to `set_group`, which sets it on every instance) to sort each instance back into
+    // that order on output.
     let field_order = rg_dd.get_ordered_fields();
     let group_count_tag = fld.tag();
     let declared_count = match fld.value().parse::<u32>() {
@@ -689,9 +695,10 @@ fn parse_group(
         }
     };
     let delimiter = rg.delimiter();
-    // Pre-allocates `declared_count` empty FieldMap slots up front; the loop below fills
-    // them in by index as instances are recognized on the wire.
-    let group = fmap.set_group(fld.tag(), declared_count, delimiter);
+    // Pre-allocates `declared_count` empty FieldMap slots up front, each already carrying
+    // `field_order`; the loop below fills them in by index as instances are recognized on the
+    // wire.
+    let group = fmap.set_group(fld.tag(), declared_count, &field_order);
     // `actual_count`: number of group instances started so far, bumped each time the
     // delimiter tag reappears. `0` means "no instance started yet" — a real, in-range
     // usize value, since this counts instances rather than indexing into `group[..]`
@@ -724,7 +731,6 @@ fn parse_group(
             // resetting previous offset
             previous_offset = 0;
             let group_instance = &mut group[actual_count - 1];
-            group_instance.set_field_order(&field_order);
             if rg_dd.is_msg_group(msg_type, next_field.tag()) {
                 // The delimiter field itself starts a nested group (rare, but structurally
                 // possible) — recurse into it instead of just storing it as a plain field.
@@ -1748,7 +1754,7 @@ mod message_test {
         msg.set_header_field(35, "W");
         msg.set_body_field(55, "MSFT");
         {
-            let group = msg.body_mut().set_group(268, 2, 269);
+            let group = msg.body_mut().set_group(268, 2, &[269, 270, 271]);
             group[0].set_field(269, "0");
             group[0].set_field(270, "93.25");
             group[0].set_field(271, "100");
@@ -1792,7 +1798,7 @@ mod message_test {
         let mut msg = Message::new();
         msg.set_header_field(8, "FIX.4.3");
         msg.set_header_field(35, "W");
-        msg.body_mut().set_group(268, 0, 269);
+        msg.body_mut().set_group(268, 0, &[269, 270, 271]);
         msg.set_body_len();
         msg.set_checksum();
 
@@ -1811,11 +1817,11 @@ mod message_test {
         msg.set_header_field(35, "i");
         msg.set_body_field(117, "Q1");
         {
-            let sets = msg.body_mut().set_group(296, 1, 302);
+            let sets = msg.body_mut().set_group(296, 1, &[302, 304, 295]);
             let set0 = &mut sets[0];
             set0.set_field(302, "SET-A");
             set0.set_field(304, "2"); // TotQuoteEntries
-            let entries = set0.set_group(295, 2, 299);
+            let entries = set0.set_group(295, 2, &[299, 132]);
             entries[0].set_field(299, "E0");
             entries[0].set_field(132, "1.2345");
             entries[1].set_field(299, "E1");
@@ -1833,6 +1839,241 @@ mod message_test {
         assert_eq!(field_value(&wire, 296).as_deref(), Some("1"));
         assert_eq!(field_value(&wire, 295).as_deref(), Some("2"));
         assert_wire_self_consistent(&wire);
+    }
+
+    // ---- Group building: instances carry the dictionary field order ------------------------
+    // FIX 4.3 Vol 1 §4: fields inside a repeating group must be in the order of the message
+    // definition, delimiter first. The builders (`set_group`, `add_group_instance`) take that
+    // order and set it on every instance they create, so an instance serializes in it whatever
+    // order its fields were set in. Every test below sets fields *scrambled* (delimiter last),
+    // since a test that sets them in order would pass even with no ordering at all.
+
+    // NoMDEntries(268) in MarketDataSnapshotFullRefresh(W), per resources/FIX43.xml:
+    // MDEntryType(269, delimiter), MDEntryPx(270), Currency(15), MDEntrySize(271), ...
+    const MD_ENTRY_ORDER: &[u32] = &[269, 270, 15, 271];
+
+    // Stamp BodyLength/CheckSum and serialize a built W message.
+    fn finish_w(mut msg: Message) -> String {
+        msg.set_body_len();
+        msg.set_checksum();
+        msg.to_string()
+    }
+
+    fn new_w() -> Message {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "W");
+        msg
+    }
+
+    // add_group_instance, one instance: delimiter set last still goes first.
+    #[test]
+    fn add_group_instance_orders_scrambled_setters() {
+        let mut msg = new_w();
+        let e = msg.body_mut().add_group_instance(268, MD_ENTRY_ORDER);
+        e.set_field(271, "100");
+        e.set_field(270, "93.25");
+        e.set_field(269, "0");
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 270, 271, 10]);
+        assert_eq!(field_value(&wire, 268).as_deref(), Some("1"));
+        assert_wire_self_consistent(&wire);
+    }
+
+    // add_group_instance, many instances, each scrambled differently: every instance is
+    // ordered on its own, and the count tracks the instances.
+    #[test]
+    fn add_group_instance_orders_each_instance() {
+        let mut msg = new_w();
+        {
+            let e = msg.body_mut().add_group_instance(268, MD_ENTRY_ORDER);
+            e.set_field(270, "93.25");
+            e.set_field(269, "0");
+        }
+        {
+            let e = msg.body_mut().add_group_instance(268, MD_ENTRY_ORDER);
+            e.set_field(271, "200");
+            e.set_field(15, "USD");
+            e.set_field(269, "1");
+        }
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 270, 269, 15, 271, 10]);
+        assert_eq!(field_value(&wire, 268).as_deref(), Some("2"));
+        assert_wire_self_consistent(&wire);
+    }
+
+    // The Message wrapper delegates to the body's add_group_instance (same ordering).
+    #[test]
+    fn add_body_group_instance_orders_scrambled_setters() {
+        let mut msg = new_w();
+        let e = msg.add_body_group_instance(268, MD_ENTRY_ORDER);
+        e.set_field(270, "93.25");
+        e.set_field(269, "0");
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 270, 10]);
+    }
+
+    // set_group(n): every pre-allocated instance carries the order (regression: instances
+    // were once created without it, so setter order leaked onto the wire).
+    #[test]
+    fn set_group_orders_scrambled_setters_in_every_instance() {
+        let mut msg = new_w();
+        {
+            let group = msg.body_mut().set_group(268, 2, MD_ENTRY_ORDER);
+            group[0].set_field(271, "100");
+            group[0].set_field(269, "0");
+            group[1].set_field(15, "USD");
+            group[1].set_field(270, "93.30");
+            group[1].set_field(269, "1");
+        }
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 271, 269, 270, 15, 10]);
+        assert_wire_self_consistent(&wire);
+    }
+
+    // order[0] is the group's delimiter, for both builders.
+    #[test]
+    fn builders_take_delimiter_from_order_first() {
+        let mut fm = FieldMap::new();
+        fm.set_group(268, 1, MD_ENTRY_ORDER);
+        assert_eq!(fm.get_group(268).unwrap().delim(), 269);
+
+        let mut fm = FieldMap::new();
+        fm.add_group_instance(296, &[302, 304, 295]);
+        assert_eq!(fm.get_group(296).unwrap().delim(), 302);
+    }
+
+    // A tag not in `order` (e.g. a counterparty's custom field) sorts after the ordered ones,
+    // keeping its insertion order relative to other unlisted tags.
+    #[test]
+    fn group_instance_tag_not_in_order_goes_last() {
+        let mut msg = new_w();
+        let e = msg.body_mut().add_group_instance(268, MD_ENTRY_ORDER);
+        e.set_field(9001, "custom-a");
+        e.set_field(270, "93.25");
+        e.set_field(9000, "custom-b");
+        e.set_field(269, "0");
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 270, 9001, 9000, 10]);
+    }
+
+    // The order is the caller's: a different one (e.g. from a custom dictionary) is honoured.
+    // The delimiter still comes from order[0].
+    #[test]
+    fn group_instance_follows_caller_supplied_order() {
+        let mut msg = new_w();
+        let e = msg.body_mut().add_group_instance(268, &[269, 9000, 271, 270]);
+        e.set_field(270, "93.25");
+        e.set_field(271, "100");
+        e.set_field(9000, "custom");
+        e.set_field(269, "0");
+
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 9000, 271, 270, 10]);
+    }
+
+    // Existing group (state axis): an instance added to a group made by set_group gets the
+    // order it is given, the group keeps its delimiter, and the count includes it.
+    #[test]
+    fn add_group_instance_to_existing_group_orders_new_instance() {
+        let mut msg = new_w();
+        {
+            let group = msg.body_mut().set_group(268, 1, MD_ENTRY_ORDER);
+            group[0].set_field(270, "93.25");
+            group[0].set_field(269, "0");
+        }
+        {
+            let e = msg.body_mut().add_group_instance(268, MD_ENTRY_ORDER);
+            e.set_field(271, "200");
+            e.set_field(269, "1");
+        }
+
+        assert_eq!(msg.body().get_group(268).unwrap().delim(), 269);
+        let wire = finish_w(msg);
+        assert_eq!(tags_in_order(&wire), vec![8, 9, 35, 268, 269, 270, 269, 271, 10]);
+        assert_eq!(field_value(&wire, 268).as_deref(), Some("2"));
+        assert_wire_self_consistent(&wire);
+    }
+
+    // Nested groups: the inner group is created *before* the outer instance's scalars, so its
+    // position on the wire comes only from its count tag's (295) place in the outer order.
+    // Inner instances are ordered by their own order. MassQuote-shaped: NoQuoteSets(296) ->
+    // QuoteSetID(302), TotQuoteEntries(304), NoQuoteEntries(295) -> QuoteEntryID(299), BidPx(132).
+    #[test]
+    fn nested_group_built_out_of_order_serializes_in_order() {
+        let mut msg = Message::new();
+        msg.set_header_field(8, "FIX.4.3");
+        msg.set_header_field(35, "i");
+        {
+            let set = msg.body_mut().add_group_instance(296, &[302, 304, 295]);
+            {
+                let entry = set.add_group_instance(295, &[299, 132]);
+                entry.set_field(132, "1.2345");
+                entry.set_field(299, "E0");
+            }
+            {
+                let entry = set.add_group_instance(295, &[299, 132]);
+                entry.set_field(132, "1.2360");
+                entry.set_field(299, "E1");
+            }
+            set.set_field(304, "2");
+            set.set_field(302, "SET-A");
+        }
+
+        let wire = finish_w(msg);
+        assert_eq!(
+            tags_in_order(&wire),
+            vec![8, 9, 35, 296, 302, 304, 295, 299, 132, 299, 132, 10]
+        );
+        assert_eq!(field_value(&wire, 295).as_deref(), Some("2"));
+        assert_wire_self_consistent(&wire);
+    }
+
+    // Parsed path: parse_group gives each instance the dictionary order (via set_group), so a
+    // field added to a parsed instance lands in its dictionary position, not at the end.
+    // Currency(15) sits between MDEntryPx(270) and MDEntrySize(271) in NoMDEntries.
+    // Fixture: the W from msg_test_repeating_group_member_tags_are_not_duplicates (parses).
+    #[test]
+    fn parsed_group_instance_keeps_order_when_field_added() {
+        let w = "8=FIX.4.3|9=134|35=W|34=2|49=GEMINI|52=20180425-17:51:40.787|56=TRADEBOTMD002|55=BTCUSD|262=2|268=2|269=0|270=8490.07|271=10|269=1|270=8519.57|271=20|10=012|";
+        let mut msg = Message::from_str(&soh_replaced_str(w), &DD).expect("fixture parses");
+        msg.body_mut().get_group_mut(268).unwrap()[0].set_field(15, "USD");
+
+        let wire = finish_w(msg);
+        let tags = tags_in_order(&wire);
+        let from_count = &tags[tags.iter().position(|&t| t == 268).unwrap()..];
+        assert_eq!(from_count, [268, 269, 270, 15, 271, 269, 270, 271, 10]);
+        assert_wire_self_consistent(&wire);
+    }
+
+    // Negative: an empty order has no delimiter. Both builders refuse it loudly.
+    #[test]
+    #[should_panic(expected = "add_group_instance: order must not be empty")]
+    fn add_group_instance_empty_order_panics() {
+        FieldMap::new().add_group_instance(268, &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "set_group: order must not be empty")]
+    fn set_group_empty_order_panics() {
+        FieldMap::new().set_group(268, 1, &[]);
+    }
+
+    // (pin) set_group is additive, not idempotent: a second call on the same group appends
+    // more instances while the count field says only the latest `n`. Documented on set_group;
+    // pinned so making it idempotent later (design log D9 follow-up) is a deliberate change.
+    #[test]
+    fn set_group_twice_appends_and_desyncs_count() {
+        let mut fm = FieldMap::new();
+        fm.set_group(268, 2, MD_ENTRY_ORDER);
+        fm.set_group(268, 1, MD_ENTRY_ORDER);
+        assert_eq!(fm.get_group(268).unwrap().size(), 3);
+        assert_eq!(fm.get_field::<u32>(268).unwrap(), 1);
     }
 
     // ---- has_*_field: presence only --------------------------------------------------------

@@ -84,7 +84,8 @@ impl SampleApp {
         msg.set_header_field(35, "W");
         msg.set_body_field(262, mdreq_id);
         msg.set_body_field(55, ccy_pair);
-        let group = msg.body_mut().set_group(268, 2, 269);
+        // NoMDEntries(268): MDEntryType(269, delimiter), MDEntryPx(270), MDEntrySize(271).
+        let group = msg.body_mut().set_group(268, 2, &[269, 270, 271]);
         for i in 0..2 {
             if i % 2 == 0 {
                 // bid side
