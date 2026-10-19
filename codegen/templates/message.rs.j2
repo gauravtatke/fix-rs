@@ -1,8 +1,10 @@
 {% import "field_methods.rs.j2" as fm %}
+{% import "group.rs.j2" as g %}
 {#
   One typed message facade (D1): `struct <Name> { msg: Message }` with, per field, a typed
-  setter / getter / `has_*` (D2). Input: `MessageView` (emitter.rs). Plain `//` and `///`
-  comments below end up in the generated file; Jinja comments (like this one) don't.
+  setter / getter / `has_*` (D2), and per repeating group the `group.rs.j2` accessors and types.
+  Input: `MessageView` (emitter.rs). Plain `//` and `///` comments below end up in the generated
+  file; Jinja comments (like this one) don't.
 #}
 //! `{{ name }}` ({{ category }} message, MsgType `35={{ msg_type }}`): typed facade over the raw
 //! [`Message`].
@@ -18,11 +20,13 @@
 
 use super::fields;
 use crate::convert;
-use crate::core::message::Message;
+use crate::core::message::{FieldMap, Group, Message};
 use crate::errors::{FieldError, TypedError};
 // Tags come from the shared, version-neutral registry (`crate::tags`): a tag number means the
 // same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags;
+
+
 
 /// Typed facade over a `{{ name }}` [`Message`] (35={{ msg_type }}). `new()` stamps the MsgType;
 /// the engine fills the rest of the header (BeginString, CompIDs, MsgSeqNum, SendingTime) and the
@@ -93,6 +97,17 @@ impl {{ name }} {
 
 {% endfor %}
 
+{# Top-level repeating groups: the same macros an entry view uses for its nested groups, here
+   with the message body as the receiver. #}
+{% for grp in groups %}
+
+    // --- {{ grp.name }} group (count tag {{ grp.count_tag_const }}) ---
+
+{{ g.group_read(grp, "self.msg.body()") }}
+
+{{ g.group_write(grp, "self.msg.body_mut()") }}
+
+{% endfor %}
     /// The underlying raw message (e.g. for fields this facade has no accessor for).
     pub fn message(&self) -> &Message {
         &self.msg
@@ -103,3 +118,9 @@ impl {{ name }} {
         &mut self.msg
     }
 }
+
+{# Group and entry view types for every group, nested ones included (`group_types` recurses). #}
+{% for grp in groups %}
+
+{{ g.group_types(grp) }}
+{% endfor %}

@@ -9,7 +9,7 @@
 
 use super::fields;
 use crate::convert;
-use crate::core::message::Message;
+use crate::core::message::{FieldMap, Group, Message};
 use crate::errors::{FieldError, TypedError};
 // Tags come from the shared, version-neutral registry (`crate::tags`): a tag number means the
 // same field in every FIX version. MsgType (35) lives in the header.

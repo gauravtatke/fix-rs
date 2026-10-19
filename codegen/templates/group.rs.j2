@@ -1,0 +1,184 @@
+{#
+  Repeating-group code (D9, the `group_scoped` shape), shared by every parent that can hold a
+  group: the message facade, and the entry views of an enclosing group. Macros only: imported by
+  `message.rs.j2` (`{% import "group.rs.j2" as g %}`) and never rendered on its own.
+
+  Per group, four generated types (names from the count field, built in `naming.rs`):
+    NoX / NoXMut              - the group: len / get / index / iter (read) or the `_mut` forms
+    NoXEntry / NoXEntryMut    - one instance: field getters + has_ (read) or setters (write)
+  plus `NO_X_FIELD_ORDER`, the instance's wire order, passed to core so every instance
+  serializes in dictionary order whatever order its fields are set in.
+
+  Parameters:
+    g        - a `GroupView` (emitter.rs): names, count/delimiter tag consts, field order,
+               fields, nested groups.
+    recv     - the parent's read receiver, as text, of type `&FieldMap`
+               (`self.msg.body()` on a message, `self.inner` on an entry view).
+    recv_mut - the same for writing, of type `&mut FieldMap` (`self.msg.body_mut()`, `self.inner`).
+
+  Nesting: `group_types` emits a group's own types and then calls itself for each nested group;
+  an entry view calls `group_read` / `group_write` for its nested groups exactly as the message
+  does for its top-level ones. Everything lands flat at module level (Rust has no nested types;
+  group names never repeat within one message).
+#}
+{% import "field_methods.rs.j2" as fm %}
+
+{# Module-level code for group `g` and, recursively, every group nested in it. #}
+{% macro group_types(g) %}
+/// Wire order of a `{{ g.name }}` instance (FIX 4.3 Vol 1 §4: dictionary order, delimiter first):
+/// each field's tag, and a nested group's count tag where that group sits.
+const {{ g.field_order_const }}: &[u32] = &[{% for t in g.field_order %}tags::{{ t }}, {% endfor %}];
+
+/// One `{{ g.name }}` instance, read-only: field getters and `has_*`, plus read access to
+/// nested groups. A view over the instance's [`FieldMap`]; nothing is copied.
+pub struct {{ g.entry_name }}<'a> {
+    inner: &'a FieldMap,
+}
+
+impl {{ g.entry_name }}<'_> {
+{% for mf in g.fields %}
+{% set req = "required" if mf.required else "optional" %}
+
+{{ fm.field_getter(mf.field, req, "self.inner") }}
+
+{{ fm.field_has(mf.field, "self.inner") }}
+{% endfor %}
+{% for sub in g.groups %}
+
+{{ group_read(sub, "self.inner") }}
+{% endfor %}
+}
+
+/// One `{{ g.name }}` instance, mutable: field setters, plus write access to nested groups.
+/// Read through [`{{ g.entry_mut_name }}::as_ref`].
+pub struct {{ g.entry_mut_name }}<'a> {
+    inner: &'a mut FieldMap,
+}
+
+impl {{ g.entry_mut_name }}<'_> {
+    /// Read-only view of this instance (its getters, `has_*` and nested-group readers).
+    pub fn as_ref(&self) -> {{ g.entry_name }}<'_> {
+        {{ g.entry_name }} { inner: self.inner }
+    }
+{% for mf in g.fields %}
+{% set req = "required" if mf.required else "optional" %}
+
+{{ fm.field_setter(mf.field, req, "self.inner") }}
+{% endfor %}
+{% for sub in g.groups %}
+
+{{ group_write(sub, "self.inner") }}
+{% endfor %}
+}
+
+/// The `{{ g.name }}` repeating group (count tag `{{ g.count_tag_const }}`), read-only: its
+/// instances as [`{{ g.entry_name }}`] views.
+pub struct {{ g.name }}<'a> {
+    group: &'a Group,
+}
+
+impl<'a> {{ g.name }}<'a> {
+    /// Number of instances.
+    pub fn len(&self) -> usize {
+        self.group.as_slice().len()
+    }
+
+    /// Whether the group has no instances.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Instance `i`, or `None` if out of range.
+    pub fn get(&self, i: usize) -> Option<{{ g.entry_name }}<'a>> {
+        self.group.as_slice().get(i).map(|inner| {{ g.entry_name }} { inner })
+    }
+
+    /// Instance `i`. **Panics** if out of range, like `vec[i]`. A parsed message's instance
+    /// count is validated against its count field, so use `len()` / `iter()` / `get()` to stay
+    /// in range.
+    pub fn index(&self, i: usize) -> {{ g.entry_name }}<'a> {
+        self.get(i).expect("{{ g.name }} index out of range")
+    }
+
+    /// The instances, in order.
+    pub fn iter(&self) -> impl Iterator<Item = {{ g.entry_name }}<'a>> {
+        self.group.as_slice().iter().map(|inner| {{ g.entry_name }} { inner })
+    }
+}
+
+/// The `{{ g.name }}` repeating group (count tag `{{ g.count_tag_const }}`), mutable: its
+/// instances as [`{{ g.entry_mut_name }}`] views.
+pub struct {{ g.name_mut }}<'a> {
+    group: &'a mut Group,
+}
+
+impl<'a> {{ g.name_mut }}<'a> {
+    /// Number of instances.
+    pub fn len(&self) -> usize {
+        self.group.as_slice().len()
+    }
+
+    /// Whether the group has no instances.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Instance `i`, or `None` if out of range.
+    pub fn get_mut(&mut self, i: usize) -> Option<{{ g.entry_mut_name }}<'_>> {
+        self.group.as_mut_slice().get_mut(i).map(|inner| {{ g.entry_mut_name }} { inner })
+    }
+
+    /// Instance `i`. **Panics** if out of range, like `vec[i]`.
+    pub fn index_mut(&mut self, i: usize) -> {{ g.entry_mut_name }}<'_> {
+        self.get_mut(i).expect("{{ g.name }} index out of range")
+    }
+
+    /// The instances, in order.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = {{ g.entry_mut_name }}<'_>> {
+        self.group.as_mut_slice().iter_mut().map(|inner| {{ g.entry_mut_name }} { inner })
+    }
+}
+{% for sub in g.groups %}
+
+{{ group_types(sub) }}
+{% endfor %}
+{% endmacro %}
+
+{# Read access to group `g` on its parent (a message, or an enclosing group's entry). #}
+{% macro group_read(g, recv) %}
+{% set req = "required" if g.required else "optional" %}
+    /// The `{{ g.name }}` group (count tag `{{ g.count_tag_const }}`, {{ req }}), or `None` if absent. An
+    /// existing group may still have zero instances.
+    pub fn {{ g.method_name }}(&self) -> Option<{{ g.name }}<'_>> {
+        {{ recv }}.get_group(tags::{{ g.count_tag_const }}).map(|group| {{ g.name }} { group })
+    }
+{% endmacro %}
+
+{# Write access to group `g` on its parent: edit, create by count, or append one instance. #}
+{% macro group_write(g, recv_mut) %}
+{% set req = "required" if g.required else "optional" %}
+    /// The `{{ g.name }}` group (count tag `{{ g.count_tag_const }}`, {{ req }}) for editing, or `None` if
+    /// absent.
+    pub fn {{ g.method_name }}_mut(&mut self) -> Option<{{ g.name_mut }}<'_>> {
+        {{ recv_mut }}.get_group_mut(tags::{{ g.count_tag_const }}).map(|group| {{ g.name_mut }} { group })
+    }
+
+    /// Create the `{{ g.name }}` group with `count` empty instances to fill by index. Each
+    /// instance serializes in dictionary order.
+    ///
+    /// Additive, not idempotent: on an existing group it appends `count` more instances while the
+    /// count field says `count`. Call it once per group, and don't mix it with
+    /// [`Self::add_{{ g.method_name }}_entry`] on the same group.
+    pub fn set_{{ g.method_name }}(&mut self, count: u32) -> {{ g.name_mut }}<'_> {
+        let group = {{ recv_mut }}.set_group(tags::{{ g.count_tag_const }}, count, {{ g.field_order_const }});
+        {{ g.name_mut }} { group }
+    }
+
+    /// Append one `{{ g.name }}` instance, filled by `fill`; creates the group if absent and
+    /// keeps its count in sync. The instance serializes in dictionary order whatever order
+    /// `fill` sets its fields in. Don't mix with [`Self::set_{{ g.method_name }}`] on the same group.
+    pub fn add_{{ g.method_name }}_entry(&mut self, fill: impl FnOnce(&mut {{ g.entry_mut_name }}<'_>)) {
+        let inner = {{ recv_mut }}.add_group_instance(tags::{{ g.count_tag_const }}, {{ g.field_order_const }});
+        fill(&mut {{ g.entry_mut_name }} { inner });
+    }
+{% endmacro %}

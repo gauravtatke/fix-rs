@@ -12,6 +12,7 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("fields.rs.j2", include_str!("../templates/fields.rs.j2")),
     ("message.rs.j2", include_str!("../templates/message.rs.j2")),
     ("field_methods.rs.j2", include_str!("../templates/field_methods.rs.j2")),
+    ("group.rs.j2", include_str!("../templates/group.rs.j2")),
 ];
 
 /// The minijinja environment every emitter renders with.
@@ -158,12 +159,16 @@ struct MessageFieldView {
 /// message's module), recursive for nested groups. Named after the group's count field.
 #[derive(Debug, Serialize)]
 struct GroupView {
-    /// UpperCamel name, e.g. `NoMsgTypes`. Also the prefix of the four generated view types:
-    /// `NoMsgTypes` / `NoMsgTypesMut` (the group) and `NoMsgTypesEntry` / `NoMsgTypesEntryMut`
-    /// (one instance).
-    type_name: String,
+    /// Read-only group view type, e.g. `NoMsgTypes` (UpperCamel count-field name).
+    name: String,
+    /// Mutable group view type, e.g. `NoMsgTypesMut`.
+    name_mut: String,
+    /// Read-only instance view type, e.g. `NoMsgTypesEntry`.
+    entry_name: String,
+    /// Mutable instance view type, e.g. `NoMsgTypesEntryMut`.
+    entry_mut_name: String,
     /// snake_case name, e.g. `no_msg_types`: the parent's `no_x()` / `no_x_mut()` / `set_no_x(n)` /
-    /// `add_no_x(..)` methods.
+    /// `add_no_x_entry(..)` methods.
     method_name: String,
     /// `tags::` const of the count field (NumInGroup), e.g. `NO_MSG_TYPES`.
     count_tag_const: String,
@@ -175,6 +180,8 @@ struct GroupView {
     /// `add_group_instance` / `set_group`, which set it on each instance so it serializes in this
     /// order whatever order its fields are set in (FIX 4.3 Vol 1 §4).
     field_order: Vec<String>,
+    /// Name of the generated const holding `field_order`, e.g. `NO_MSG_TYPES_FIELD_ORDER`.
+    field_order_const: String,
     /// Effective required-ness of the group as an entry of its parent, per [`resolve_items`].
     required: bool,
     /// The group's own fields, in order (nested group members excluded: they are in `groups`).
@@ -365,23 +372,9 @@ fn resolve_items(spec: &FixSpec, items: &[Item], present: bool, out: &mut Vec<Me
     }
 }
 
-/// The [`FieldView`] of dictionary field `name`. The single lookup every message/group view
-/// goes through, so tag consts and accessor data all come from the same view `tags.rs` and
-/// `fields.rs` were generated from. A group's name is its count field, so this resolves count
-/// tags too.
+/// A field as it appears in `msg`: its shared [`FieldView`] plus its effective `required` there.
 ///
 /// Panics, naming the message, if the dictionary doesn't define `name`.
-fn lookup_field<'a>(
-    name: &str,
-    msg: &MessageDef,
-    field_views: &'a HashMap<String, FieldView>,
-) -> &'a FieldView {
-    field_views
-        .get(name)
-        .unwrap_or_else(|| panic!("message {} uses undefined field `{name}`", msg.name))
-}
-
-/// A field as it appears in `msg`: its shared [`FieldView`] plus its effective `required` there.
 fn member_to_field_view(
     name: &str,
     required: bool,
@@ -390,7 +383,10 @@ fn member_to_field_view(
 ) -> MessageFieldView {
     MessageFieldView {
         required,
-        field: lookup_field(name, msg, field_views).clone(),
+        field: field_views
+            .get(name)
+            .unwrap_or_else(|| panic!("message {} uses undefined field `{name}`", msg.name))
+            .clone(),
     }
 }
 
@@ -398,7 +394,9 @@ fn member_to_field_view(
 /// into `fields` and nested `groups` (recursively) and its wire order kept in `field_order`.
 ///
 /// Panics, naming the group and message, if its first member isn't a field (the delimiter), or
-/// if a member isn't defined in the dictionary.
+/// (via [`member_to_field_view`]) if one of its fields isn't defined in the dictionary. The tag
+/// consts (count, delimiter, `field_order`) are only named here, not looked up: an undefined
+/// count field surfaces as a compile error in the generated code.
 fn member_to_group_view(
     name: &str,
     required: bool,
@@ -427,7 +425,7 @@ fn member_to_group_view(
         })
         .collect();
     let delim_tag_const = match members.first() {
-        Some(Member::Field { name, .. }) => lookup_field(name, msg, field_views).tag_const.clone(),
+        Some(Member::Field { name, .. }) => naming::const_name(name),
         _ => panic!(
             "group `{name}` in message `{}`: first member must be a field (the delimiter)",
             msg.name
@@ -438,20 +436,22 @@ fn member_to_group_view(
     let field_order = members
         .iter()
         .map(|m| match m {
-            Member::Field { name, .. } | Member::Group { name, .. } => {
-                lookup_field(name, msg, field_views).tag_const.clone()
-            }
+            Member::Field { name, .. } | Member::Group { name, .. } => naming::const_name(name),
         })
         .collect();
     GroupView {
-        type_name: naming::group_name(name),
+        name_mut: naming::group_name_mut(name),
+        entry_name: naming::group_entry_name(name),
+        entry_mut_name: naming::group_entry_mut_name(name),
+        name: naming::group_name(name),
         method_name: naming::method_name(name),
         required,
         fields: group_fields,
-        count_tag_const: lookup_field(name, msg, field_views).tag_const.clone(),
+        field_order,
+        field_order_const: naming::group_field_order_const(name),
+        count_tag_const: naming::const_name(name),
         delim_tag_const,
         groups: subgroups,
-        field_order,
     }
 }
 
@@ -1111,5 +1111,157 @@ mod resolve_tests {
             }
         ));
         assert_eq!(r[3], find("NoPartyIDs"), "Parties is inlined at its position (4th item)");
+    }
+}
+
+#[cfg(test)]
+mod group_view_tests {
+    //! `member_to_group_view`: names, tag consts, wire order (`field_order`) and nesting of the
+    //! `GroupView` the group templates render, plus its panics. Classes: flat vs nested group;
+    //! first member written directly vs inlined from a component; plain vs corrected name; and the
+    //! ways the input is rejected (first member a group, empty group, undefined member field).
+    use super::*;
+    use crate::spec::parse_str;
+
+    /// Every field the fixtures use, numbered (tag consts come from these definitions).
+    const FIELDS: &str = r#"
+        <field number="1000" name="NoOuter" type="NUMINGROUP"/>
+        <field number="1001" name="OuterDelim" type="STRING"/>
+        <field number="1002" name="OuterFld" type="INT"/>
+        <field number="1003" name="NoInner" type="NUMINGROUP"/>
+        <field number="1004" name="InnerDelim" type="STRING"/>
+        <field number="453" name="NoPartyIDs" type="NUMINGROUP"/>
+        <field number="448" name="PartyID" type="STRING"/>
+        <field number="452" name="PartyRole" type="INT"/>"#;
+
+    /// The `GroupView` of the first top-level group in a message with body `body`.
+    fn group_view_of(body: &str, components: &str) -> GroupView {
+        let spec = parse_str(&format!(
+            r#"<fix major="4" minor="3"><fields>{FIELDS}</fields><components>{components}</components>
+               <messages><message name="M" msgtype="X" msgcat="app">{body}</message></messages></fix>"#
+        ));
+        let field_views: HashMap<String, FieldView> =
+            spec.fields.iter().map(field_view).map(|f| (f.xml_name.clone(), f)).collect();
+        let msg = &spec.messages[0];
+        let mut members = Vec::new();
+        resolve_items(&spec, &msg.items, true, &mut members);
+        let (name, required, members) = members
+            .iter()
+            .find_map(|m| match m {
+                Member::Group {
+                    name,
+                    required,
+                    members,
+                } => Some((name, *required, members)),
+                Member::Field { .. } => None,
+            })
+            .expect("fixture has a group");
+        member_to_group_view(name, required, members, msg, &field_views)
+    }
+
+    #[test]
+    fn flat_group_names_consts_and_order() {
+        let g = group_view_of(
+            r#"<group name="NoOuter" required="N">
+                 <field name="OuterDelim" required="Y"/>
+                 <field name="OuterFld" required="N"/>
+               </group>"#,
+            "",
+        );
+        assert_eq!(
+            (
+                g.name.as_str(),
+                g.name_mut.as_str(),
+                g.entry_name.as_str(),
+                g.entry_mut_name.as_str()
+            ),
+            ("NoOuter", "NoOuterMut", "NoOuterEntry", "NoOuterEntryMut")
+        );
+        assert_eq!(g.method_name, "no_outer");
+        assert_eq!(g.count_tag_const, "NO_OUTER");
+        assert_eq!(g.delim_tag_const, "OUTER_DELIM");
+        assert_eq!(g.field_order, ["OUTER_DELIM", "OUTER_FLD"]);
+        assert_eq!(g.field_order_const, "NO_OUTER_FIELD_ORDER");
+        assert!(!g.required);
+        let fields: Vec<_> = g.fields.iter().map(|f| f.field.xml_name.as_str()).collect();
+        assert_eq!(fields, ["OuterDelim", "OuterFld"]);
+        assert!(g.groups.is_empty());
+    }
+
+    // The nested group sits *between* the outer group's fields: `field_order` keeps that position
+    // (its count tag), while `fields` / `groups` are split. The nested group gets its own view.
+    #[test]
+    fn nested_group_count_tag_keeps_its_position_in_field_order() {
+        let g = group_view_of(
+            r#"<group name="NoOuter" required="N">
+                 <field name="OuterDelim" required="Y"/>
+                 <group name="NoInner" required="N">
+                   <field name="InnerDelim" required="N"/>
+                 </group>
+                 <field name="OuterFld" required="N"/>
+               </group>"#,
+            "",
+        );
+        assert_eq!(g.field_order, ["OUTER_DELIM", "NO_INNER", "OUTER_FLD"]);
+        let fields: Vec<_> = g.fields.iter().map(|f| f.field.xml_name.as_str()).collect();
+        assert_eq!(fields, ["OuterDelim", "OuterFld"]);
+        assert_eq!(g.groups.len(), 1);
+        let inner = &g.groups[0];
+        assert_eq!(inner.name, "NoInner");
+        assert_eq!(inner.delim_tag_const, "INNER_DELIM");
+        assert_eq!(inner.field_order, ["INNER_DELIM"]);
+        assert_eq!(inner.field_order_const, "NO_INNER_FIELD_ORDER");
+    }
+
+    // The delimiter can come from a component (FIX does this, e.g. NoLegs -> InstrumentLeg):
+    // after inlining, the component's first field is the group's first member. Also the
+    // corrected-name class: NoPartyIDs must come out as NoPartyIds / NO_PARTY_IDS everywhere.
+    #[test]
+    fn delimiter_inlined_from_component_and_corrected_name() {
+        let g = group_view_of(
+            r#"<group name="NoPartyIDs" required="N"><component name="Party" required="Y"/></group>"#,
+            r#"<component name="Party">
+                 <field name="PartyID" required="Y"/>
+                 <field name="PartyRole" required="N"/>
+               </component>"#,
+        );
+        assert_eq!(g.name, "NoPartyIds");
+        assert_eq!(g.method_name, "no_party_ids");
+        assert_eq!(g.count_tag_const, "NO_PARTY_IDS");
+        assert_eq!(g.delim_tag_const, "PARTY_ID");
+        assert_eq!(g.field_order, ["PARTY_ID", "PARTY_ROLE"]);
+        assert_eq!(g.field_order_const, "NO_PARTY_IDS_FIELD_ORDER");
+    }
+
+    #[test]
+    #[should_panic(expected = "group `NoOuter` in message `M`: first member must be a field")]
+    fn first_member_a_group_panics() {
+        group_view_of(
+            r#"<group name="NoOuter" required="N">
+                 <group name="NoInner" required="N"><field name="InnerDelim" required="N"/></group>
+               </group>"#,
+            "",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "group `NoOuter` in message `M`: first member must be a field")]
+    fn empty_group_panics() {
+        group_view_of(r#"<group name="NoOuter" required="N"></group>"#, "");
+    }
+
+    // A field inside the group must be defined (checked through `member_to_field_view`). The
+    // count field is not checked here by design: it only becomes a `tags::` reference, and an
+    // undefined one fails when the generated code is compiled.
+    #[test]
+    #[should_panic(expected = "message M uses undefined field `Missing`")]
+    fn undefined_member_field_panics() {
+        group_view_of(
+            r#"<group name="NoOuter" required="N">
+                 <field name="OuterDelim" required="Y"/>
+                 <field name="Missing" required="N"/>
+               </group>"#,
+            "",
+        );
     }
 }

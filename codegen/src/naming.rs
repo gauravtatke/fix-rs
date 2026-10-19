@@ -59,14 +59,36 @@ pub(crate) fn enum_name(xml_name: &str) -> String {
 }
 
 /// UpperCamel name of a repeating group, from its count field (`NoMDEntries` -> `NoMdEntries`):
-/// the generated group / entry view types (`NoMdEntries`, `NoMdEntriesEntry`, ...). Same casing as
-/// [`enum_name`], named for its use.
+/// the read-only group view type. The other three view types add a fixed suffix to it (below):
+/// the dictionary has no name for "one instance", and a suffix never needs singularizing
+/// (`NoMDEntries` -> `MdEntry`?). Same casing as [`enum_name`], named for its use.
 pub(crate) fn group_name(xml_name: &str) -> String {
     corrected_upper_camel_case(xml_name)
 }
 
+/// Mutable group view type: [`group_name`] + `Mut` (`NoMdEntriesMut`).
+pub(crate) fn group_name_mut(xml_name: &str) -> String {
+    format!("{}Mut", group_name(xml_name))
+}
+
+/// Read-only instance view type: [`group_name`] + `Entry` (`NoMdEntriesEntry`).
+pub(crate) fn group_entry_name(xml_name: &str) -> String {
+    format!("{}Entry", group_name(xml_name))
+}
+
+/// Mutable instance view type: [`group_name`] + `EntryMut` (`NoMdEntriesEntryMut`).
+pub(crate) fn group_entry_mut_name(xml_name: &str) -> String {
+    format!("{}EntryMut", group_name(xml_name))
+}
+
 pub(crate) fn method_name(xml_name: &str) -> String {
     corrected_snake_case(xml_name)
+}
+
+/// Name of the const holding a group instance's wire order: [`const_name`] + `_FIELD_ORDER`
+/// (`NO_MD_ENTRIES_FIELD_ORDER`).
+pub(crate) fn group_field_order_const(xml_name: &str) -> String {
+    format!("{}_FIELD_ORDER", const_name(xml_name))
 }
 
 fn corrected_upper_camel_case(xml_name: &str) -> String {
@@ -133,5 +155,32 @@ mod tests {
         // is corrected, so a different name that merely contains `IDs` is left to heck.
         assert_eq!(corrected_name("nopartyids"), None);
         assert_eq!(corrected_name("NoPartyIDsExtra"), None);
+    }
+
+    // Repeating-group names: the read-only view type plus three fixed suffixes, and the order
+    // const. One class per kind of count-field name: plain (heck alone) and corrected (table).
+
+    #[test]
+    fn group_names_from_plain_count_field() {
+        // Leading acronym, not in the table: heck splits it (`MD` -> `Md`).
+        assert_eq!(group_name("NoMDEntries"), "NoMdEntries");
+        assert_eq!(group_name_mut("NoMDEntries"), "NoMdEntriesMut");
+        assert_eq!(group_entry_name("NoMDEntries"), "NoMdEntriesEntry");
+        assert_eq!(group_entry_mut_name("NoMDEntries"), "NoMdEntriesEntryMut");
+        assert_eq!(method_name("NoMDEntries"), "no_md_entries");
+        assert_eq!(group_field_order_const("NoMDEntries"), "NO_MD_ENTRIES_FIELD_ORDER");
+        // Already UpperCamel: unchanged.
+        assert_eq!(group_name("NoMsgTypes"), "NoMsgTypes");
+    }
+
+    #[test]
+    fn group_names_from_corrected_count_field() {
+        // `IDs` would split as `I` + `Ds` without the table; every derived name must go through it.
+        assert_eq!(group_name("NoPartyIDs"), "NoPartyIds");
+        assert_eq!(group_name_mut("NoPartyIDs"), "NoPartyIdsMut");
+        assert_eq!(group_entry_name("NoPartyIDs"), "NoPartyIdsEntry");
+        assert_eq!(group_entry_mut_name("NoPartyIDs"), "NoPartyIdsEntryMut");
+        assert_eq!(method_name("NoPartyIDs"), "no_party_ids");
+        assert_eq!(group_field_order_const("NoPartyIDs"), "NO_PARTY_IDS_FIELD_ORDER");
     }
 }
