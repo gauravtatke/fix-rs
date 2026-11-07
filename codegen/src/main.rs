@@ -61,9 +61,6 @@ fn fix43_xml_path() -> PathBuf {
 /// subtree, `mod.rs` included; hand-written tests live in the sibling `tests/` (D4c).
 const FIX43_GENERATED: &str = "messages/fix43/generated";
 
-/// Messages generated so far (3.8b/c grow this; 3.9c removes the filter to emit all of FIX43).
-const GENERATED_MESSAGES: &[&str] = &["Heartbeat", "Logon"];
-
 /// Render every generated file, in order, handing each to `sink(path, contents)` before rendering
 /// the next. `path` is relative to engine `src/`; `contents` is unformatted (the sink runs
 /// `rustfmt`). Pure and deterministic — stable ordering, no timestamps — so output is diffable.
@@ -82,7 +79,11 @@ fn generate(spec: &FixSpec, mut sink: impl FnMut(&str, String)) {
     let field_views: HashMap<String, FieldView> =
         spec.fields.iter().map(field_view).map(|f| (f.xml_name.clone(), f)).collect();
     let mut modules = vec!["fields".to_owned()];
-    for msg in spec.messages.iter().filter(|m| m.category == "admin") {
+    for msg in spec
+        .messages
+        .iter()
+        .filter(|m| m.category == "admin" || m.name == "MarketDataSnapshotFullRefresh")
+    {
         let module = naming::module_name(&msg.name);
         sink(&format!("{FIX43_GENERATED}/{module}.rs"), emit_message(spec, msg, &field_views));
         modules.push(module);

@@ -255,17 +255,20 @@ references are the golden target the generator must reproduce (diffed by the fre
           the two NewOrderList fixtures (body length 215→231, checksum recomputed). 264 engine + 11
           codegen tests green, freshness green, `cargo fmt --check` clean.
 
-- [~] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups).**
+- [x] **3.6 — Runtime `Group`/`FieldMap` firming-up (enabler for groups). DONE (2026-10-18).**
   DONE (seeded 2026-09-26, by Claude alongside 3.7): `FieldMap::add_group_instance` (append +
   auto-bump count — fixes the set_group/add_group desync), `group_instances`,
   `get_group_mut`; `Group::as_slice/as_mut_slice`; `Message::body_group*` (`src/message.rs`).
-  Remaining: any extra helpers the generator needs once the group shape is finalized.
+  Finished with the group shape (`bfe86b4`): `set_group` / `add_group_instance` take the group's
+  dictionary field order (`order[0]` = delimiter) and set it on every instance they create, so
+  built instances serialize in dictionary order like parsed ones (`parse_group` passes its order to
+  `set_group`); unused `push_group_instance` removed.
 
-- [~] **3.7 — Group ergonomics comparison + reference (Claude).**
+- [x] **3.7 — Group ergonomics comparison + reference (Claude). DONE (2026-10-19).**
   Built A/B/C/D variants to compare group build/read call sites (D9 validation). **CHOSEN =
   `group_scoped`** (D9 revision, 2026-09-29; confirmed 2026-10-17), which **supersedes `c_indexed`**:
   the message hands out a per-group view (`no_x()` / `no_x_mut()` → `Option<view>`, `set_no_x(n)`,
-  streaming `add_no_x(|e| ..)`), and `len`/`get`/`index`/`iter` (+ `_mut`) live on the **group view**,
+  streaming `add_no_x_entry(|e| ..)`), and `len`/`get`/`index`/`iter` (+ `_mut`) live on the **group view**,
   not the message — a message can carry several groups, and iterating/indexing the message itself
   would mean its fields. Instance views (`&FieldMap` / `&mut FieldMap`) carry the field accessors;
   nesting = an instance view hosts sub-group accessors exactly like the message. Files:
@@ -279,14 +282,15 @@ references are the golden target the generator must reproduce (diffed by the fre
   sound because the parse layer validates group count == instances, so OOB is a caller bug (D5's
   `Result` still governs *field* access). Full A/B/C/D exploration preserved on branch
   `explore/repeating-group-ergonomics`; group_scoped on `feature/group-scoped-views`. `preset_md_entries(n)` +
-  by-value `add(MdEntry)` prototyped then deferred to a later convenience layer. **Remaining:**
-  promote the shape into the real MarketData reference (hand-written `MarketDataSnapshotFullRefresh`
-  with `Decimal` money fields) once D8/3.2 lands.
+  by-value `add(MdEntry)` prototyped then deferred to a later convenience layer. The planned
+  hand-written MarketData reference is superseded: the generator now emits the shape directly
+  (`group.rs.j2`, 3.9a), so the generated facades are the reference.
 
-- [ ] **3.8 — Extend `spec::parse` to messages; emit admin message facades (USER).**
-    - [ ] **3.8a — Parse `<messages>`.** msg_type / msg_cat + each message's ordered fields + required
+- [x] **3.8 — Extend `spec::parse` to messages; emit admin message facades (USER). DONE (2026-10-17).**
+    - [x] **3.8a — Parse `<messages>`. DONE (2026-10-09, `7264858`).** msg_type / msg_cat + each message's ordered fields + required
       flags, resolving `<component>` references (the parser currently handles `<fields>` only).
-    - [ ] **3.8b — Emit `Logon`** (the old 3.4 "Logon byte-identical" first goal). Facade over
+    - [x] **3.8b — Emit `Logon`** (the old 3.4 "Logon byte-identical" first goal). **DONE
+      (2026-10-17, `51fa9c3`)**; the deferred typed-value accessors below DONE 2026-11-07. Facade over
       `Message`: named natural-type accessors (via the `convert` map + enums), `has_*`,
       `TryFrom<Message>` (checks 35=A) + `From<_> for Message`, `message()`/`message_mut()`. Reproduce
       the 3.1 hand-write — now the *pure* `messages/fix43/generated/logon.rs` (its tests were
@@ -301,19 +305,39 @@ references are the golden target the generator must reproduce (diffed by the fre
       MULTIPLEVALUESTRING *enum* fields must parse as `String` and call `from_fix(&raw)` (today the
       enum branch parses `get_body_field::<wire_type>`, which only works for `char`/`i32`/`u32`).
       Logon/Heartbeat have none of these; NewOrderSingle (`TransactTime`, `Price`, `OrderQty`) will.
-    - [ ] **3.8c — Emit remaining admin messages.** Heartbeat/TestRequest/Logout/Reject/
-      ResendRequest/SequenceReset. Done: each has typed accessors + `TryFrom`/`Into`, tests green.
+      **DONE (2026-11-07):** accessor macros dispatch on three emitter flags — `accessor_uses_enum`
+      (split by `enum_from_string`: read `String`, then `from_fix(&raw)`), `codec`
+      (`convert::format_<codec>` / `parse_<codec>`; bool joined it, `fix_bool_str` →
+      `format_fix_bool`), else plain. MULTIPLEVALUESTRING (one or more space-separated codes,
+      `18=2 9 C`) follows QFJ: plain `String` / `&str` accessor, the enum kept in `fields.rs` as
+      named codes (new `enum_name`, so `value_type` is free to be `String`). Facades import chrono +
+      `Decimal`. Wiring tests in `tests/market_data_snapshot_full_refresh.rs`.
+    - [x] **3.8c — Emit remaining admin messages. DONE (2026-10-17, `51fa9c3`).** Heartbeat/TestRequest/Logout/Reject/
+      ResendRequest/SequenceReset (+ BusinessMessageReject: QFJ marks it `admin`). Done: each has typed accessors + `TryFrom`/`Into`, tests green.
 
 - [~] **3.9 — Groups + app messages + remove the old `build.rs` codegen (USER).**
-    - [ ] **3.9a — Groups + app messages.** Extend the parser to repeating groups (nested, via
+    - [~] **3.9a — Groups + app messages.** Extend the parser to repeating groups (nested, via
       component refs); emit the group facade in the **`group_scoped` shape** (group view with
       `len`/`get`/`index`/`iter` (+ `_mut`, `index*` panic-on-OOB), instance views with field
-      accessors, `set_no_x(n)` + streaming `add_no_x(|e| ..)` on the parent, zero-copy, auto count,
+      accessors, `set_no_x(n)` + streaming `add_no_x_entry(|e| ..)` on the parent, zero-copy, auto count,
       nesting by recursion; group types live in their message's module, inlined components; names
       from the count field: group views `NoMsgTypes`/`NoMsgTypesMut`, instance views
       `NoMsgTypesEntry`/`NoMsgTypesEntryMut`; first target Logon's `NoMsgTypes`) +
       `MarketDataRequest`/`MarketDataSnapshotFullRefresh` + `NewOrderSingle`/`ExecutionReport`. Done:
       generated group messages match the 3.7 shape, tests green.
+      **Groups DONE (2026-10-19, `a441aaa`):** `group.rs.j2` (recursive `group_types`, `group_read`,
+      `group_write`), per-group `NO_X_FIELD_ORDER`, `add_no_x_entry(..)`; Logon `NoMsgTypes`
+      generated + tested; nesting checked on MassQuote (3 levels). Typed-value accessors DONE
+      (2026-11-07, see 3.8b). **`MarketDataSnapshotFullRefresh` DONE (2026-11-07):** generated
+      (filter in `generate()`), 18 wiring tests (each codec, STRING enum, MULTIPLEVALUESTRING,
+      codecs through `NoMDEntries` entry views). **Remaining:** `MarketDataRequest`,
+      `NewOrderSingle`, `ExecutionReport` + tests; 3.9d.
+    - [ ] **3.9d — Runtime MULTIPLEVALUESTRING validation (USER; Claude tests).**
+      `validate_tag_for_value_range` (`core/message.rs`) checks the whole value against the allowed
+      set, so a valid incoming `18=2 9 C` is session-rejected (ValueOutOfRange). For
+      MultipleValueString fields split on `' '` and check each code (QFJ
+      `DataDictionary.isFieldValue`). Tests: one code, several, one bad among good, double space /
+      empty part.
     - [x] **3.9b — Remove `build.rs`. DONE (2026-10-02, Claude).** Its only consumer was
       `core/message.rs` `from_vec` (`BeginString/BodyLength/MsgType/CheckSum::field()` → tags
       8/9/35/10): now `tags::BEGIN_STRING/BODY_LENGTH/MSG_TYPE/CHECK_SUM`, `use crate::fields::*`
@@ -324,6 +348,11 @@ references are the golden target the generator must reproduce (diffed by the fre
       "Build-time code generation" section replaced by a "Code generation (`codegen/` crate)" one.
     - [ ] **3.9c — Full dictionary + module org.** Emit all FIX43 messages; organize per
       message/category (not one file); leave a per-version feature-gate hook (single version now).
+    - [ ] **3.9e — Deferred (not v1.1 blockers).**
+      - *Outgoing validation:* the engine (like QFJ) validates only on parse; validating outbound
+        messages against the dictionary is a new feature, not a fix.
+      - *Send-time group ordering:* order group fields from the session's dictionary at send time
+        (custom dictionaries) vs a per-instance order override (raw `set_field_order` exists today).
 
 - [ ] **3.10 — Factory + Cracker (D6) + SampleApp migration (USER app code; Claude tests).**
   `MessageFactory` (msgType → typed message) + `MessageCracker`-style typed inbound dispatch wired

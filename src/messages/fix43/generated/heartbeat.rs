@@ -15,6 +15,9 @@ use crate::errors::{FieldError, TypedError};
 // same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags;
 
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use rust_decimal::Decimal;
+
 /// Typed facade over a `Heartbeat` [`Message`] (35=0). `new()` stamps the MsgType;
 /// the engine fills the rest of the header (BeginString, CompIDs, MsgSeqNum, SendingTime) and the
 /// trailer when the message is sent.

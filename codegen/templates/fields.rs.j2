@@ -8,16 +8,16 @@
 //! `to_fix` (variant -> wire value) and `from_fix` (wire value -> variant, `None` if unknown).
 {% for f in fields %}
 
-/// `{{ f.value_type }}` (tag {{ f.tag }}, FIX type {{ f.fix_type }}).
+/// `{{ f.enum_name }}` (tag {{ f.tag }}, FIX type {{ f.fix_type }}).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum {{ f.value_type }} {
+pub enum {{ f.enum_name }} {
     {% for v in f.variants %}
     /// Wire value `{{ v.code }}`.
     {{ v.name }},
     {% endfor %}
 }
 
-impl {{ f.value_type }} {
+impl {{ f.enum_name }} {
     /// On-wire value for this variant.
     pub fn to_fix(self) -> {{ f.wire_type }} {
         match self {

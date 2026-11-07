@@ -66,8 +66,9 @@ struct TagView {
 // Fields: one view per field, shared by fields.rs and every message file
 
 /// One FIX field as the templates see it. Built once per field by [`field_view`] and shared:
-/// `fields.rs.j2` uses the enum parts (`wire_type`, `wire_param_type`, `variants`),
-/// `message.rs.j2` the accessor parts (`accessor`, `value_type`, `setter_param`, `tag_const`).
+/// `fields.rs.j2` uses the enum parts (`enum_name`, `wire_type`, `wire_param_type`, `variants`),
+/// `message.rs.j2` the accessor parts (`accessor`, `value_type`, `setter_param`, `tag_const`,
+/// `accessor_uses_enum`, `enum_from_string`, `codec`).
 /// Flat on purpose: the enum parts are empty for fields without a value list.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct FieldView {
@@ -84,9 +85,14 @@ pub(crate) struct FieldView {
     /// snake_case accessor stem, e.g. `encrypt_method` — names `set_x` / `x` / `has_x`
     /// (`message.rs.j2`).
     accessor: String,
-    /// What the getter returns. For a value-constrained field, the generated enum (`EncryptMethod`)
-    /// — which is also the enum's type name in `fields.rs.j2`; otherwise the D8 Rust type
-    /// (`String`, `bool`, `u32`, `Decimal`, …).
+    /// The value enum's type name in `fields.rs.j2`, e.g. `ExecInst`. `Some` for every field that
+    /// gets variants — MULTIPLEVALUESTRING included, whose accessors still don't use it (see
+    /// `accessor_uses_enum`). minijinja renders `None` as the text `None` (a defined value, so
+    /// strict undefined doesn't catch it): `emit_field_enums` passes only `Some` fields.
+    enum_name: Option<String>,
+    /// What the getter returns: the generated enum (`EncryptMethod`) when `accessor_uses_enum`,
+    /// otherwise the D8 Rust type (`String`, `bool`, `u32`, `Decimal`, …) — so `String` for a
+    /// MULTIPLEVALUESTRING field even though it has an enum.
     value_type: String,
     /// What the setter takes: `value_type`, except strings are borrowed (`&str`).
     setter_param: String,
@@ -97,6 +103,19 @@ pub(crate) struct FieldView {
     /// `from_fix()`'s parameter type: `wire_type`, except a string is any `&str` (`to_fix` returns
     /// a literal, so must say `&'static str`; `from_fix` needn't). Empty when `wire_type` is.
     wire_param_type: &'static str,
+    /// An enum accessor whose wire code is a string (`SecurityType`): the getter reads a `String`
+    /// and calls `from_fix(&raw)`, since `&str` can't be parsed with `get_field`. Implies
+    /// `accessor_uses_enum`.
+    enum_from_string: bool,
+    /// Whether the getter / setter use the enum type: the field has variants and isn't
+    /// MULTIPLEVALUESTRING. Differs from "has variants" only for MULTIPLEVALUESTRING, whose value
+    /// holds one or more space-separated codes (`18=2 9 C`), which one variant can't represent; like
+    /// QFJ, those get a plain `String` / `&str` accessor and the enum serves as named codes.
+    accessor_uses_enum: bool,
+    /// For a field whose Rust `Display` / `FromStr` don't match the FIX format, the `convert.rs`
+    /// function suffix: the accessors call `convert::format_<codec>` / `convert::parse_<codec>`.
+    /// From [`codec_for`]; `None` for plain fields.
+    codec: Option<&'static str>,
     /// The enum's variants, sorted by wire code. Empty for fields without a value list, and for
     /// BOOLEAN fields (their `Y`/`N` values map to `bool`, not to a yes/no enum).
     variants: Vec<VariantView>,
@@ -121,7 +140,7 @@ struct VariantView {
 struct FieldEnumsView {
     /// e.g. "FIX.4.3", for the file header.
     begin_string: String,
-    /// The fields that get an enum (non-empty `variants`), in dictionary order.
+    /// The fields that get an enum (`enum_name` is `Some`), in dictionary order.
     fields: Vec<FieldView>,
 }
 
@@ -210,8 +229,9 @@ pub(crate) enum Member {
 
 // ---- View builders: XML definitions -> views (names, Rust types, literals, required flags) ----
 
-/// Build the [`FieldView`] for one field definition. A field gets variants when it has a value
-/// list and isn't BOOLEAN; then its `value_type` is the generated enum, otherwise the D8 type.
+/// Build the [`FieldView`] for one field definition. A field gets variants (and an `enum_name`)
+/// when it has a value list and isn't BOOLEAN; its `value_type` is that enum only when
+/// `accessor_uses_enum` (not MULTIPLEVALUESTRING), otherwise the D8 type.
 ///
 /// Panics on two values with the same wire code (QFJ's unpatched FIX43 `MatchType`) or the same
 /// variant name — they would emit duplicate match arms / variants; fail here naming the field.
@@ -248,8 +268,16 @@ pub(crate) fn field_view(fd: &FieldDef) -> FieldView {
         ("", Vec::new())
     };
 
-    let value_type = if has_enum {
-        naming::enum_name(&fd.name)
+    let accessor_uses_enum = has_enum && fd.fix_type != "MULTIPLEVALUESTRING";
+    let enum_from_string = accessor_uses_enum && wire_type == "&'static str";
+
+    let enum_name = if has_enum {
+        Some(naming::enum_name(&fd.name))
+    } else {
+        None
+    };
+    let value_type = if accessor_uses_enum {
+        enum_name.clone().unwrap()
     } else {
         value_type_for(&fd.fix_type).to_string()
     };
@@ -274,6 +302,10 @@ pub(crate) fn field_view(fd: &FieldDef) -> FieldView {
             wire_param_type(wire_type)
         },
         variants,
+        codec: codec_for(&fd.fix_type),
+        enum_from_string,
+        accessor_uses_enum,
+        enum_name,
     }
 }
 
@@ -320,6 +352,21 @@ fn value_type_for(fix_type: &str) -> &'static str {
         "UTCDATE" | "LOCALMKTDATE" => "NaiveDate",
         "UTCTIMEONLY" => "NaiveTime",
         _ => panic!("FIX type {fix_type} has no Rust type mapping"),
+    }
+}
+
+/// The `convert.rs` codec for a FIX type (`FieldView::codec`): the types whose FIX text form
+/// isn't what Rust's `Display` / `FromStr` produce (`Y`/`N`, FIX timestamps / dates / times,
+/// `Decimal` money). Must stay in step with [`value_type_for`]: each codec's `parse_` returns that
+/// type's Rust type.
+fn codec_for(fix_type: &str) -> Option<&'static str> {
+    match fix_type {
+        "BOOLEAN" => Some("fix_bool"),
+        "PRICE" | "AMT" | "QTY" | "PRICEOFFSET" => Some("fix_decimal"),
+        "UTCTIMESTAMP" => Some("fix_utc_timestamp"),
+        "UTCDATE" | "LOCALMKTDATE" => Some("fix_date"),
+        "UTCTIMEONLY" => Some("fix_time_only"),
+        _ => None,
     }
 }
 
@@ -481,7 +528,7 @@ pub(crate) fn emit_tags(spec: &FixSpec) -> String {
 /// value-constrained field, via the `fields.rs.j2` template.
 pub(crate) fn emit_field_enums(spec: &FixSpec) -> String {
     let fields: Vec<FieldView> =
-        spec.fields.iter().map(field_view).filter(|f| !f.variants.is_empty()).collect();
+        spec.fields.iter().map(field_view).filter(|f| f.enum_name.is_some()).collect();
     let view = FieldEnumsView {
         begin_string: spec.begin_string.clone(),
         fields,

@@ -34,7 +34,7 @@ use std::str::FromStr;
 // --- Boolean (FIX type BOOLEAN: `Y` / `N`) ---
 
 /// Render a Rust `bool` as its FIX on-wire form.
-pub(crate) fn fix_bool_str(v: bool) -> &'static str {
+pub(crate) fn format_fix_bool(v: bool) -> &'static str {
     if v { "Y" } else { "N" }
 }
 
@@ -124,8 +124,8 @@ mod tests {
 
     #[test]
     fn bool_uses_fix_y_n() {
-        assert_eq!(fix_bool_str(true), "Y");
-        assert_eq!(fix_bool_str(false), "N");
+        assert_eq!(format_fix_bool(true), "Y");
+        assert_eq!(format_fix_bool(false), "N");
         assert!(parse_fix_bool("Y", 141).unwrap());
         assert!(!parse_fix_bool("N", 141).unwrap());
         assert!(matches!(parse_fix_bool("true", 141), Err(FieldError::InvalidFormat { tag: 141 })));

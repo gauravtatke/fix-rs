@@ -1,11 +1,11 @@
 {#
   Per-field methods (setter / getter / has_), shared by every type that exposes a FIX field: the
-  message facades now, the repeating-group entry views next (3.9a). Macros only: this file is
+  message facades and the repeating-group entry views (`group.rs.j2`). Macros only: this file is
   imported (`{% import "field_methods.rs.j2" as fm %}`) and never rendered on its own, so nothing
   outside a macro reaches the output.
 
   Parameters, the same in every macro:
-    f        - a `FieldView` (emitter.rs): names, tag const, Rust/wire types, enum variants.
+    f        - a `FieldView` (emitter.rs): names, tag const, Rust/wire types, branch flags.
     req      - "required" / "optional", for the doc comments only.
     recv     - the Rust receiver to read from, as text: an expression of type `&FieldMap`
                (`self.msg.body()` on a message, `self.inner` on an entry view).
@@ -13,28 +13,35 @@
 
   The callers pass `f`/`req` because macros can't see the caller's loop variables.
 
-  Each FIX type is handled by one branch in `field_setter` and one in `field_getter`. The two
-  dispatches must stay in sync: a type added to one (3.8b: Decimal, timestamps, string enums) needs
-  its matching branch in the other. Branch conditions are decided in the emitter (view-model
-  fields), never by inspecting strings here (D4d).
+  `field_setter` and `field_getter` dispatch on the same three branches, in the same order, and
+  must stay in sync:
+    1. `f.accessor_uses_enum` - the generated enum (`Side`, `SecurityType`); the getter splits on
+       `f.enum_from_string` for how it reads the wire code before `from_fix`.
+    2. `f.codec`              - FIX text form differs from Rust's Display/FromStr (bool, Decimal,
+       dates/times): `convert::format_<f.codec>` / `convert::parse_<f.codec>`.
+    3. plain                  - Display/FromStr already match FIX. MULTIPLEVALUESTRING lands here:
+       its value is one or more space-separated codes, so a raw `String` / `&str` (as QFJ).
+  A new kind of type means a new codec in `convert.rs` + `codec_for` (emitter.rs), not a new branch.
+  Branch conditions are decided in the emitter (view-model fields), never by inspecting strings
+  here (D4d).
 #}
 
 {# Setter: Rust value in, FIX wire string stored. #}
 {% macro field_setter(f, req, recv_mut) %}
-{% if f.variants %}
+{% if f.accessor_uses_enum %}
 {# Value-constrained field: the generated enum on the outside, its wire value on the wire. #}
     /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
-    pub fn set_{{ f.accessor }}(&mut self, v: fields::{{ f.value_type }}) {
+    pub fn set_{{ f.accessor }}(&mut self, v: fields::{{ f.enum_name }}) {
         {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, v.to_fix().to_string());
     }
-{% elif f.value_type == "bool" %}
-{# FIX booleans are `Y`/`N` on the wire, not Rust's `true`/`false`. #}
-    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}); written as `Y`/`N`.
+{% elif f.codec %}
+{# Rust's Display doesn't produce the FIX form (`Y`/`N`, FIX timestamps, ...): convert.rs does. #}
+    /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}); written in FIX `{{ f.fix_type }}` format.
     pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
-        {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, convert::fix_bool_str(v));
+        {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, convert::format_{{ f.codec }}(v));
     }
 {% else %}
-{# Plain field: Rust's Display already matches FIX here (see TASKS 3.8b for the types where it doesn't). #}
+{# Plain field: Rust's Display already matches FIX here. #}
     /// Set `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
     pub fn set_{{ f.accessor }}(&mut self, v: {{ f.setter_param }}) {
         {{ recv_mut }}.set_field(tags::{{ f.tag_const }}, v.to_string());
@@ -45,23 +52,33 @@
 {# Getter: FIX wire string parsed to the Rust value. `Err(TagNotFound)` if absent,
    `Err(InvalidFormat)` if present but not a valid value. #}
 {% macro field_getter(f, req, recv) %}
-{% if f.variants %}
-{# Parse the wire type, then map it to the enum; an unlisted value is InvalidFormat. #}
+{% if f.accessor_uses_enum %}
+{# Read the wire code, then map it to the enum; an unlisted value is InvalidFormat. #}
     /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` if the value isn't one
-    /// of [`fields::{{ f.value_type }}`]'s.
-    pub fn {{ f.accessor }}(&self) -> Result<fields::{{ f.value_type }}, FieldError> {
+    /// of [`fields::{{ f.enum_name }}`]'s.
+    {% if f.enum_from_string %}
+    {# String code: `&str` has no FromStr, so read an owned String and borrow it for from_fix. #}
+        pub fn {{ f.accessor }}(&self) -> Result<fields::{{ f.enum_name }}, FieldError> {
+            let raw = {{ recv }}.get_field::<String>(tags::{{ f.tag_const }})?;
+            fields::{{ f.enum_name }}::from_fix(&raw).ok_or(FieldError::InvalidFormat { tag: tags::{{ f.tag_const }} })
+        }
+    {% else %}
+    {# char / i32 / u32 code: parse it straight to the wire type. #}
+    pub fn {{ f.accessor }}(&self) -> Result<fields::{{ f.enum_name }}, FieldError> {
         let n = {{ recv }}.get_field::<{{ f.wire_type }}>(tags::{{ f.tag_const }})?;
-        fields::{{ f.value_type }}::from_fix(n).ok_or(FieldError::InvalidFormat { tag: tags::{{ f.tag_const }} })
+        fields::{{ f.enum_name }}::from_fix(n).ok_or(FieldError::InvalidFormat { tag: tags::{{ f.tag_const }} })
     }
-{% elif f.value_type == "bool" %}
-{# Read the raw string and accept only `Y`/`N`. #}
-    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` unless `Y`/`N`.
+    {% endif %}
+{% elif f.codec %}
+{# Read the raw string; convert.rs parses the FIX form. #}
+    /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}). `Err(InvalidFormat)` unless a valid FIX
+    /// `{{ f.fix_type }}`.
     pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
         let raw = {{ recv }}.get_field::<String>(tags::{{ f.tag_const }})?;
-        convert::parse_fix_bool(&raw, tags::{{ f.tag_const }})
+        convert::parse_{{ f.codec }}(&raw, tags::{{ f.tag_const }})
     }
 {% else %}
-{# Plain field: Rust's FromStr already matches FIX here (see TASKS 3.8b for the types where it doesn't). #}
+{# Plain field: Rust's FromStr already matches FIX here. #}
     /// `{{ f.xml_name }}` (tag {{ f.tag }}, {{ req }}).
     pub fn {{ f.accessor }}(&self) -> Result<{{ f.value_type }}, FieldError> {
         {{ recv }}.get_field::<{{ f.value_type }}>(tags::{{ f.tag_const }})

@@ -15,6 +15,9 @@ use crate::errors::{FieldError, TypedError};
 // same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags;
 
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use rust_decimal::Decimal;
+
 /// Typed facade over a `SequenceReset` [`Message`] (35=4). `new()` stamps the MsgType;
 /// the engine fills the rest of the header (BeginString, CompIDs, MsgSeqNum, SendingTime) and the
 /// trailer when the message is sent.
@@ -73,12 +76,13 @@ impl SequenceReset {
 
     // --- GapFillFlag (tag 123, BOOLEAN, optional) ---
 
-    /// Set `GapFillFlag` (tag 123, optional); written as `Y`/`N`.
+    /// Set `GapFillFlag` (tag 123, optional); written in FIX `BOOLEAN` format.
     pub fn set_gap_fill_flag(&mut self, v: bool) {
-        self.msg.body_mut().set_field(tags::GAP_FILL_FLAG, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::GAP_FILL_FLAG, convert::format_fix_bool(v));
     }
 
-    /// `GapFillFlag` (tag 123, optional). `Err(InvalidFormat)` unless `Y`/`N`.
+    /// `GapFillFlag` (tag 123, optional). `Err(InvalidFormat)` unless a valid FIX
+    /// `BOOLEAN`.
     pub fn gap_fill_flag(&self) -> Result<bool, FieldError> {
         let raw = self.msg.body().get_field::<String>(tags::GAP_FILL_FLAG)?;
         convert::parse_fix_bool(&raw, tags::GAP_FILL_FLAG)

@@ -15,6 +15,9 @@ use crate::errors::{FieldError, TypedError};
 // same field in every FIX version. MsgType (35) lives in the header.
 use crate::tags;
 
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use rust_decimal::Decimal;
+
 /// Typed facade over a `Logon` [`Message`] (35=A). `new()` stamps the MsgType;
 /// the engine fills the rest of the header (BeginString, CompIDs, MsgSeqNum, SendingTime) and the
 /// trailer when the message is sent.
@@ -149,12 +152,13 @@ impl Logon {
 
     // --- ResetSeqNumFlag (tag 141, BOOLEAN, optional) ---
 
-    /// Set `ResetSeqNumFlag` (tag 141, optional); written as `Y`/`N`.
+    /// Set `ResetSeqNumFlag` (tag 141, optional); written in FIX `BOOLEAN` format.
     pub fn set_reset_seq_num_flag(&mut self, v: bool) {
-        self.msg.body_mut().set_field(tags::RESET_SEQ_NUM_FLAG, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::RESET_SEQ_NUM_FLAG, convert::format_fix_bool(v));
     }
 
-    /// `ResetSeqNumFlag` (tag 141, optional). `Err(InvalidFormat)` unless `Y`/`N`.
+    /// `ResetSeqNumFlag` (tag 141, optional). `Err(InvalidFormat)` unless a valid FIX
+    /// `BOOLEAN`.
     pub fn reset_seq_num_flag(&self) -> Result<bool, FieldError> {
         let raw = self.msg.body().get_field::<String>(tags::RESET_SEQ_NUM_FLAG)?;
         convert::parse_fix_bool(&raw, tags::RESET_SEQ_NUM_FLAG)
@@ -186,12 +190,13 @@ impl Logon {
 
     // --- TestMessageIndicator (tag 464, BOOLEAN, optional) ---
 
-    /// Set `TestMessageIndicator` (tag 464, optional); written as `Y`/`N`.
+    /// Set `TestMessageIndicator` (tag 464, optional); written in FIX `BOOLEAN` format.
     pub fn set_test_message_indicator(&mut self, v: bool) {
-        self.msg.body_mut().set_field(tags::TEST_MESSAGE_INDICATOR, convert::fix_bool_str(v));
+        self.msg.body_mut().set_field(tags::TEST_MESSAGE_INDICATOR, convert::format_fix_bool(v));
     }
 
-    /// `TestMessageIndicator` (tag 464, optional). `Err(InvalidFormat)` unless `Y`/`N`.
+    /// `TestMessageIndicator` (tag 464, optional). `Err(InvalidFormat)` unless a valid FIX
+    /// `BOOLEAN`.
     pub fn test_message_indicator(&self) -> Result<bool, FieldError> {
         let raw = self.msg.body().get_field::<String>(tags::TEST_MESSAGE_INDICATOR)?;
         convert::parse_fix_bool(&raw, tags::TEST_MESSAGE_INDICATOR)

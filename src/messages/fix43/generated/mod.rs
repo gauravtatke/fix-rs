@@ -3,6 +3,7 @@ pub mod fields;
 pub mod heartbeat;
 pub mod logon;
 pub mod logout;
+pub mod market_data_snapshot_full_refresh;
 pub mod reject;
 pub mod resend_request;
 pub mod sequence_reset;

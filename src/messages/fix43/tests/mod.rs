@@ -6,3 +6,4 @@
 
 mod fields;
 mod logon;
+mod market_data_snapshot_full_refresh;
