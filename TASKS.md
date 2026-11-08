@@ -330,9 +330,10 @@ references are the golden target the generator must reproduce (diffed by the fre
       generated + tested; nesting checked on MassQuote (3 levels). Typed-value accessors DONE
       (2026-11-07, see 3.8b). **`MarketDataSnapshotFullRefresh` DONE (2026-11-07):** generated
       (filter in `generate()`), 18 wiring tests (each codec, STRING enum, MULTIPLEVALUESTRING,
-      codecs through `NoMDEntries` entry views). **Remaining:** `MarketDataRequest`,
-      `NewOrderSingle`, `ExecutionReport` + tests; 3.9d.
-    - [ ] **3.9d — Runtime MULTIPLEVALUESTRING validation (USER; Claude tests).**
+      codecs through `NoMDEntries` entry views). All messages now generated (3.9c).
+      **Remaining:** focused tests for `MarketDataRequest`, `NewOrderSingle`, `ExecutionReport`.
+    - [x] **3.9d — Runtime MULTIPLEVALUESTRING validation (USER; Claude tests). DONE (2026-11-08,
+      `c3d35d4`).**
       `validate_tag_for_value_range` (`core/message.rs`) checks the whole value against the allowed
       set, so a valid incoming `18=2 9 C` is session-rejected (ValueOutOfRange). For
       MultipleValueString fields split on `' '` and check each code (QFJ
@@ -346,8 +347,12 @@ references are the golden target the generator must reproduce (diffed by the fre
       Clean build has no build-script warnings; 264 engine + 11 codegen tests, freshness, fmt green.
       Pulled ahead of 3.9a: once `tags.rs` was generated nothing else depended on it. CLAUDE.md's
       "Build-time code generation" section replaced by a "Code generation (`codegen/` crate)" one.
-    - [ ] **3.9c — Full dictionary + module org.** Emit all FIX43 messages; organize per
+    - [~] **3.9c — Full dictionary + module org.** Emit all FIX43 messages; organize per
       message/category (not one file); leave a per-version feature-gate hook (single version now).
+      **All 67 messages DONE (2026-11-08):** message filter removed from `generate()`, one file per
+      message (~106k generated lines; incremental build +1 s); compiles warning-free, no name
+      collisions. **Open, optional:** per-category subfolders; feature-gate hook (not needed while
+      FIX43 is the only version).
     - [ ] **3.9e — Deferred (not v1.1 blockers).**
       - *Outgoing validation:* the engine (like QFJ) validates only on parse; validating outbound
         messages against the dictionary is a new feature, not a fix.
