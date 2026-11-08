@@ -971,7 +971,10 @@ fn validate_trailer_field(tag: u32, dd: &DataDictionary) -> SessionResult<()> {
 
 // Enum-membership check: if `tag` declares a set of allowed values in the dictionary, is
 // `value` one of them? -> ValueOutOfRange on a miss. Tags with no declared value set are
-// unconstrained (any value is Ok).
+// unconstrained (any value is Ok). A MultipleValueString value is one or more codes separated
+// by single spaces (`18=2 9 C`): each part must be allowed, so an empty part (double, leading or
+// trailing space) is a miss. QFJ `DataDictionary.isFieldValue` does the same, except Java's
+// `split` drops trailing empty parts, so QFJ accepts a trailing space; we don't.
 fn validate_tag_for_value_range(
     tag: u32,
     value: &String,
@@ -979,7 +982,12 @@ fn validate_tag_for_value_range(
 ) -> SessionResult<()> {
     match dd.get_field_values(tag) {
         Some(value_set) => {
-            if value_set.contains(value) {
+            if matches!(dd.get_field_type(tag), Some(FixType::MultipleValueString)) {
+                if value.split(' ').all(|v| value_set.contains(v)) {
+                    return Ok(());
+                }
+                return Err(SessionRejectError::ValueOutOfRange { tag });
+            } else if value_set.contains(value) {
                 return Ok(());
             }
             Err(SessionRejectError::ValueOutOfRange { tag })
@@ -1321,6 +1329,95 @@ mod message_test {
         let msg = Message::from_str(&soh_replaced_str(logon), &DD);
         assert!(msg.is_err());
         assert_matches!(msg.unwrap_err(), SessionRejectError::ValueOutOfRange { .. });
+    }
+
+    // --- MultipleValueString value range (validate_tag_for_value_range) ---
+    // ExecInst (18) is MULTIPLEVALUESTRING with codes 0-9 / A-Y; SecurityType (167) is a plain
+    // STRING enum. Unit-level against the shared DD; the two msg_test_* cases below prove the
+    // full parse pipeline reaches the check.
+
+    // Positive: one code is the degenerate multi-value case.
+    #[test]
+    fn multi_value_single_code_is_in_range() {
+        assert!(validate_tag_for_value_range(18, &"2".to_string(), &DD).is_ok());
+    }
+
+    // Positive: several space-separated codes, each allowed. Before the fix this was rejected
+    // because the whole string `2 9 C` isn't in the set.
+    #[test]
+    fn multi_value_several_codes_are_in_range() {
+        assert!(validate_tag_for_value_range(18, &"2 9 C".to_string(), &DD).is_ok());
+    }
+
+    // Positive: a repeated code is still only allowed codes (QFJ accepts it too).
+    #[test]
+    fn multi_value_repeated_code_is_in_range() {
+        assert!(validate_tag_for_value_range(18, &"2 2".to_string(), &DD).is_ok());
+    }
+
+    // Negative: one bad code among good ones rejects the field, wherever it sits.
+    #[test]
+    fn multi_value_one_unknown_code_is_out_of_range() {
+        for v in ["Z 2 9", "2 Z 9", "2 9 Z"] {
+            assert_matches!(
+                validate_tag_for_value_range(18, &v.to_string(), &DD),
+                Err(SessionRejectError::ValueOutOfRange { tag: 18 }),
+                "value {v:?}"
+            );
+        }
+    }
+
+    // Negative: codes are case-sensitive (`c` isn't `C`).
+    #[test]
+    fn multi_value_wrong_case_code_is_out_of_range() {
+        assert_matches!(
+            validate_tag_for_value_range(18, &"2 c".to_string(), &DD),
+            Err(SessionRejectError::ValueOutOfRange { tag: 18 })
+        );
+    }
+
+    // Negative: the delimiter is exactly one space. Double, leading and trailing spaces make an
+    // empty part, and a tab isn't a delimiter (`2\t9` is one unknown code). QFJ accepts the
+    // trailing-space case only as a side effect of Java's `split`; we reject it.
+    #[test]
+    fn multi_value_malformed_spacing_is_out_of_range() {
+        for v in ["2  9", " 2 9", "2 9 ", "2\t9", " "] {
+            assert_matches!(
+                validate_tag_for_value_range(18, &v.to_string(), &DD),
+                Err(SessionRejectError::ValueOutOfRange { tag: 18 }),
+                "value {v:?}"
+            );
+        }
+    }
+
+    // Special class: a plain STRING enum is never split, even when each space-separated part is
+    // itself a valid code (`CS` and `CORP` are both SecurityType codes). Guards against the split
+    // applying to every string-valued enum.
+    #[test]
+    fn single_value_string_enum_with_space_is_out_of_range() {
+        assert!(validate_tag_for_value_range(167, &"CS".to_string(), &DD).is_ok());
+        assert_matches!(
+            validate_tag_for_value_range(167, &"CS CORP".to_string(), &DD),
+            Err(SessionRejectError::ValueOutOfRange { tag: 167 })
+        );
+    }
+
+    // End to end: a NewOrderSingle with ExecInst `2 9 C` parses. The fixture carries correct 9/10
+    // and every NewOrderSingle required field, so nothing rejects it before value validation.
+    #[test]
+    fn msg_test_multi_value_exec_inst_is_accepted() {
+        let nos = "8=FIX.4.3|9=131|35=D|34=2|49=BANZAI|52=20261108-09:00:00.000|56=FIXIMULATOR|11=ORD1|21=1|18=2 9 C|55=IBM|54=1|60=20261108-09:00:00.000|38=100|40=1|10=077|";
+        let msg =
+            Message::from_str(&soh_replaced_str(nos), &DD).expect("valid multi-value ExecInst");
+        assert_eq!(msg.get_body_field::<String>(18).unwrap(), "2 9 C");
+    }
+
+    // End to end: the same message with one unknown code (`Z`) is session-rejected on tag 18.
+    #[test]
+    fn msg_test_multi_value_exec_inst_with_unknown_code_is_rejected() {
+        let nos = "8=FIX.4.3|9=131|35=D|34=2|49=BANZAI|52=20261108-09:00:00.000|56=FIXIMULATOR|11=ORD1|21=1|18=2 Z C|55=IBM|54=1|60=20261108-09:00:00.000|38=100|40=1|10=110|";
+        let msg = Message::from_str(&soh_replaced_str(nos), &DD);
+        assert_matches!(msg.unwrap_err(), SessionRejectError::ValueOutOfRange { tag: 18 });
     }
 
     #[test]
