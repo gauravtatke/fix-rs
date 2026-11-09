@@ -316,7 +316,7 @@ references are the golden target the generator must reproduce (diffed by the fre
       ResendRequest/SequenceReset (+ BusinessMessageReject: QFJ marks it `admin`). Done: each has typed accessors + `TryFrom`/`Into`, tests green.
 
 - [~] **3.9 — Groups + app messages + remove the old `build.rs` codegen (USER).**
-    - [~] **3.9a — Groups + app messages.** Extend the parser to repeating groups (nested, via
+    - [x] **3.9a — Groups + app messages. DONE (2026-11-09).** Extend the parser to repeating groups (nested, via
       component refs); emit the group facade in the **`group_scoped` shape** (group view with
       `len`/`get`/`index`/`iter` (+ `_mut`, `index*` panic-on-OOB), instance views with field
       accessors, `set_no_x(n)` + streaming `add_no_x_entry(|e| ..)` on the parent, zero-copy, auto count,
@@ -331,7 +331,10 @@ references are the golden target the generator must reproduce (diffed by the fre
       (2026-11-07, see 3.8b). **`MarketDataSnapshotFullRefresh` DONE (2026-11-07):** generated
       (filter in `generate()`), 18 wiring tests (each codec, STRING enum, MULTIPLEVALUESTRING,
       codecs through `NoMDEntries` entry views). All messages now generated (3.9c).
-      **Remaining:** focused tests for `MarketDataRequest`, `NewOrderSingle`, `ExecutionReport`.
+      **Focused tests DONE (2026-11-09):** `tests/{new_order_single,execution_report,market_data_request}.rs`
+      — built via the facade → serialized → parsed by the engine (`tests::wire_roundtrip`, full
+      inbound validation) → read back; plus received-order fixture, TryFrom wrong-MsgType, required
+      field / group / enum rejects from the parser, nested groups (NoRelatedSym → NoSecurityAltID).
     - [x] **3.9d — Runtime MULTIPLEVALUESTRING validation (USER; Claude tests). DONE (2026-11-08,
       `c3d35d4`).**
       `validate_tag_for_value_range` (`core/message.rs`) checks the whole value against the allowed
@@ -640,6 +643,9 @@ phase order:
 2. **v1.2 — Resend/seq robustness** — message store + ResendRequest / gap fill / sequence-number persistence (the
    too-high-seq path is stubbed across M4/M5/M7). Needs its own breakdown. **v1.0 is cut when this lands.**
 3. **7.6 (b)** — scripted end-to-end TCP simulator (deferred from M7); independent of the phase order.
+4. **Performance benchmarks — once functionally correct** (not before). Not broken down yet; a thorough analysis
+   comes first. Starting point: `session_context/2026-11-09-fix-engine-benchmarking.md` (how QuickFIX, QFJ, Artio,
+   OnixS, Chronicle etc. benchmark; proposed stages A micro / B throughput / C latency / D results doc).
 
 ## M7 — Automatic session-level error responses (post-v1 / v1.1)
 

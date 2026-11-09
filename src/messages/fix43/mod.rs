@@ -1,4 +1,5 @@
-//! FIX 4.3 typed messages — hand-written reference for the code generator (task 3.1).
+//! FIX 4.3 typed messages: one generated facade per FIX 4.3 message (`generated/`), plus the
+//! hand-written tests that check them (`tests/`).
 //!
 //! Per-version module: holds FIX 4.3's typed message facades. Version-neutral pieces live
 //! outside this dir and are shared by every `crate::fixNN` module:
