@@ -23,7 +23,7 @@ pub use generated::*;
 // Flattened public surface (`fix43::Logon`, `fix43::EncryptMethod`); consumed once the app
 // migrates to typed messages (task 3.10), so unused for now.
 #[allow(unused_imports)]
-pub use generated::{fields::EncryptMethod, logon::Logon};
+pub use generated::{fields::EncryptMethod, fix43_message::Fix43Message, logon::Logon};
 
 #[cfg(test)]
 mod tests;

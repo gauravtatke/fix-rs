@@ -106,6 +106,18 @@ pub(crate) fn module_name(xml_name: &str) -> String {
     corrected_snake_case(xml_name)
 }
 
+/// Name of a version's message enum, from its BeginString (`FIX.4.3` -> `Fix43Message`). heck
+/// treats the dots as word breaks, so the version digits run together.
+pub(crate) fn version_enum_name(begin_string: &str) -> String {
+    format!("{}Message", begin_string.to_upper_camel_case())
+}
+
+/// snake_case module / file name for a version's message enum (`FIX.4.3` -> `fix43_message`, i.e.
+/// `generated/fix43_message.rs`): the module named after the type it holds, like a facade's.
+pub(crate) fn version_module_name(begin_string: &str) -> String {
+    version_enum_name(begin_string).to_snake_case()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +194,12 @@ mod tests {
         assert_eq!(group_entry_mut_name("NoPartyIDs"), "NoPartyIdsEntryMut");
         assert_eq!(method_name("NoPartyIDs"), "no_party_ids");
         assert_eq!(group_field_order_const("NoPartyIDs"), "NO_PARTY_IDS_FIELD_ORDER");
+    }
+
+    #[test]
+    fn version_enum_and_module_names_come_from_begin_string() {
+        assert_eq!(version_enum_name("FIX.4.3"), "Fix43Message");
+        assert_eq!(version_module_name("FIX.4.3"), "fix43_message");
+        assert_eq!(version_enum_name("FIX.4.4"), "Fix44Message");
     }
 }

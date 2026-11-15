@@ -12,6 +12,7 @@ pub mod dont_know_trade;
 pub mod email;
 pub mod execution_report;
 pub mod fields;
+pub mod fix43_message;
 pub mod heartbeat;
 pub mod indication_of_interest;
 pub mod list_cancel_request;

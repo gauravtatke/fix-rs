@@ -13,6 +13,7 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("message.rs.j2", include_str!("../templates/message.rs.j2")),
     ("field_methods.rs.j2", include_str!("../templates/field_methods.rs.j2")),
     ("group.rs.j2", include_str!("../templates/group.rs.j2")),
+    ("version_message.rs.j2", include_str!("../templates/version_message.rs.j2")),
 ];
 
 /// The minijinja environment every emitter renders with.
@@ -142,6 +143,27 @@ struct FieldEnumsView {
     begin_string: String,
     /// The fields that get an enum (`enum_name` is `Some`), in dictionary order.
     fields: Vec<FieldView>,
+}
+
+// messages/fixNN/generated/fixNN_message.rs (the version's message enum)
+
+/// Template input for `version_message.rs.j2`: one enum over every message of the version, the
+/// factory/cracker that turns a raw [`Message`] into its typed facade by MsgType (D6).
+#[derive(Debug, Serialize)]
+struct VersionMessageView {
+    /// The enum's name, e.g. `Fix43Message`.
+    enum_name: String,
+    /// One per message, in dictionary order.
+    variants: Vec<VersionMessageVariantView>,
+}
+
+/// One `<Name>(<Name>)` variant of the version's message enum.
+#[derive(Debug, Serialize)]
+struct VersionMessageVariantView {
+    /// The variant and facade struct name, e.g. `NewOrderSingle`.
+    name: String,
+    /// The facade's module under `generated/`, e.g. `new_order_single`.
+    module: String,
 }
 
 // messages/fixNN/generated/<message>.rs (message facades)
@@ -576,6 +598,25 @@ pub(crate) fn emit_message(
         groups,
     };
     render("message.rs.j2", &view)
+}
+
+/// Render the version's message enum (`messages/fixNN/generated/fixNN_message.rs`), e.g.
+/// `Fix43Message`, with a variant per message via `version_message.rs.j2`.
+pub(crate) fn emit_version_message(spec: &FixSpec) -> String {
+    let enum_name = naming::version_enum_name(&spec.begin_string);
+    let variants = spec
+        .messages
+        .iter()
+        .map(|m| VersionMessageVariantView {
+            module: naming::module_name(&m.name),
+            name: m.name.clone(),
+        })
+        .collect();
+    let view = VersionMessageView {
+        enum_name,
+        variants,
+    };
+    render("version_message.rs.j2", &view)
 }
 
 #[cfg(test)]

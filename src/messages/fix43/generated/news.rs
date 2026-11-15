@@ -346,6 +346,13 @@ impl News {
     pub fn message_mut(&mut self) -> &mut Message {
         &mut self.msg
     }
+
+    /// Adopt `msg` without checking its MsgType: for the version's message enum, whose
+    /// `From<Message>` has already matched 35 before wrapping. `pub(super)` keeps it inside
+    /// `generated/`; everything else goes through the checked `TryFrom<Message>`.
+    pub(super) fn wrap(msg: Message) -> Self {
+        Self { msg }
+    }
 }
 
 /// Wire order of a `NoRoutingIds` instance (FIX 4.3 Vol 1 §4: dictionary order, delimiter first):

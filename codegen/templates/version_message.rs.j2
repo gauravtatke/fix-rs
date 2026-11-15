@@ -1,0 +1,53 @@
+{#
+  The version's message enum (D6): one variant per message, wrapping its typed facade, plus
+  `Unknown(Message)` for a MsgType the dictionary doesn't define (or a missing 35). It is both the
+  factory and the cracker: `From<Message>` reads tag 35 once and picks the variant, `match` on the
+  result dispatches. Input: `VersionMessageView` (emitter.rs). Plain `//` and `///` comments below
+  end up in the generated file; Jinja comments (like this one) don't.
+#}
+//! `{{ enum_name }}`: every message of this FIX version as one enum, each variant holding its
+//! typed facade.
+//!
+//! **Generated — do not edit by hand.** Emitted by `cargo run -p codegen`; `cargo test -p codegen`
+//! fails if this file drifts from the generator's output.
+
+{% for variant in variants %}
+use super::{{ variant.module }}::{{ variant.name }};
+{% endfor %}
+use crate::core::message::Message;
+
+/// A received message, typed by its MsgType (35). Build one with `{{ enum_name }}::from(msg)` and
+/// `match` on it; `Message::from(..)` gives the raw message back.
+#[derive(Debug, Clone)]
+pub enum {{enum_name}} {
+    {% for variant in variants %}
+        {{ variant.name }}({{ variant.name }}),
+    {% endfor %}
+    /// A MsgType this dictionary doesn't define, or no MsgType at all: the raw message, unchanged.
+    Unknown(Message),
+}
+
+/// Inbound seam: never fails. MsgType is matched against each facade's `MSG_TYPE` once, so the
+/// facade is built with the unchecked `wrap`; anything else becomes `Unknown`.
+impl From<Message> for {{enum_name}} {
+    fn from(msg: Message) -> Self {
+        match msg.get_msg_type().as_deref() {
+            {% for v in variants %}
+            Ok({{ v.name }}::MSG_TYPE) => Self::{{ v.name }}({{v.name}}::wrap(msg)),
+            {% endfor %}
+            _ => Self::Unknown(msg),
+        }
+    }
+}
+
+/// Outbound seam: the underlying raw `Message`, whichever variant holds it.
+impl From<{{enum_name}}> for Message {
+    fn from(msg: {{enum_name}}) -> Self {
+        match msg {
+            {% for v in variants %}
+            {{enum_name}}::{{v.name}}(m) => m.into(),
+            {% endfor %}
+            {{enum_name}}::Unknown(m) => m,
+        }
+    }
+}

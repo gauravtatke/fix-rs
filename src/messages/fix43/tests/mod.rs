@@ -6,6 +6,7 @@
 
 mod execution_report;
 mod fields;
+mod fix43_message;
 mod logon;
 mod market_data_request;
 mod market_data_snapshot_full_refresh;

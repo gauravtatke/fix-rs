@@ -27,7 +27,9 @@ mod emitter;
 mod naming;
 mod spec;
 
-use crate::emitter::{FieldView, emit_field_enums, emit_message, emit_tags, field_view};
+use crate::emitter::{
+    FieldView, emit_field_enums, emit_message, emit_tags, emit_version_message, field_view,
+};
 use crate::spec::FixSpec;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +68,8 @@ const FIX43_GENERATED: &str = "messages/fix43/generated";
 /// `rustfmt`). Pure and deterministic — stable ordering, no timestamps — so output is diffable.
 ///
 /// Files: `tags.rs` (shared registry at the src root), then under [`FIX43_GENERATED`]:
-/// `fields.rs`, one `<message>.rs` per generated message, and the `mod.rs` index listing them.
+/// `fields.rs`, one `<message>.rs` per message, `fix43_message.rs` (the enum over all of them), and
+/// the `mod.rs` index listing them.
 /// Never emits tests — they are hand-written under `messages/fix43/tests/` (D4c).
 ///
 /// Names: convert XML names through `naming.rs` (corrections first, then `heck`) — never call
@@ -78,7 +81,10 @@ fn generate(spec: &FixSpec, mut sink: impl FnMut(&str, String)) {
     // Keyed by dictionary name — what a message's items refer to fields by.
     let field_views: HashMap<String, FieldView> =
         spec.fields.iter().map(field_view).map(|f| (f.xml_name.clone(), f)).collect();
-    let mut modules = vec!["fields".to_owned()];
+    let version_module = naming::version_module_name(&spec.begin_string);
+    sink(&format!("{FIX43_GENERATED}/{version_module}.rs"), emit_version_message(spec));
+
+    let mut modules = vec!["fields".to_owned(), version_module];
     for msg in spec.messages.iter() {
         let module = naming::module_name(&msg.name);
         sink(&format!("{FIX43_GENERATED}/{module}.rs"), emit_message(spec, msg, &field_views));
