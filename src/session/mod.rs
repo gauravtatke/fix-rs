@@ -310,13 +310,13 @@ impl Session {
     // returns — which frees `self` for the `send_app_message` loop below. This
     // is the whole trick: the app never reaches back into the session, so there
     // is no cycle and no borrow conflict, even though the app lives inside self.
-    fn dispatch_to_app(&mut self, msg_type: &str, msg: &Message) -> Result<(), InboundMsgError> {
+    fn dispatch_to_app(&mut self, msg_type: &str, msg: Message) -> Result<(), InboundMsgError> {
         if is_admin_msg_type(msg_type) {
             // A RejectLogon from the admin callback (app vetoed the logon) is
             // session-fatal, so it still propagates via `?` — next_message
             // classifies it into a Logout + disconnect. Only app-message errors
             // are handled locally below.
-            self.app.on_admin_msg_received(&self.id, msg)?;
+            self.app.on_admin_msg_received(&self.id, &msg)?;
         } else {
             // An error from on_app_msg_received is an APPLICATION-level problem
             // (the counterparty's business message broke the app's contract), not
@@ -326,6 +326,10 @@ impl Session {
             //
             // send_app_message keeps its `?`: a SendError means our own outbound
             // pipe is broken, which IS session-fatal and must propagate.
+            //
+            // The app takes the message by value, so read the seq the reject would
+            // reference now, before the move. (msg_type is a separate &str.)
+            let ref_seq_num = msg.get_header_field::<u32>(34).unwrap_or(0);
             match self.app.on_app_msg_received(&self.id, msg) {
                 Ok(responses) => {
                     for resp in responses {
@@ -338,7 +342,6 @@ impl Session {
                     // outbound pipe is broken → session-fatal, so propagate it (`?`),
                     // same as the Ok-response path above.
                     error!("{}", e);
-                    let ref_seq_num = msg.get_header_field::<u32>(34).unwrap_or(0);
                     self.send_business_msg_reject(ref_seq_num, msg_type, &e)?;
                 }
             }
@@ -409,25 +412,27 @@ impl Session {
     // producing a typed SessionError on failure. Carries NO response policy — it just
     // `?`-propagates errors up to next_message, which classifies and acts on them.
     // App-level messages fall through to verify -> seq check -> dispatch_to_app.
-    fn route_message(&mut self, msg: &mut Message) -> Result<(), InboundMsgError> {
+    fn route_message(&mut self, mut msg: Message) -> Result<(), InboundMsgError> {
         let msg_type =
             msg.get_msg_type().map_err(|_| InboundMsgError::MissingHeaderField { tag: 35 })?;
         match msg_type.as_str() {
-            "A" => self.next_logon(msg),
-            "5" => self.next_logout(msg),
-            "1" => self.next_test_request(msg),
-            "0" => self.next_heartbeat(msg),
+            "A" => self.next_logon(&mut msg),
+            "5" => self.next_logout(&mut msg),
+            "1" => self.next_test_request(&mut msg),
+            "0" => self.next_heartbeat(&mut msg),
             _ => {
-                self.verify_msg(msg)?;
-                self.verify_seq_number(msg)?;
+                self.verify_msg(&mut msg)?;
+                self.verify_seq_number(&mut msg)?;
                 self.dispatch_to_app(&msg_type, msg)?;
                 Ok(())
             }
         }
     }
 
-    // Classify an inbound failure into a FIX response + a read-loop signal.
-    fn on_inbound_error(&mut self, msg: &Message, err: InboundMsgError) -> ControlFlow<()> {
+    // Classify an inbound failure into a FIX response + a read-loop signal. `seq` is
+    // the failed message's MsgSeqNum (0 if absent), read by next_message up front:
+    // the message itself may already have been moved into the application.
+    fn on_inbound_error(&mut self, seq: u32, err: InboundMsgError) -> ControlFlow<()> {
         // A Reject(35=3) is a post-logon concept — there's no session to reject
         // within before logon. So any pre-logon failure is fatal: tear down rather
         // than reject. (This also subsumes the old "bad first message -> disconnect".)
@@ -450,7 +455,6 @@ impl Session {
             // message was still consumed); verify_seq_number never ran on this path,
             // so the seq is bumped exactly once.
             InboundMsgError::MissingHeaderField { tag } => {
-                let seq = msg.get_header_field::<u32>(34).unwrap_or(0);
                 // Log the reason at the session layer for troubleshooting — the
                 // outgoing Reject only carries the tag-373 code, not this text.
                 warn!("{} rejecting message: {}", self.id, err);
@@ -496,10 +500,13 @@ impl Session {
     // correct FIX response and a control signal for the read loop. All the
     // recoverable-vs-fatal *policy* lives here so the acceptor stays dumb: it only
     // learns "keep reading" (Continue) or "this session is done" (Break).
-    pub(crate) fn next_message(&mut self, msg: &mut Message) -> ControlFlow<()> {
+    pub(crate) fn next_message(&mut self, msg: Message) -> ControlFlow<()> {
+        // Routing consumes the message (an app message ends up owned by the
+        // application), so keep the seq any Reject would reference.
+        let seq = msg.get_header_field::<u32>(34).unwrap_or(0);
         match self.route_message(msg) {
             Ok(()) => ControlFlow::Continue(()),
-            Err(err) => self.on_inbound_error(msg, err),
+            Err(err) => self.on_inbound_error(seq, err),
         }
     }
 
@@ -831,7 +838,7 @@ mod session_tests {
         fn on_app_msg_received(
             &mut self,
             _session_id: &SessionId,
-            _message: &Message,
+            _message: Message,
         ) -> Result<Vec<Message>, BusinessMsgReject> {
             self.spy.record("from_app");
             Ok(vec![])
@@ -866,7 +873,7 @@ mod session_tests {
         let msg = Message::new();
 
         for msg_type in &["0", "1", "2", "3", "4", "5", "A"] {
-            session.dispatch_to_app(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, msg.clone()).unwrap();
         }
 
         let calls = app.calls();
@@ -880,7 +887,7 @@ mod session_tests {
         let msg = Message::new();
 
         for msg_type in &["D", "8", "G", "AE"] {
-            session.dispatch_to_app(msg_type, &msg).unwrap();
+            session.dispatch_to_app(msg_type, msg.clone()).unwrap();
         }
 
         let calls = app.calls();
@@ -1494,8 +1501,8 @@ mod session_tests {
     fn test_next_message_app_msg_calls_from_app() {
         let (mut session, _, app) = make_logged_on_session_spy();
 
-        let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        assert_eq!(session.next_message(&mut msg), ControlFlow::Continue(()));
+        let msg = make_msg("D", "TARGET", "SENDER", 1);
+        assert_eq!(session.next_message(msg), ControlFlow::Continue(()));
 
         let calls = app.calls();
         assert_eq!(calls, vec!["from_app"]);
@@ -1505,15 +1512,15 @@ mod session_tests {
     fn test_next_message_app_msg_increments_target_seq_num() {
         let (mut session, _) = make_logged_on_session();
 
-        let mut msg = make_msg("D", "TARGET", "SENDER", 1);
-        assert_eq!(session.next_message(&mut msg), ControlFlow::Continue(()));
+        let msg = make_msg("D", "TARGET", "SENDER", 1);
+        assert_eq!(session.next_message(msg), ControlFlow::Continue(()));
         assert_eq!(session.state.next_target_msg_seq_num, 2);
     }
 
     // --- 7.3c: next_message classify + act (ControlFlow) ---
     //
     // Contract these encode (build the classifier to satisfy them):
-    //   next_message(&mut self, &mut Message) -> ControlFlow<()>
+    //   next_message(&mut self, Message) -> ControlFlow<()>
     //     Continue(()) => keep reading (processed OK, or a recoverable Reject was sent)
     //     Break(())    => session torn down (fatal error, or any pre-logon error)
     //   post-logon MissingHeaderField -> Reject(35=3) w/ RequiredTagMissing, keep alive
@@ -1545,7 +1552,7 @@ mod session_tests {
         fn on_app_msg_received(
             &mut self,
             _s: &SessionId,
-            _m: &Message,
+            _m: Message,
         ) -> Result<Vec<Message>, BusinessMsgReject> {
             Err(BusinessMsgReject::UnknownMessageTye {
                 msg_type: "D".to_string(),
@@ -1575,9 +1582,9 @@ mod session_tests {
     #[test]
     fn test_next_message_recoverable_field_error_rejects_and_continues() {
         let (mut session, mock_state) = make_logged_on_session();
-        let mut msg = make_msg_missing("D", 49); // NewOrderSingle missing SenderCompID
+        let msg = make_msg_missing("D", 49); // NewOrderSingle missing SenderCompID
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Continue(()));
         let sent = mock_state.sent();
@@ -1594,9 +1601,9 @@ mod session_tests {
     #[test]
     fn test_next_message_fatal_error_logs_out_and_disconnects() {
         let (mut session, mock_state) = make_logged_on_session();
-        let mut msg = make_msg("D", "WRONG", "SENDER", 1); // bad SenderCompID
+        let msg = make_msg("D", "WRONG", "SENDER", 1); // bad SenderCompID
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Break(()));
         let sent = mock_state.sent();
@@ -1611,9 +1618,9 @@ mod session_tests {
     fn test_next_message_pre_logon_error_disconnects_without_reject() {
         let (mut session, mock_state) = make_session();
         session.is_active = true; // but logon_received stays false
-        let mut msg = make_msg_missing("A", 49); // Logon missing SenderCompID
+        let msg = make_msg_missing("A", 49); // Logon missing SenderCompID
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -1626,9 +1633,9 @@ mod session_tests {
     #[test]
     fn test_next_message_app_error_business_rejects_without_teardown() {
         let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(FailingApp));
-        let mut msg = make_msg("D", "TARGET", "SENDER", 1); // valid header; app errors
+        let msg = make_msg("D", "TARGET", "SENDER", 1); // valid header; app errors
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Continue(()));
         assert!(!mock_state.is_disconnected());
@@ -1666,7 +1673,7 @@ mod session_tests {
         fn on_app_msg_received(
             &mut self,
             _s: &SessionId,
-            _m: &Message,
+            _m: Message,
         ) -> Result<Vec<Message>, BusinessMsgReject> {
             Ok(vec![])
         }
@@ -1698,9 +1705,9 @@ mod session_tests {
     #[test]
     fn test_next_message_logon_rejected_sends_logout_then_disconnects() {
         let (mut session, mock_state) = make_pre_logon_session_with_app(Box::new(RejectingApp));
-        let mut msg = make_msg("A", "TARGET", "SENDER", 1); // in-sequence Logon
+        let msg = make_msg("A", "TARGET", "SENDER", 1); // in-sequence Logon
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         // Fatal: the session is torn down and logon never completed.
         assert_eq!(flow, ControlFlow::Break(()));
@@ -1730,9 +1737,9 @@ mod session_tests {
     fn test_next_message_logon_compid_mismatch_disconnects_silently() {
         let (mut session, mock_state) = make_session();
         session.is_active = true; // logon_received stays false
-        let mut msg = make_msg("A", "WRONG", "SENDER", 1); // wrong SenderCompID(49)
+        let msg = make_msg("A", "WRONG", "SENDER", 1); // wrong SenderCompID(49)
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2017,9 +2024,9 @@ mod session_tests {
     #[test]
     fn test_next_message_logon_rejected_post_logon_logs_out_gracefully() {
         let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(RejectingApp));
-        let mut msg = make_msg("2", "TARGET", "SENDER", 1); // ResendRequest, in-sequence
+        let msg = make_msg("2", "TARGET", "SENDER", 1); // ResendRequest, in-sequence
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2036,9 +2043,9 @@ mod session_tests {
     fn test_next_message_seq_num_too_low_logs_out_and_disconnects() {
         let (mut session, mock_state) = make_logged_on_session();
         session.state.next_target_msg_seq_num = 5;
-        let mut msg = make_msg("D", "TARGET", "SENDER", 3); // below expected
+        let msg = make_msg("D", "TARGET", "SENDER", 3); // below expected
 
-        let flow = session.next_message(&mut msg);
+        let flow = session.next_message(msg);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2057,9 +2064,7 @@ mod session_tests {
     #[test]
     fn test_on_inbound_error_send_err_is_fatal() {
         let (mut session, mock_state) = make_logged_on_session();
-        let msg = make_msg("D", "TARGET", "SENDER", 1);
-
-        let flow = session.on_inbound_error(&msg, InboundMsgError::SendErr(SendError::NotLoggedOn));
+        let flow = session.on_inbound_error(1, InboundMsgError::SendErr(SendError::NotLoggedOn));
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2074,9 +2079,7 @@ mod session_tests {
     #[test]
     fn test_on_inbound_error_out_of_session_time_pre_logon_is_silent() {
         let (mut session, mock_state) = make_session(); // logon_received stays false
-        let msg = make_msg("A", "TARGET", "SENDER", 1);
-
-        let flow = session.on_inbound_error(&msg, InboundMsgError::OutOfSessionTime);
+        let flow = session.on_inbound_error(1, InboundMsgError::OutOfSessionTime);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2090,9 +2093,7 @@ mod session_tests {
     #[test]
     fn test_on_inbound_error_out_of_session_time_post_logon_is_fatal() {
         let (mut session, mock_state) = make_logged_on_session();
-        let msg = make_msg("D", "TARGET", "SENDER", 1);
-
-        let flow = session.on_inbound_error(&msg, InboundMsgError::OutOfSessionTime);
+        let flow = session.on_inbound_error(1, InboundMsgError::OutOfSessionTime);
 
         assert_eq!(flow, ControlFlow::Break(()));
         assert!(mock_state.is_disconnected());
@@ -2541,7 +2542,7 @@ mod session_tests {
         fn on_app_msg_received(
             &mut self,
             _s: &SessionId,
-            _m: &Message,
+            _m: Message,
         ) -> Result<Vec<Message>, BusinessMsgReject> {
             if self.respond {
                 // MarketDataSnapshotFullRefresh-ish reply to the request.
@@ -2570,6 +2571,101 @@ mod session_tests {
         (session, mock_state)
     }
 
+    // --- 3.10b: on_app_msg_received takes the message by value ---
+    //
+    // The app now owns the inbound message; the session reads what it still needs
+    // (MsgSeqNum for a Reject / BusinessMessageReject, MsgType) before handing it over.
+    // These pin that: the app gets the whole message and can keep it, and the replies
+    // built after the move still reference the right message.
+
+    // App that keeps every app message it receives — something only an owned message
+    // allows without a clone.
+    struct KeepingApp {
+        kept: std::sync::Arc<std::sync::Mutex<Vec<Message>>>,
+    }
+    impl Application for KeepingApp {
+        fn on_create(&mut self, _s: &SessionId) {}
+        fn on_logon(&mut self, _s: &SessionId) {}
+        fn on_logout(&mut self, _s: &SessionId) {}
+        fn on_admin_msg_sending(&mut self, _s: &SessionId, _m: &mut Message) {}
+        fn on_admin_msg_received(
+            &mut self,
+            _s: &SessionId,
+            _m: &Message,
+        ) -> Result<(), RejectLogon> {
+            Ok(())
+        }
+        fn on_app_msg_sending(
+            &mut self,
+            _s: &SessionId,
+            _m: &mut Message,
+        ) -> Result<(), DonotSend> {
+            Ok(())
+        }
+        fn on_app_msg_received(
+            &mut self,
+            _s: &SessionId,
+            m: Message,
+        ) -> Result<Vec<Message>, BusinessMsgReject> {
+            self.kept.lock().unwrap().push(m);
+            Ok(vec![])
+        }
+    }
+
+    // The app receives the inbound message itself — header and body as they arrived —
+    // and still has it after the callback returned.
+    #[test]
+    fn test_app_receives_owned_message_intact() {
+        let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Box::new(KeepingApp { kept: kept.clone() });
+        let (mut session, _) = make_logged_on_session_with_app(app);
+        let mut msg = make_msg("D", "TARGET", "SENDER", 1);
+        msg.set_body_field(11, "ORD-1");
+
+        assert_eq!(session.next_message(msg), ControlFlow::Continue(()));
+
+        let kept = kept.lock().unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].get_msg_type().unwrap(), "D");
+        assert_eq!(kept[0].get_header_field::<u32>(34).unwrap(), 1);
+        assert_eq!(kept[0].get_body_field::<String>(11).unwrap(), "ORD-1");
+    }
+
+    // The BusinessMessageReject is built after the app took the message: RefSeqNum (45)
+    // and RefMsgType (372) must still be the rejected message's. Seq 5, not 1, so a
+    // fallback `0` or a stale value can't pass by accident.
+    #[test]
+    fn test_business_reject_references_message_moved_into_app() {
+        let (mut session, mock_state) = make_logged_on_session_with_app(Box::new(FailingApp));
+        session.state.next_target_msg_seq_num = 5;
+        let msg = make_msg("D", "TARGET", "SENDER", 5);
+
+        assert_eq!(session.next_message(msg), ControlFlow::Continue(()));
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "j"));
+        assert!(sent_message_contains(&sent[0], 45, "5"));
+        assert!(sent_message_contains(&sent[0], 372, "D"));
+    }
+
+    // next_message reads MsgSeqNum before routing consumes the message; a session
+    // Reject raised during routing still carries it as RefSeqNum (45).
+    #[test]
+    fn test_reject_references_seq_read_before_routing() {
+        let (mut session, mock_state) = make_logged_on_session();
+        session.state.next_target_msg_seq_num = 5;
+        let mut msg = make_msg_missing("D", 49); // SenderCompID missing → Reject
+        msg.set_header_field(34, "5");
+
+        assert_eq!(session.next_message(msg), ControlFlow::Continue(()));
+
+        let sent = mock_state.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent_message_contains(&sent[0], 35, "3"));
+        assert!(sent_message_contains(&sent[0], 45, "5"));
+    }
+
     // Request/response: inbound app message → app RETURNS a response → the engine
     // sends it. No back-reference into the session, no channels.
     #[test]
@@ -2577,8 +2673,8 @@ mod session_tests {
         let app = Box::new(ScriptedApp::new(VecDeque::new(), true, false));
         let (mut session, mock_state) = make_logged_on_session_with_app(app);
 
-        let mut req = make_msg("V", "TARGET", "SENDER", 1); // MarketDataRequest
-        assert_eq!(session.next_message(&mut req), ControlFlow::Continue(()));
+        let req = make_msg("V", "TARGET", "SENDER", 1); // MarketDataRequest
+        assert_eq!(session.next_message(req), ControlFlow::Continue(()));
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
@@ -2615,8 +2711,8 @@ mod session_tests {
         let (mut session, mock_state) = make_logged_on_session_with_app(app);
         let seq_before = session.state.next_sender_msg_seq_num;
 
-        let mut req = make_msg("V", "TARGET", "SENDER", 1);
-        assert_eq!(session.next_message(&mut req), ControlFlow::Continue(()));
+        let req = make_msg("V", "TARGET", "SENDER", 1);
+        assert_eq!(session.next_message(req), ControlFlow::Continue(()));
 
         assert!(mock_state.sent().is_empty());
         assert_eq!(session.state.next_sender_msg_seq_num, seq_before);
@@ -2642,8 +2738,8 @@ mod session_tests {
             md.set_header_field(35, "W"); // MarketDataSnapshot
             feed_map.send(&feed_id, md).unwrap();
         })
-        .join()
-        .unwrap();
+            .join()
+            .unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);

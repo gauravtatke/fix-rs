@@ -141,7 +141,7 @@ impl Application for SampleApp {
     fn on_app_msg_received(
         &mut self,
         session_id: &SessionId,
-        message: &Message,
+        message: Message,
     ) -> Result<Vec<Message>, BusinessMsgReject> {
         // MsgType(35) is guaranteed: from_str requires it, and next_message routed
         // on it to reach us.
@@ -217,7 +217,7 @@ mod sample_app_tests {
         let mut app = SampleApp::new();
         let req = market_data_request("REQ-1", "EUR/USD");
 
-        let responses = app.on_app_msg_received(&sid(), &req).unwrap();
+        let responses = app.on_app_msg_received(&sid(), req).unwrap();
 
         assert_eq!(responses.len(), 1);
         let resp = &responses[0];
@@ -234,7 +234,7 @@ mod sample_app_tests {
         let mut app = SampleApp::new();
         let req = market_data_request("REQ-2", "GBP/USD");
 
-        let responses = app.on_app_msg_received(&sid(), &req).unwrap();
+        let responses = app.on_app_msg_received(&sid(), req).unwrap();
         let resp = &responses[0];
 
         let entries = resp.body().get_group(268).expect("NoMDEntries group present");
@@ -256,7 +256,7 @@ mod sample_app_tests {
         let mut other = Message::new();
         other.set_header_field(35, "8");
 
-        let responses = app.on_app_msg_received(&sid(), &other).unwrap();
+        let responses = app.on_app_msg_received(&sid(), other).unwrap();
         assert!(responses.is_empty());
     }
 
@@ -273,7 +273,7 @@ mod sample_app_tests {
         req.set_header_field(35, "V");
         req.set_body_field(262, "REQ-3"); // has 262, no top-level 55
 
-        let err = app.on_app_msg_received(&sid(), &req).unwrap_err();
+        let err = app.on_app_msg_received(&sid(), req).unwrap_err();
         assert!(matches!(err, BusinessMsgReject::MissingConditionallyRequiredField { tag: 55 }));
     }
 
@@ -300,7 +300,7 @@ mod sample_app_tests {
         let mut app = SampleApp::new();
         let order = new_order_single("ORD-1", "1", "AAPL", "100");
 
-        let responses = app.on_app_msg_received(&sid(), &order).unwrap();
+        let responses = app.on_app_msg_received(&sid(), order).unwrap();
         assert_eq!(responses.len(), 2);
 
         // --- index 0: New ack ---

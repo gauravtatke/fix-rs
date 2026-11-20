@@ -377,9 +377,12 @@ references are the golden target the generator must reproduce (diffed by the fre
       `MSG_TYPE` const and build with `pub(super) fn wrap`; `From<Fix43Message> for Message` back;
       re-exported as `fix43::Fix43Message`. Tests in `tests/fix43_message.rs`, variants checked
       against the XML's 67 `<message>`s.
-    - [ ] **3.10b — `on_app_msg_received(…, message: Message)`.** Session reads MsgSeqNum + MsgType
+    - [x] **3.10b — `on_app_msg_received(…, message: Message)`.** Session reads MsgSeqNum + MsgType
       before handing the message over (BusinessMessageReject path); admin callback unchanged. Update
       `DefaultApplication`, SampleApp, test mocks.
+      **DONE:** ownership end to end (`next_message` / `route_message` / `dispatch_to_app` take
+      `Message`; `on_inbound_error` takes the seq read up front). Tests: app keeps the owned
+      message; BusinessMessageReject and Reject still reference the moved message's seq.
     - [ ] **3.10c — Migrate SampleApp** to `Fix43Message` + typed builders (D → New ack + Fill
       ExecutionReports, V → MarketDataSnapshotFullRefresh); unhandled → UnsupportedMessageType.
       Decide the V handler's top-level Symbol(55) "simulator contract" vs NoRelatedSym (check

@@ -43,11 +43,11 @@ pub(crate) fn run_connection(
 // socket. Crate-internal only; not part of any external API.
 pub(crate) fn process_inbound_msg(session: &mut Session, msg_str: &str) -> ControlFlow<()> {
     match Message::from_str(msg_str, session.data_dict()) {
-        Ok(mut msg) => {
+        Ok(msg) => {
             // next_message has already applied any FIX response (Reject /
             // Logout + disconnect) internally; we only read its signal.
             // Break => session torn down, stop reading; Continue => keep going.
-            session.next_message(&mut msg)
+            session.next_message(msg)
         }
         Err(reason) if reason.is_garbled() => {
             // Garbled (bad body length / checksum): drop it — a garbled

@@ -35,7 +35,7 @@ pub trait Application: Send {
     fn on_app_msg_received(
         &mut self,
         session_id: &SessionId,
-        message: &Message,
+        message: Message,
     ) -> Result<Vec<Message>, BusinessMsgReject>;
 
     // Unsolicited outbound seam. The engine polls this each timer tick; the app
@@ -80,7 +80,7 @@ impl Application for DefaultApplication {
     fn on_app_msg_received(
         &mut self,
         session_id: &SessionId,
-        message: &Message,
+        message: Message,
     ) -> Result<Vec<Message>, BusinessMsgReject> {
         Ok(vec![])
     }
@@ -102,6 +102,6 @@ mod application_tests {
         app.on_admin_msg_sending(&sid, &mut msg);
         assert!(app.on_admin_msg_received(&sid, &msg).is_ok());
         assert!(app.on_app_msg_sending(&sid, &mut msg).is_ok());
-        assert!(app.on_app_msg_received(&sid, &msg).is_ok());
+        assert!(app.on_app_msg_received(&sid, msg).is_ok());
     }
 }

@@ -89,7 +89,7 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
 fn establish_session(session: &mut Session, stream: TcpStream, raw: &str) -> ControlFlow<()> {
     session.set_responder(Some(Box::new(TcpResponder::new(stream))));
     match Message::from_str(raw, session.data_dict()) {
-        Ok(mut first_msg) => session.next_message(&mut first_msg),
+        Ok(first_msg) => session.next_message(first_msg),
         Err(reason) => {
             // A malformed first message can't establish a session — there is no
             // logon to reject. Log the reason (our only record, since this is no

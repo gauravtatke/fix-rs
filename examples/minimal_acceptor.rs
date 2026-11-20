@@ -48,7 +48,7 @@ impl Application for MyApp {
     fn on_app_msg_received(
         &mut self,
         _sid: &SessionId,
-        msg: &Message,
+        msg: Message,
     ) -> Result<Vec<Message>, BusinessMsgReject> {
         match msg.get_header_field::<String>(35).as_deref() {
             // NewOrderSingle (35=D) -> ExecutionReport (35=8) "New" ack (body abbreviated).
