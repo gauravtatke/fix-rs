@@ -61,7 +61,7 @@ fn handle_connection(stream: TcpStream, session_map: SessionMap) -> Result<(), B
         info!("No session found for {}, dropping connection from {}", reverse_id, peer_addr);
         return Ok(());
     };
-    info!("{} incoming: {}", reverse_id, connection::wire_display(&first_msg_str));
+    info!("{} incoming: {}", reverse_id, message::wire_display(&first_msg_str));
     // Establish the session from the first (Logon) message under a single lock.
     // On Break the first message failed (malformed, or a fatal/rejected logon) and
     // the session is already disconnected — close out (reusing the same guard, so

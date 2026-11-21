@@ -25,7 +25,7 @@ pub(crate) fn run_connection(
     peer_addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
     while let Ok(msg_str) = reader.read_message() {
-        info!("{} incoming: {}", session_id, wire_display(&msg_str));
+        info!("{} incoming: {}", session_id, message::wire_display(&msg_str));
         let mut session = s_arc.lock().unwrap();
         // Break => session already torn down inside next_message; stop reading.
         // The tail close_connection logs the close and disconnects (idempotent).
@@ -75,8 +75,4 @@ pub(crate) fn process_inbound_msg(session: &mut Session, msg_str: &str) -> Contr
 pub(crate) fn close_connection(session: &mut Session, addr: SocketAddr) {
     info!("{} event: Connection closed ({})", session.id(), addr);
     session.disconnect();
-}
-
-pub(crate) fn wire_display(raw: &str) -> String {
-    raw.replace('\x01', "|")
 }

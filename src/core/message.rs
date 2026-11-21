@@ -585,6 +585,13 @@ pub(crate) fn reverse_session_id_from_raw(s: &str) -> SessionId {
 }
 
 // Pulls MsgSeqNum(34) straight out of the raw wire string, without a full parse.
+// A raw wire string made readable for logs: SOH (0x01) delimiters shown as `|`.
+// Shared by the inbound (transport) and outbound (session) message logs so both
+// directions print the same way.
+pub(crate) fn wire_display(raw: &str) -> String {
+    raw.replace('\x01', "|")
+}
+
 // Used to fill a Reject's RefSeqNum(45) when parsing failed (so no `Message`
 // exists) — returns `None` if the tag is absent (e.g. a message too malformed to
 // contain it). Mirrors session_id_from_raw's use of extract_field_value.

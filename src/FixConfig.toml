@@ -9,11 +9,13 @@ begin_string = "FIX.4.3"
 data_dictionary = "resources/FIX43.xml"
 
 [[Session]]
-connection_type = "initiator"
-sender_comp_id = "BANZAI"
-target_comp_id = "EXEC"
-socket_connect_host = "127.0.0.1"
-socket_connect_port = 9879
+connection_type = "acceptor"
+#connection_type = "initiator"
+sender_comp_id = "EXEC"
+target_comp_id = "BANZAI"
+# socket_connect_host = "127.0.0.1"
+# socket_connect_port = 9879
+socket_accept_port = 9879
 heartbeat_interval = 5
 reset_on_logon = true
 reconnect_interval = 5

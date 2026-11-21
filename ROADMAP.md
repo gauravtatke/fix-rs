@@ -88,8 +88,8 @@ architecture where the Rust tech stack calls for it.
 
 **The v1 phase is complete** — M1, M2, M4, M5, and M6 are all done, and the two post-v1 milestones that fold into the v1
 phase are done too: M7 (automatic session-level error responses, except one deferred sub-task) and M8 (initiator support
-+ auto-reconnect, live-verified). M3 (typed message codegen) is **not** part of the v1 phase — it is now the **v1.1**
-phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robustness). Per-task detail lives in
++ auto-reconnect, live-verified). **The v1.1 phase (M3, typed message codegen) is complete too.** Next toward the
+**v1.0 release** is v1.2 (protocol robustness). Per-task detail lives in
 `TASKS.md` (kept on the dev branch).
 
 - **M1 (message/dictionary layer hardening) is done.** Tasks 1.1–1.6 complete. `Message`/`FieldMap` parsing is fully
@@ -98,11 +98,11 @@ phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robust
   emit it either).
 - **M2 (config rewrite) is done.** `toml`+`serde` based config with default/session merge. Hand-rolled parser deleted.
   14 config tests.
-- **M3 (typed message codegen) is in progress — it is the v1.1 phase.** A standalone generator (`codegen/` crate,
-  committed output; the old build-time codegen is removed) emits the tag registry and per-field value enums so far; next
-  are per-message-type structs (`Logon`, `NewOrderSingle`, …) with typed accessors, matching the roadmap's two-layer goal.
-  The v1 phase shipped on the raw `Message` API instead; M3 is the next phase toward the v1.0 release, not a blocker for
-  what already works.
+- **M3 (typed message codegen) is done — the v1.1 phase.** A standalone generator (`codegen/` crate, committed output
+  guarded by a freshness test; the old build-time codegen is removed) emits the tag registry, per-field value enums, a
+  typed facade for every FIX43 message (typed accessors, `Decimal` money, chrono times, repeating-group views) and the
+  `Fix43Message` enum that turns a raw `Message` into its typed facade by MsgType. Application messages reach the app
+  by value. `SampleApp` uses the typed layer end-to-end, live-verified against QFJ Banzai.
 - **M4 (session state machine) is done.** `SessionState`, `SessionId`, `Application` trait, `Responder` trait,
   `Session::verify`, admin message builders (`generate_logon`/`logout`/`heartbeat`/`test_request`), inbound dispatch
   (`next_message`), and timer logic (`next_tick`). All testable without real sockets via `MockResponder`.
@@ -123,11 +123,9 @@ phase. Next toward the **v1.0 release** is v1.1 (M3), then v1.2 (protocol robust
 
 ## What's open next
 
-The v1 phase is done; the remaining phases lead to the **v1.0 release**, in order:
+The v1 and v1.1 phases are done; what remains leads to the **v1.0 release**:
 
-- **v1.1 — M3 typed message codegen** (next up). Biggest architectural piece and the roadmap's two-layer shape; heavy on
-  Rust-learning (codegen, trait design). Broken into concrete tasks in TASKS.md (M3, 3.0–3.10).
-- **v1.2 — protocol robustness.** Message store + ResendRequest / gap fill / sequence-number persistence. Biggest
+- **v1.2 — protocol robustness** (next up). Message store + ResendRequest / gap fill / sequence-number persistence. Biggest
   *functional* gap: the too-high-seq path is stubbed across M4/M5/M7 (currently just logs a warning). **v1.0 releases
   when this lands.**
 - **7.6 (b)** — scripted TCP simulator for true end-to-end coverage of the acceptor/IO seam (deferred from M7;

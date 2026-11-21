@@ -10,7 +10,7 @@ pub use settings::*;
 
 use crate::application::Application;
 use crate::core::dictionary::DataDictionary;
-use crate::core::message::Message;
+use crate::core::message::{self, Message};
 use crate::errors::{BusinessMsgReject, InboundMsgError, SendError, SessionRejectError};
 use crate::session::schedule::SessionSchedule;
 use getset::{CopyGetters, Getters, Setters};
@@ -219,7 +219,7 @@ impl Session {
         msg.set_body_len();
         msg.set_checksum();
         let wire = msg.to_string();
-        info!("{} outgoing: {}", self.id, wire.replace('\x01', "|"));
+        info!("{} outgoing: {}", self.id, message::wire_display(&wire));
         self.responder.as_ref().unwrap().send(&wire);
         self.state.incr_next_sender_msg_seq_num();
         self.state.last_sent_time = Instant::now();
