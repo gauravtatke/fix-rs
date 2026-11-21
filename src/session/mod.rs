@@ -2738,8 +2738,8 @@ mod session_tests {
             md.set_header_field(35, "W"); // MarketDataSnapshot
             feed_map.send(&feed_id, md).unwrap();
         })
-            .join()
-            .unwrap();
+        .join()
+        .unwrap();
 
         let sent = mock_state.sent();
         assert_eq!(sent.len(), 1);
